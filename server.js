@@ -320,7 +320,7 @@ setInterval(() => {
     sendFeishuMsg('📊 资金费率定时推送', `当前价格: ${state.currentPrice}\n实时费率: ${(state.realTimeRate*100).toFixed(4)}%\n1小时累计: ${(state.rate1h*100).toFixed(4)}%\n日线累计: ${(state.rateDaily*100).toFixed(4)}%`);
 }, 4 * 60 * 60 * 1000);
 
-app.listen(3000, () => {
-    console.log('量化盯盘服务已启动: http://localhost:3000');
+app.listen(3001, () => {
+    console.log('量化盯盘服务已启动: http://localhost:3001');
     console.log('配置规则: 假突破/假跌破策略 | 90秒轮询 | 严格防重复开仓');
 });
