@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>BTCUSDT 量化盯盘控制台 (假突破/跌破策略)</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <h1>BTCUSDT 量化盯盘控制台</h1>
+    
+    <div class="grid">
+        <div class="card">
+            <h3>⚙️ 触发策略及交易配置 (铁律：一经锁定不可更改)</h3>
+            <div class="input-group">
+                <label>阻力价格 (假突破开空用): </label>
+                <input type="number" id="resistancePrice" placeholder="例如: 70000">
+            </div>
+            <div class="input-group">
+                <label>支撑价格 (假跌破开多用): </label>
+                <input type="number" id="supportPrice" placeholder="例如: 60000">
+            </div>
+            <div class="input-group">
+                <label>交易 Webhook 地址:</label>
+                <input type="text" id="webhookUrl" placeholder="https://...">
+            </div>
+            <div class="input-group">
+                <label>做空 JSON 报文 (支持 {{timenow}} 变量):</label>
+                <textarea id="shortPayload" rows="4" placeholder='{ "action": "open_short", "symbol": "BTCUSDT" }'></textarea>
+            </div>
+            <div class="input-group">
+                <label>做多 JSON 报文 (支持 {{timenow}} 变量):</label>
+                <textarea id="longPayload" rows="4" placeholder='{ "action": "open_long", "symbol": "BTCUSDT" }'></textarea>
+            </div>
+            <div style="display: flex; gap: 12px; margin-top: 10px;">
+                <button onclick="setConfig()" id="saveBtn">保存配置并锁定</button>
+                <button onclick="resetConfig()" id="resetBtn" style="background: linear-gradient(135deg, #ef4444, #b91c1c);">修改配置 / 重置状态 (解锁)</button>
+            </div>
+            <p id="configStatus"></p>
+        </div>
+
+        <div class="card">
+            <h3>📊 当前计算数据</h3>
+            <div class="data-grid">
+                <div class="data-box highlight">
+                    <div class="data-label">最新实时价格</div>
+                    <div class="data-value price-text" id="currentPrice">--</div>
+                </div>
+                <div class="data-box">
+                    <div class="data-label">策略状态</div>
+                    <div class="data-value" id="strategyStatus">加载中...</div>
+                </div>
+                <div class="data-box">
+                    <div class="data-label">实时资金费率</div>
+                    <div class="data-value" id="currentRate">--</div>
+                </div>
+                <div class="data-box">
+                    <div class="data-label">1小时累计费率</div>
+                    <div class="data-value" id="rate1h">--</div>
+                </div>
+                <div class="data-box">
+                    <div class="data-label">日线累计费率</div>
+                    <div class="data-value" id="rateDaily">--</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="grid">
+        <div class="card chart-container">
+            <h3>📈 8小时资金费率历史 (币安结算)</h3>
+            <div id="chart8h" class="chart"></div>
+        </div>
+        <div class="card chart-container">
+            <h3>📉 实时预测费率走势 (近90分钟)</h3>
+            <div id="chart1h" class="chart"></div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
