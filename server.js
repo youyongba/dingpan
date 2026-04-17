@@ -8,7 +8,12 @@ app.use(express.json());
 app.use(express.static('public'));
 
 // ================= 配置与状态 =================
-const FEISHU_WEBHOOK = 'https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_FEISHU_WEBHOOK_HERE'; // 替换为你的飞书Webhook
+const FEISHU_APP_ID = 'cli_a968a722e4bb1cd3';
+const FEISHU_APP_SECRET = 'ouYoFfNmCN7UsJKpHkpubeXMWJVbUFVU';
+// 【必填】接收消息的目标类型 (可选: email, user_id, chat_id)
+const FEISHU_RECEIVE_ID_TYPE = 'ou_b7b65c6625c7122f6975ee7ea8039708'; 
+// 【必填】对应的接收目标 (请填入你在飞书的登录邮箱，或群聊的 chat_id)
+const FEISHU_RECEIVE_ID = 'oc_7d4999b7bfb5508c201ebfc9831fbf83'; 
 
 let state = {
     resistancePrice: null, // 阻力价格 (假突破开空用)
@@ -33,24 +38,50 @@ let state = {
 };
 
 // ================= 飞书通知模块 =================
-async function sendFeishuMsg(title, text, isAlert = false) {
-    if (!FEISHU_WEBHOOK || FEISHU_WEBHOOK.includes('YOUR_FEISHU')) return;
+let feishuToken = '';
+let feishuTokenExpire = 0;
+
+async function getFeishuToken() {
+    if (feishuToken && Date.now() < feishuTokenExpire) return feishuToken;
     try {
-        let payload;
-        if (isAlert) {
-            payload = {
-                msg_type: "post",
-                content: { post: { zh_cn: { title: title, content: [[{ tag: "text", text: text }]] } } }
-            };
-        } else {
-            payload = {
-                msg_type: "text",
-                content: { text: `${title}\n${text}` }
-            };
+        const res = await axios.post('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
+            app_id: FEISHU_APP_ID,
+            app_secret: FEISHU_APP_SECRET
+        });
+        if (res.data.code === 0) {
+            feishuToken = res.data.tenant_access_token;
+            feishuTokenExpire = Date.now() + (res.data.expire * 1000) - 60000; // 提前一分钟过期
+            return feishuToken;
         }
-        await axios.post(FEISHU_WEBHOOK, payload);
+    } catch (e) {
+        console.error('获取飞书 Token 失败:', e.message);
+    }
+    return null;
+}
+
+async function sendFeishuMsg(title, text, isAlert = false) {
+    if (!FEISHU_RECEIVE_ID || FEISHU_RECEIVE_ID.includes('YOUR_')) {
+        console.log(`[飞书通知跳过] 未配置接收人 (FEISHU_RECEIVE_ID): ${title}`);
+        return;
+    }
+    const token = await getFeishuToken();
+    if (!token) return;
+
+    try {
+        let msgType = isAlert ? "post" : "text";
+        let contentStr = isAlert 
+            ? JSON.stringify({ zh_cn: { title: title, content: [[{ tag: "text", text: text }]] } })
+            : JSON.stringify({ text: `${title}\n${text}` });
+
+        await axios.post(`https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=${FEISHU_RECEIVE_ID_TYPE}`, {
+            receive_id: FEISHU_RECEIVE_ID,
+            msg_type: msgType,
+            content: contentStr
+        }, {
+            headers: { Authorization: `Bearer ${token}` }
+        });
     } catch (err) {
-        console.error('飞书通知发送失败:', err.message);
+        console.error('飞书通知发送失败:', err.response?.data?.msg || err.message);
     }
 }
 
