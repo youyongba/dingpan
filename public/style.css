@@ -45,6 +45,10 @@ h3 {
     margin-bottom: 24px;
 }
 
+.grid.single {
+    grid-template-columns: 1fr;
+}
+
 .card {
     background: #11141d;
     padding: 24px;

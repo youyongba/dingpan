@@ -2,58 +2,14 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>BTCUSDT 量化盯盘控制台 (假突破/跌破策略)</title>
+    <title>BTCUSDT 资金费率盯盘</title>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <h1>BTCUSDT 量化盯盘控制台</h1>
+    <h1>BTCUSDT 资金费率盯盘 (纯盯盘模式)</h1>
 
-    <div class="grid">
-        <div class="card">
-            <h3>⚙️ 触发策略及交易配置 (铁律：一经锁定不可更改)</h3>
-
-            <div class="input-group">
-                <label>接口鉴权 Token (X-Auth-Token, 仅保存/解锁时需要):</label>
-                <input type="password" id="authToken" placeholder="与服务端 CONFIG_AUTH_TOKEN 一致">
-            </div>
-
-            <div class="input-group">
-                <label>阻力价格 (假突破开空用, 必须 &gt; 支撑价):</label>
-                <input type="number" id="resistancePrice" placeholder="例如: 70000">
-            </div>
-            <div class="input-group">
-                <label>支撑价格 (假跌破开多用, 必须 &lt; 阻力价):</label>
-                <input type="number" id="supportPrice" placeholder="例如: 60000">
-            </div>
-            <div class="input-group">
-                <label>交易 Webhook 地址 (http/https):</label>
-                <input type="text" id="webhookUrl" placeholder="https://...">
-            </div>
-            <div class="input-group">
-                <label>做空 JSON 报文 (支持 {{timenow}} 变量, 建议包含 action: open_short):</label>
-                <textarea id="shortPayload" rows="4" placeholder='{ "action": "open_short", "symbol": "BTCUSDT" }'></textarea>
-            </div>
-            <div class="input-group">
-                <label>做多 JSON 报文 (支持 {{timenow}} 变量, 建议包含 action: open_long):</label>
-                <textarea id="longPayload" rows="4" placeholder='{ "action": "open_long", "symbol": "BTCUSDT" }'></textarea>
-            </div>
-            <div class="input-group" style="flex-direction: row; align-items: center; gap: 8px;">
-                <input type="checkbox" id="confirmRisk" style="width: auto;">
-                <label for="confirmRisk" style="margin-bottom: 0;">我已确认多/空报文未填反 (当两边均无 action 字段时必须勾选)</label>
-            </div>
-            <div class="input-group" style="flex-direction: row; align-items: center; gap: 8px;">
-                <input type="checkbox" id="clearHistory" style="width: auto;">
-                <label for="clearHistory" style="margin-bottom: 0;">解锁时清空图表历史数据 (默认保留)</label>
-            </div>
-
-            <div style="display: flex; gap: 12px; margin-top: 10px;">
-                <button onclick="setConfig()" id="saveBtn">保存配置并锁定</button>
-                <button onclick="resetConfig()" id="resetBtn" style="background: linear-gradient(135deg, #ef4444, #b91c1c);">修改配置 / 重置状态 (解锁)</button>
-            </div>
-            <p id="configStatus"></p>
-        </div>
-
+    <div class="grid single">
         <div class="card">
             <h3>📊 当前计算数据</h3>
             <div class="data-grid">
@@ -61,13 +17,9 @@
                     <div class="data-label">最新实时价格</div>
                     <div class="data-value price-text" id="currentPrice">--</div>
                 </div>
-                <div class="data-box">
-                    <div class="data-label">策略状态</div>
-                    <div class="data-value" id="strategyStatus">加载中...</div>
-                </div>
 
                 <div class="data-box highlight">
-                    <div class="data-label">🎯 近 1H 瞬时费率情绪 (日内超短线铁律)</div>
+                    <div class="data-label">🎯 近 1H 瞬时费率情绪 (核心信号)</div>
                     <div class="data-value" id="rate1hDirection">--</div>
                     <div class="data-label" style="margin-top: 8px; font-size: 11px; text-transform: none;" id="rate1hDetail">等待数据...</div>
                 </div>
@@ -89,7 +41,14 @@
                     <div class="data-value" id="rateDailySettled">--</div>
                 </div>
             </div>
-            <p id="orderInfo" style="margin-top: 16px; text-align: center; font-size: 13px;"></p>
+
+            <div style="margin-top: 20px; display: flex; gap: 12px; align-items: center;">
+                <input type="password" id="authToken" placeholder="X-Auth-Token (仅清空历史时需要)" style="flex: 1;">
+                <button onclick="resetHistory()" id="resetBtn" style="background: linear-gradient(135deg, #ef4444, #b91c1c); width: auto; padding: 12px 20px; margin: 0; white-space: nowrap;">
+                    清空历史数据
+                </button>
+            </div>
+            <p id="statusHint" style="margin-top: 12px; font-size: 12px; color: #64748b; text-align: center;"></p>
         </div>
     </div>
 
@@ -106,7 +65,7 @@
 
     <div class="grid">
         <div class="card chart-container" style="grid-column: 1 / -1;">
-            <h3>🎯 近 1H 瞬时费率均值走势 (日内情绪曲线 · 最近 6 小时) <span style="font-size: 12px; color: #94a3b8; font-weight: 400;">正值 = 多头拥挤可做空 · 负值 = 空头拥挤可做多</span></h3>
+            <h3>🎯 近 1H 瞬时费率均值走势 (日内情绪曲线 · 最近 6 小时) <span style="font-size: 12px; color: #94a3b8; font-weight: 400;">正值 = 多头拥挤 · 负值 = 空头拥挤</span></h3>
             <div id="chart1hAvg" class="chart"></div>
         </div>
     </div>
