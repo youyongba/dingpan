@@ -1,6 +1,6 @@
 {
   "name": "btc-monitor",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "BTCUSDT Quant Monitor - Fake Breakout Strategy",
   "main": "server.js",
   "scripts": {
@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "axios": "^1.6.8",
+    "dotenv": "^16.6.1",
     "express": "^4.19.2",
     "moment": "^2.30.1"
   }
