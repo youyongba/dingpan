@@ -11,6 +11,7 @@
 const express = require('express');
 const axios = require('axios');
 const path = require('path');
+const fs = require('fs');
 
 const router = express.Router();
 
@@ -40,27 +41,90 @@ let cache = {
 };
 
 // ---------------------- 飞书通知（依赖注入）----------------------
+// notifier 签名: (title, body, opts)
+//   opts.rich: Array<Array<Segment>>  富文本行（每行段数组），Segment={ text, bold?, italic? }
+//   opts.isAlert: 旧式 alert（退化为 text/post 简单格式）
 let notifier = null;
 function setNotifier(fn) {
   if (typeof fn === 'function') notifier = fn;
 }
-function notify(title, text, isAlert = false) {
+function notifyText(title, text, isAlert = false) {
   if (!NOTIFY.enabled) return;
   if (notifier) {
-    try { notifier(title, text, isAlert); }
+    try { notifier(title, text, { isAlert }); }
     catch (e) { console.error('[regime] notifier 抛错:', e.message); }
   } else {
     console.log(`[regime/notify] ${isAlert ? '⚠️ ' : ''}${title}\n${text}`);
   }
 }
+function notifyRich(title, lines) {
+  if (!NOTIFY.enabled) return;
+  if (notifier) {
+    try { notifier(title, null, { rich: lines }); }
+    catch (e) { console.error('[regime] notifier(rich) 抛错:', e.message); }
+  } else {
+    console.log(`[regime/notify-rich] ${title}`);
+    lines.forEach(line => console.log('  ' + line.map(s => (s.bold ? `**${s.text}**` : s.text)).join('')));
+  }
+}
 
-// 通知状态机：用于"变化才告警"的去重
+// ---------------------- 资金费率数据注入（可选）----------------------
+let fundingProvider = null;
+function setFundingProvider(fn) {
+  if (typeof fn === 'function') fundingProvider = fn;
+}
+function safeFunding() {
+  if (!fundingProvider) return null;
+  try { return fundingProvider(); } catch (e) { return null; }
+}
+
+// ---------------------- 通知状态机（含磁盘持久化）----------------------
+// 交易动作三态：LONG / NEUTRAL / SHORT
+// 相同动作连续不重复推送；进程重启后恢复，避免冗余推送
 const notifyState = {
-  lastRegime: null,
+  lastTradeAction: null,   // null / 'LONG' / 'NEUTRAL' / 'SHORT'
   startupSent: false,
   consecutiveFailures: 0,
   failureAlerted: false,
 };
+
+// 配置项: 状态持久化文件路径
+const NOTIFY_STATE_FILE = process.env.REGIME_NOTIFY_STATE_PATH
+  || path.join(__dirname, 'data', 'regime_notify_state.json');
+
+function loadNotifyState() {
+  try {
+    const raw = fs.readFileSync(NOTIFY_STATE_FILE, 'utf8');
+    const obj = JSON.parse(raw);
+    if (obj && ['LONG', 'NEUTRAL', 'SHORT'].includes(obj.lastTradeAction)) {
+      notifyState.lastTradeAction = obj.lastTradeAction;
+    }
+    if (obj && obj.startupSent === true) {
+      notifyState.startupSent = true;
+    }
+    console.log(`[regime] 通知状态已恢复: lastTradeAction=${notifyState.lastTradeAction}, startupSent=${notifyState.startupSent}`);
+  } catch (e) { /* 文件不存在则忽略 */ }
+}
+function saveNotifyState() {
+  try {
+    const dir = path.dirname(NOTIFY_STATE_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(NOTIFY_STATE_FILE, JSON.stringify({
+      lastTradeAction: notifyState.lastTradeAction,
+      startupSent: notifyState.startupSent,
+      savedAt: new Date().toISOString(),
+    }, null, 2));
+  } catch (e) { console.error('[regime] saveNotifyState 失败:', e.message); }
+}
+loadNotifyState();
+
+/** 从 tradePlan 派生三态动作 */
+function getTradeAction(plan) {
+  if (!plan) return null;
+  if (plan.ok && plan.direction === 'long')  return 'LONG';
+  if (plan.ok && plan.direction === 'short') return 'SHORT';
+  return 'NEUTRAL';
+}
 
 function regimeEmoji(r) {
   return ({ TREND: '📈', RANGE: '🔁', PANIC: '🚨', NEUTRAL: '➖' })[r] || '🟢';
@@ -68,14 +132,8 @@ function regimeEmoji(r) {
 function fmt(n, d = 2) {
   return n == null || !isFinite(n) ? '--' : Number(n).toFixed(d);
 }
-function buildIndicatorsText(reg, lastClose) {
-  const m = reg.metrics || {};
-  return [
-    `判定依据: ${reg.desc || '--'}`,
-    `Close: ${fmt(lastClose)}`,
-    `ADX: ${fmt(m.adx)}   +DI: ${fmt(m.plusDI)}   -DI: ${fmt(m.minusDI)}`,
-    `HV(年化): ${fmt(m.hv)}%   分位带: [${fmt(m.hvLow)}%, ${fmt(m.hvHigh)}%]`,
-  ].join('\n');
+function fmtPct(n) {
+  return n == null || !isFinite(n) ? '--' : (n * 100).toFixed(4) + '%';
 }
 
 // ---------------------- 工具函数 ----------------------
@@ -369,7 +427,7 @@ function buildTradePlan(ind, regime, klines) {
   };
 }
 
-function buildTradePlanText(plan) {
+function _legacy_buildTradePlanText_unused(plan) {
   if (!plan || !plan.ok) {
     return `📋 交易计划: ${plan?.action === 'wait' ? '🟡 观望' : '— 暂无'}\n${plan?.reason || ''}`;
   }
@@ -436,49 +494,157 @@ async function refresh() {
   }
 }
 
-function handleNotificationsOnSuccess(prevRegime, currentRegime, klines, tradePlan) {
+// ---------------------- 富文本消息构造器 ----------------------
+function buildPlanRichLines(plan, regime, klines) {
   const lastClose = klines.length ? klines[klines.length - 1].close : null;
+  const m = regime?.metrics || {};
+  const lines = [];
+  lines.push([{ text: '⏰ 推送时间：', bold: true }, { text: new Date().toLocaleString() }]);
+  lines.push([{ text: '📊 当前状态：', bold: true }, {
+    text: plan.direction === 'long' ? '做多 (LONG)' : '做空 (SHORT)',
+    bold: true,
+  }]);
+  lines.push([{ text: '🎯 当前价：', bold: true }, { text: String(plan.currentPrice) }]);
+  lines.push([{ text: '━━━━━ 交易参数 ━━━━━' }]);
+  lines.push([{ text: '🚪 入场价：', bold: true }, { text: String(plan.entry), bold: true }, { text: '   (回踩 0.5×ATR)' }]);
+  lines.push([{ text: '🛡️ 止损价：', bold: true }, { text: String(plan.stopLoss), bold: true }, { text: `   (-${plan.riskPct}%，1.5×ATR)` }]);
+  lines.push([{ text: '🎯 TP1：', bold: true }, { text: String(plan.takeProfits[0].price), bold: true },
+    { text: `   (+${plan.takeProfits[0].gainPct}% · 1R · 平 ${plan.takeProfits[0].closePct}%)` }]);
+  lines.push([{ text: '🎯 TP2：', bold: true }, { text: String(plan.takeProfits[1].price), bold: true },
+    { text: `   (+${plan.takeProfits[1].gainPct}% · 2R · 平 ${plan.takeProfits[1].closePct}%)` }]);
+  lines.push([{ text: '🎯 TP3：', bold: true }, { text: String(plan.takeProfits[2].price), bold: true },
+    { text: `   (+${plan.takeProfits[2].gainPct}% · 3R · 平 ${plan.takeProfits[2].closePct}%)` }]);
+  lines.push([{ text: '💼 仓位建议：', bold: true }, { text: plan.suggestedPositionPct + '%', bold: true }]);
+  lines.push([{ text: '🎖️ 置信度：', bold: true }, { text: plan.confidenceLabel, bold: true }]);
+  lines.push([{ text: '━━━━━ 指标依据 ━━━━━' }]);
+  lines.push([{ text: '判定依据：', bold: true }, { text: plan.basis }]);
+  lines.push([{ text: `Regime: ${regime.label} · ADX: ${fmt(m.adx)} · +DI/-DI: ${fmt(m.plusDI)}/${fmt(m.minusDI)}` }]);
+  lines.push([{ text: `HV: ${fmt(m.hv)}% · ATR: ${fmt(plan.riskPerUnit / 1.5)} · Close: ${fmt(lastClose)}` }]);
+  lines.push([{ text: '⚠️ 仅作建议，系统为纯盯盘模式不会自动下单', italic: true }]);
+  return lines;
+}
 
+function buildNeutralRichLines(prevAction, regime, klines) {
+  const lastClose = klines.length ? klines[klines.length - 1].close : null;
+  const fromLabel = prevAction === 'LONG' ? '做多' : prevAction === 'SHORT' ? '做空' : '—';
+  const hint = prevAction === 'LONG' ? '做多信号已结束，当前转为观望状态'
+             : prevAction === 'SHORT' ? '做空信号已结束，当前转为观望状态'
+             : '当前无明确交易信号';
+  return [
+    [{ text: '⏰ 推送时间：', bold: true }, { text: new Date().toLocaleString() }],
+    [{ text: '📊 当前状态：', bold: true }, { text: '🟡 观望 (NEUTRAL)', bold: true }],
+    [{ text: '🔄 状态切换：', bold: true }, { text: `${fromLabel} → 观望` }],
+    [{ text: '💬 ' }, { text: hint, bold: true }],
+    [{ text: '🎯 当前价：', bold: true }, { text: fmt(lastClose) }],
+    [{ text: '📊 Regime：', bold: true }, { text: regime?.label || '--' }],
+    [{ text: '⚠️ 建议：平掉既有仓位或收紧止损，等待下一次明确信号', italic: true }],
+  ];
+}
+
+function buildSnapshotRichLines(regime, klines, indicators, tradePlan, fundingData) {
+  const lastIdx = klines.length - 1;
+  const lastClose = klines[lastIdx]?.close;
+  const m = regime?.metrics || {};
+  const atr = indicators.atr[lastIdx];
+  const adx = indicators.adx[lastIdx];
+  const hv = indicators.hv[lastIdx];
+  const roc = indicators.roc[lastIdx];
+  const slope = indicators.slope[lastIdx];
+
+  const lines = [
+    [{ text: '⏰ 推送时间：', bold: true }, { text: new Date().toLocaleString() }],
+    [{ text: '📊 当前 Regime：', bold: true }, { text: regime?.label || '--', bold: true },
+      { text: `  (${regime?.desc || ''})` }],
+    [{ text: '━━━━━ 技术指标 ━━━━━' }],
+    [{ text: '💰 最新价格：', bold: true }, { text: fmt(lastClose) }],
+    [{ text: '📏 ATR(14)：', bold: true }, { text: fmt(atr) }],
+    [{ text: '💪 ADX(14)：', bold: true }, { text: fmt(adx) }, { text: `   +DI/-DI: ${fmt(m.plusDI)}/${fmt(m.minusDI)}` }],
+    [{ text: '🌡️ HV(年化)：', bold: true }, { text: fmt(hv) + '%' }, { text: `   分位带 [${fmt(m.hvLow)}%, ${fmt(m.hvHigh)}%]` }],
+    [{ text: '⚡ ROC(14)：', bold: true }, { text: fmt(roc) + '%' }],
+    [{ text: '📐 Slope：', bold: true }, { text: fmt(slope) + ' $/h' }],
+  ];
+
+  // 资金费率数据（若 server.js 注入了 fundingProvider）
+  if (fundingData) {
+    const fp = fundingData;
+    const dirLabel = ({
+      long_crowded: '多头拥挤',
+      short_crowded: '空头拥挤',
+      neutral: '中性',
+      warming_up: '暖机中',
+    })[fp.rate1hDirection] || fp.rate1hDirection || '--';
+    lines.push([{ text: '━━━━━ 资金费率 ━━━━━' }]);
+    lines.push([{ text: '📈 近 1H 均值：', bold: true }, { text: fp.fmtPct ? fp.fmtPct(fp.rate1hAvg) : fmtPct(fp.rate1hAvg) },
+      { text: `   (情绪: ${dirLabel})` }]);
+    lines.push([{ text: '💵 瞬时预测：', bold: true }, { text: fp.fmtPct ? fp.fmtPct(fp.predictedFundingRate) : fmtPct(fp.predictedFundingRate) }]);
+    lines.push([{ text: '💵 上期已结算：', bold: true }, { text: fp.fmtPct ? fp.fmtPct(fp.lastSettledFundingRate) : fmtPct(fp.lastSettledFundingRate) }]);
+  }
+
+  // 交易计划参数
+  lines.push([{ text: '━━━━━ 交易计划 ━━━━━' }]);
+  if (tradePlan && tradePlan.ok) {
+    lines.push([{ text: '🎬 动作：', bold: true }, {
+      text: tradePlan.direction === 'long' ? '做多 (LONG)' : '做空 (SHORT)', bold: true
+    }]);
+    lines.push([{ text: '🚪 入场价：', bold: true }, { text: String(tradePlan.entry), bold: true }]);
+    lines.push([{ text: '🛡️ 止损价：', bold: true }, { text: String(tradePlan.stopLoss), bold: true },
+      { text: `   (-${tradePlan.riskPct}%)` }]);
+    lines.push([{ text: '🎯 TP1：', bold: true }, { text: String(tradePlan.takeProfits[0].price), bold: true },
+      { text: `   +${tradePlan.takeProfits[0].gainPct}% · 平 ${tradePlan.takeProfits[0].closePct}%` }]);
+    lines.push([{ text: '🎯 TP2：', bold: true }, { text: String(tradePlan.takeProfits[1].price), bold: true },
+      { text: `   +${tradePlan.takeProfits[1].gainPct}% · 平 ${tradePlan.takeProfits[1].closePct}%` }]);
+    lines.push([{ text: '🎯 TP3：', bold: true }, { text: String(tradePlan.takeProfits[2].price), bold: true },
+      { text: `   +${tradePlan.takeProfits[2].gainPct}% · 平 ${tradePlan.takeProfits[2].closePct}%` }]);
+    lines.push([{ text: '💼 仓位建议：', bold: true }, { text: tradePlan.suggestedPositionPct + '%', bold: true }]);
+    lines.push([{ text: '🎖️ 置信度：', bold: true }, { text: tradePlan.confidenceLabel, bold: true }]);
+  } else {
+    lines.push([{ text: '🎬 动作：', bold: true }, { text: '🟡 观望 (NEUTRAL)', bold: true }]);
+    lines.push([{ text: '原因：', bold: true }, { text: tradePlan?.reason || '信号不足' }]);
+  }
+  return lines;
+}
+
+// ---------------------- 通知触发（状态机）----------------------
+function handleNotificationsOnSuccess(prevRegime, currentRegime, klines, tradePlan) {
   // 1) 失败恢复
   if (notifyState.failureAlerted) {
-    notify(
-      '✅ Regime 监控已恢复',
-      `Binance 行情拉取已恢复, 连续失败 ${notifyState.consecutiveFailures} 次后恢复正常。\n` +
-        `当前 Regime: ${currentRegime.label}`,
-      false,
-    );
+    notifyRich('✅ Regime 监控已恢复', [
+      [{ text: '⏰ 恢复时间：', bold: true }, { text: new Date().toLocaleString() }],
+      [{ text: '状态：', bold: true }, { text: `连续失败 ${notifyState.consecutiveFailures} 次后已恢复正常` }],
+      [{ text: '当前 Regime：', bold: true }, { text: currentRegime.label }],
+    ]);
     notifyState.failureAlerted = false;
   }
   notifyState.consecutiveFailures = 0;
 
-  // 2) 启动首次成功
-  if (!notifyState.startupSent && NOTIFY.notifyOnStartup) {
+  // 2) 启动首次成功：不再单独发消息（由 server.js 启动监听时统一发简洁启动通知）
+  //    但需初始化 startupSent + lastTradeAction 状态, 以便后续正确比对
+  const action = getTradeAction(tradePlan);
+  if (!notifyState.startupSent) {
     notifyState.startupSent = true;
-    notifyState.lastRegime = currentRegime.regime;
-    notify(
-      `${regimeEmoji(currentRegime.regime)} Regime 监控已启动 (${currentRegime.label})`,
-      `BTC/USDT 1H 宏观状态监控就绪。\n${buildIndicatorsText(currentRegime, lastClose)}\n\n${buildTradePlanText(tradePlan)}`,
-      false,
-    );
+    notifyState.lastTradeAction = action;
+    saveNotifyState();
     return;
   }
 
-  // 3) regime 切换通知（核心）
-  if (currentRegime.regime && currentRegime.regime !== notifyState.lastRegime) {
-    const fromLabel = notifyState.lastRegime
-      ? `${regimeLabel(notifyState.lastRegime)} → `
-      : '';
-    notify(
-      `${regimeEmoji(currentRegime.regime)} 市场状态切换: ${fromLabel}${currentRegime.label}`,
-      `${buildIndicatorsText(currentRegime, lastClose)}\n\n${buildTradePlanText(tradePlan)}`,
-      currentRegime.regime === 'PANIC',
-    );
-    notifyState.lastRegime = currentRegime.regime;
+  // 3) 交易动作状态切换（核心）
+  if (action && action !== notifyState.lastTradeAction) {
+    const prev = notifyState.lastTradeAction;
+    if (action === 'LONG') {
+      notifyRich('📈 交易信号：转为做多 (LONG)', buildPlanRichLines(tradePlan, currentRegime, klines));
+    } else if (action === 'SHORT') {
+      notifyRich('📉 交易信号：转为做空 (SHORT)', buildPlanRichLines(tradePlan, currentRegime, klines));
+    } else if (action === 'NEUTRAL') {
+      const title = prev === 'LONG'
+        ? '🟡 交易信号：做多结束 → 观望'
+        : prev === 'SHORT'
+          ? '🟡 交易信号：做空结束 → 观望'
+          : '🟡 交易信号：观望';
+      notifyRich(title, buildNeutralRichLines(prev, currentRegime, klines));
+    }
+    notifyState.lastTradeAction = action;
+    saveNotifyState();
   }
-}
-
-function regimeLabel(r) {
-  return ({ TREND: '趋势市', RANGE: '震荡市', PANIC: '恐慌市', NEUTRAL: '中性市' })[r] || r;
 }
 
 function handleNotificationsOnFailure(errMsg) {
@@ -488,13 +654,28 @@ function handleNotificationsOnFailure(errMsg) {
     notifyState.consecutiveFailures >= NOTIFY.failuresBeforeAlert
   ) {
     notifyState.failureAlerted = true;
-    notify(
-      '⚠️ Regime 监控连续拉取失败',
-      `已连续 ${notifyState.consecutiveFailures} 次从 Binance 拉取数据失败:\n${errMsg}\n` +
-        `恢复后将自动通知。`,
-      true,
-    );
+    notifyRich('⚠️ Regime 监控连续拉取失败', [
+      [{ text: '⏰ 告警时间：', bold: true }, { text: new Date().toLocaleString() }],
+      [{ text: '失败次数：', bold: true }, { text: String(notifyState.consecutiveFailures) }],
+      [{ text: '错误信息：', bold: true }, { text: errMsg || '--' }],
+      [{ text: '说明：', bold: true }, { text: '恢复后将自动通知' }],
+    ]);
   }
+}
+
+// ---------------------- 手动刷新强制推送 ----------------------
+/** 无视状态机直接推送【手动刷新 · 市场快照】完整信息 */
+function notifyManualRefresh() {
+  if (!cache.indicators || !cache.regime) {
+    notifyText('【手动刷新 · 市场快照】', '数据尚未就绪，无法推送快照。');
+    return;
+  }
+  const fundingData = safeFunding();
+  notifyRich('【手动刷新 · 市场快照】',
+    buildSnapshotRichLines(cache.regime, cache.klines, cache.indicators, cache.tradePlan, fundingData));
+  // 同步 lastTradeAction, 避免手动刷后紧接着的自动周期又重发一次切换消息
+  notifyState.lastTradeAction = getTradeAction(cache.tradePlan);
+  saveNotifyState();
 }
 
 // 启动即拉取，并定时刷新
@@ -579,10 +760,11 @@ router.get('/snapshot', (req, res) => {
   });
 });
 
-// 手动触发刷新（调试用）
+// 手动触发刷新 —— 同时强制推送【手动刷新 · 市场快照】飞书消息
 router.post('/refresh', async (req, res) => {
   await refresh();
-  res.json({ ok: !cache.error, error: cache.error, updatedAt: cache.updatedAt });
+  if (!cache.error) notifyManualRefresh();
+  res.json({ ok: !cache.error, error: cache.error, updatedAt: cache.updatedAt, pushed: !cache.error });
 });
 
 // 静态页面：访问 /api/regime/page 即可看到 Chart.js 面板
@@ -590,4 +772,4 @@ router.get('/page', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'regime.html'));
 });
 
-module.exports = { router, setNotifier };
+module.exports = { router, setNotifier, setFundingProvider };

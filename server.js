@@ -3,6 +3,8 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const moment = require('moment');
+const fs = require('fs');
+const path = require('path');
 const regimeMod = require('./regimeModule');
 
 // ================= 环境变量与常量 =================
@@ -53,9 +55,26 @@ app.use(express.static('public'));
 app.use('/api/regime', regimeMod.router);
 // 直接访问 /regime 即跳转到面板
 app.get('/regime', (req, res) => res.redirect('/api/regime/page'));
-// 依赖注入：把 server.js 内现成的 sendFeishuMsg 注入给 regime 模块
-// lazy wrapper 避免 sendFeishuMsg 声明顺序问题
-regimeMod.setNotifier((title, text, isAlert) => sendFeishuMsg(title, text, isAlert));
+// 依赖注入：飞书通知（支持富文本 rich / 纯文本 / alert）
+// lazy wrapper 避免声明顺序问题
+regimeMod.setNotifier((title, body, opts = {}) => {
+    if (opts && Array.isArray(opts.rich)) {
+        sendFeishuRichMsg(title, opts.rich);
+    } else {
+        sendFeishuMsg(title, body, !!(opts && opts.isAlert));
+    }
+});
+// 注入资金费率数据 getter，供 regime 模块构造"手动刷新全量快照"消息
+regimeMod.setFundingProvider(() => ({
+    rate1hAvg: state.rate1hAvg,
+    rate1hSamples: state.rate1hSamples,
+    rate1hDirection: state.rate1hDirection,
+    stableDirection: state.stableDirection,
+    predictedFundingRate: state.predictedFundingRate,
+    lastSettledFundingRate: state.lastSettledFundingRate,
+    currentPrice: state.currentPrice,
+    fmtPct: fmtPctMaybe,
+}));
 // ================= 运行态 =================
 let state = {
     historyData: [],      // 币安8小时已结算费率历史 (60 条)
@@ -76,6 +95,10 @@ let state = {
     stableDirection: 'warming_up',
     pendingDirection: null,
     pendingDirectionCount: 0,
+
+    // 费率均值穿 0 轴检测（只记多/空，neutral 不更新，避免抖动重复推送）
+    // null | 'LONG_CROWD' | 'SHORT_CROWD'
+    lastCrowdedSignal: null,
 
     // 当前行情
     currentPrice: 0,
@@ -183,6 +206,74 @@ function sendFeishuMsg(title, text, isAlert = false) {
     feishuQueue = feishuQueue
         .then(() => feishuSendImpl(title, text, isAlert))
         .catch(e => console.error('飞书队列异常:', e.message))
+        .finally(() => { feishuQueueDepth--; });
+}
+
+// ================= 飞书富文本 (post) 消息发送（支持加粗高亮 + 多段多行） =================
+/**
+ * contentLines 格式：Array<Array<Segment>>  每个子数组代表一行。
+ * Segment: { text: string, bold?: boolean, color?: string }
+ * 例：
+ *   [
+ *     [{text:'入场:', bold:true}, {text:' 74783.35'}],
+ *     [{text:'止损:', bold:true}, {text:' 75463.89'}]
+ *   ]
+ */
+async function feishuSendRichImpl(title, contentLines, retry = 2) {
+    if (!FEISHU_RECEIVE_ID || !FEISHU_RECEIVE_ID_TYPE || !VALID_RECEIVE_TYPES.includes(FEISHU_RECEIVE_ID_TYPE)) {
+        console.log(`[飞书通知跳过] 未正确配置接收方 (type=${FEISHU_RECEIVE_ID_TYPE}): ${title}`);
+        return;
+    }
+    const token = await getFeishuToken();
+    if (!token) return;
+
+    // 转 Feishu post content 结构
+    const post_content = contentLines.map(line =>
+        (line.length ? line : [{ text: ' ' }]).map(seg => {
+            const node = { tag: 'text', text: String(seg.text ?? '') };
+            const style = [];
+            if (seg.bold) style.push('bold');
+            if (seg.italic) style.push('italic');
+            if (style.length) node.style = style;
+            return node;
+        })
+    );
+
+    const contentStr = JSON.stringify({ zh_cn: { title, content: post_content } });
+    let lastErr = null;
+    for (let attempt = 0; attempt <= retry; attempt++) {
+        try {
+            const resp = await axios.post(
+                `https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=${FEISHU_RECEIVE_ID_TYPE}`,
+                { receive_id: FEISHU_RECEIVE_ID, msg_type: 'post', content: contentStr },
+                { headers: { Authorization: `Bearer ${token}` }, timeout: 10000 }
+            );
+            if (resp.data && resp.data.code !== 0) {
+                console.error('飞书富文本业务错误:', resp.data);
+                lastErr = new Error(`biz=${resp.data.code}`);
+                // 99991663/99991664 token 过期类错误才重试
+                if (![99991663, 99991664].includes(resp.data.code)) return;
+            } else {
+                return; // 成功
+            }
+        } catch (err) {
+            lastErr = err;
+            console.error(`飞书富文本第 ${attempt + 1} 次发送失败:`, err.response?.data?.msg || err.message);
+        }
+        if (attempt < retry) await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
+    }
+    if (lastErr) console.error('飞书富文本最终失败:', lastErr.message);
+}
+
+function sendFeishuRichMsg(title, contentLines) {
+    if (feishuQueueDepth >= FEISHU_QUEUE_MAX_DEPTH) {
+        console.warn(`[飞书队列溢出] 已有 ${feishuQueueDepth} 条 pending, 丢弃富文本: ${title}`);
+        return;
+    }
+    feishuQueueDepth++;
+    feishuQueue = feishuQueue
+        .then(() => feishuSendRichImpl(title, contentLines))
+        .catch(e => console.error('飞书富文本队列异常:', e.message))
         .finally(() => { feishuQueueDepth--; });
 }
 
@@ -330,6 +421,9 @@ async function fetchBinanceData() {
                 state.pendingDirectionCount = 0;
                 const trigger = fromDirection === 'warming_up' ? 'initial' : 'direction_change';
                 heartbeat(trigger, fromDirection);
+
+                // 穿 0 轴检测（资金费率均值从负转正 / 正转负）
+                detectRate1hCross(analysis.direction, rate1hAvgInclCurrent);
             }
         } else {
             state.pendingDirection = null;
@@ -402,6 +496,82 @@ app.post('/api/reset', authMiddleware, (req, res) => {
     res.json({ success: true });
 });
 
+// ================= 资金费率穿 0 轴检测（含状态持久化） =================
+// 配置项: 状态持久化文件路径
+const FUNDING_STATE_FILE = process.env.FUNDING_NOTIFY_STATE_PATH
+    || path.join(__dirname, 'data', 'funding_notify_state.json');
+
+function loadFundingNotifyState() {
+    try {
+        const raw = fs.readFileSync(FUNDING_STATE_FILE, 'utf8');
+        const obj = JSON.parse(raw);
+        if (obj && (obj.lastCrowdedSignal === 'LONG_CROWD' || obj.lastCrowdedSignal === 'SHORT_CROWD')) {
+            state.lastCrowdedSignal = obj.lastCrowdedSignal;
+            console.log(`[state] 资金费率通知状态已恢复: lastCrowdedSignal=${obj.lastCrowdedSignal}`);
+        }
+    } catch (e) { /* 文件不存在则忽略 */ }
+}
+function saveFundingNotifyState() {
+    try {
+        const dir = path.dirname(FUNDING_STATE_FILE);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(FUNDING_STATE_FILE, JSON.stringify({
+            lastCrowdedSignal: state.lastCrowdedSignal,
+            savedAt: new Date().toISOString(),
+        }, null, 2));
+    } catch (e) { console.error('[state] saveFundingNotifyState 失败:', e.message); }
+}
+loadFundingNotifyState();
+
+/**
+ * 只在"多头拥挤 ↔ 空头拥挤"之间切换时发穿轴消息（含经 neutral 中转）。
+ * 首次确立 crowded 信号不推送（因为没有"从"的方向）。
+ * 仅在穿 0 轴的瞬间推送一次，相同方向连续不重复。
+ */
+function detectRate1hCross(newDirection, rate1hAvg) {
+    let changed = false;
+    if (newDirection === 'long_crowded') {
+        if (state.lastCrowdedSignal === 'SHORT_CROWD') {
+            sendCrowdedCrossMsg('up', rate1hAvg);
+        }
+        if (state.lastCrowdedSignal !== 'LONG_CROWD') {
+            state.lastCrowdedSignal = 'LONG_CROWD';
+            changed = true;
+        }
+    } else if (newDirection === 'short_crowded') {
+        if (state.lastCrowdedSignal === 'LONG_CROWD') {
+            sendCrowdedCrossMsg('down', rate1hAvg);
+        }
+        if (state.lastCrowdedSignal !== 'SHORT_CROWD') {
+            state.lastCrowdedSignal = 'SHORT_CROWD';
+            changed = true;
+        }
+    }
+    // neutral / warming_up: 不更新 lastCrowdedSignal, 也不推送
+    if (changed) saveFundingNotifyState();
+}
+
+function sendCrowdedCrossMsg(direction, rate1hAvg) {
+    const isUp = direction === 'up';
+    const title = isUp
+        ? '🔥 资金费率信号：多头拥挤（向上穿 0 轴）'
+        : '💨 资金费率信号：空头拥挤（向下穿 0 轴）';
+    const crossDir = isUp ? '从负转正' : '从正转负';
+    const interpretation = isUp
+        ? '资金费率由负转正，多头开始付费给空头 → 情绪偏多；若后续继续攀升需警惕多头过度拥挤引发的反向猎杀。'
+        : '资金费率由正转负，空头开始付费给多头 → 情绪偏空；若后续继续走低需警惕空头过度拥挤引发的反向猎杀。';
+
+    sendFeishuRichMsg(title, [
+        [{ text: '⏰ 推送时间：', bold: true }, { text: new Date().toLocaleString() }],
+        [{ text: '📊 当前状态：', bold: true }, { text: isUp ? '多头拥挤' : '空头拥挤' }],
+        [{ text: '📐 穿轴方向：', bold: true }, { text: crossDir + '（近 1H 瞬时费率均值）' }],
+        [{ text: '🎯 当前 1H 均值：', bold: true }, { text: fmtPctMaybe(rate1hAvg) }],
+        [{ text: '💵 瞬时预测费率：', bold: true }, { text: fmtPctMaybe(state.predictedFundingRate) }],
+        [{ text: '💵 上期已结算：', bold: true }, { text: fmtPctMaybe(state.lastSettledFundingRate) }],
+        [{ text: '💡 解读：', bold: true }, { text: interpretation }],
+    ]);
+}
+
 // ================= 心跳 =================
 async function heartbeat(trigger = 'periodic', fromDirection = null) {
     if (state.predictedFundingRate === null) {
@@ -451,8 +621,10 @@ app.listen(PORT, () => {
     console.log(
         `规则: ${POLL_INTERVAL_MS / 1000}s 轮询 | 近1H均值拥挤阈值 ${(RATE1H_MIN_ABS * 100).toFixed(4)}% | 方向变化防抖 ${DIRECTION_CHANGE_CONFIRM} 次 | 心跳 ${HEARTBEAT_INTERVAL_MS / 60000} 分钟`
     );
-    sendFeishuMsg(
-        '✅ 盯盘服务已上线',
-        `端口: ${PORT}\n模式: 纯盯盘 (不做交易)\n策略: 近 1H 均值拥挤方向 + 方向变化时飞书告警`
-    );
+    sendFeishuRichMsg('✅ BTC/USDT 量化监控系统已启动成功', [
+        [{ text: '⏰ 启动时间：', bold: true }, { text: new Date().toLocaleString() }],
+        [{ text: '🚪 监听端口：', bold: true }, { text: String(PORT) }],
+        [{ text: '📊 监控内容：', bold: true }, { text: '资金费率穿轴 · 宏观 Regime · 交易计划' }],
+        [{ text: '🧭 模式：', bold: true }, { text: '纯盯盘（不自动下单）' }],
+    ]);
 });
