@@ -3,6 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const moment = require('moment');
+const regimeMod = require('./regimeModule');
 
 // ================= 环境变量与常量 =================
 const PORT = parseInt(process.env.PORT, 10) || 3001;
@@ -31,6 +32,8 @@ const HEARTBEAT_INTERVAL_MS = 60 * 60 * 1000;
 // 方向变化防抖: 新方向要连续 N 次才触发告警
 const DIRECTION_CHANGE_CONFIRM = 2;
 
+
+
 // 启动时的环境校验
 if (!FEISHU_APP_ID || !FEISHU_APP_SECRET || !FEISHU_RECEIVE_ID || !FEISHU_RECEIVE_ID_TYPE) {
     console.warn('⚠️  飞书相关环境变量未完全配置，飞书告警将被静默跳过。');
@@ -46,6 +49,13 @@ const app = express();
 app.use(express.json());
 app.use(express.static('public'));
 
+// === Regime 监控（独立模块）：JSON 接口 + Chart.js 面板 + 飞书通知 ===
+app.use('/api/regime', regimeMod.router);
+// 直接访问 /regime 即跳转到面板
+app.get('/regime', (req, res) => res.redirect('/api/regime/page'));
+// 依赖注入：把 server.js 内现成的 sendFeishuMsg 注入给 regime 模块
+// lazy wrapper 避免 sendFeishuMsg 声明顺序问题
+regimeMod.setNotifier((title, text, isAlert) => sendFeishuMsg(title, text, isAlert));
 // ================= 运行态 =================
 let state = {
     historyData: [],      // 币安8小时已结算费率历史 (60 条)
