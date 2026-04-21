@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>BTC/USDT 宏观市场状态 (Regime) 监控</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<!-- Chart.js + 时间轴适配 -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js"></script>
+<!-- 蜡烛图插件（financial chart） -->
+<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial@0.2.1/dist/chartjs-chart-financial.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px;
+    background: #0e1116; color: #e6edf3;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  }
+  h1 { margin: 0 0 8px; font-size: 20px; }
+  .meta { color: #8b949e; font-size: 12px; margin-bottom: 16px; }
+  .meta a { color: #58a6ff; text-decoration: none; margin-right: 12px; }
+
+  .regime-banner {
+    display: flex; align-items: center; gap: 16px;
+    padding: 14px 18px; border-radius: 8px; margin-bottom: 16px;
+    border: 1px solid #30363d; background: #161b22;
+  }
+  .regime-tag {
+    font-size: 22px; font-weight: 700; padding: 6px 14px; border-radius: 6px;
+  }
+  .regime-trend   { background: #1f6feb33; color: #58a6ff; }
+  .regime-range   { background: #8957e533; color: #d2a8ff; }
+  .regime-panic   { background: #da363333; color: #ff7b72; }
+  .regime-neutral { background: #6e768133; color: #8b949e; }
+  .regime-unknown { background: #30363d;   color: #8b949e; }
+  .regime-reason { color: #8b949e; font-size: 13px; }
+
+  /* 交易计划卡片 */
+  .plan-card {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    padding: 14px 18px; margin-bottom: 16px;
+  }
+  .plan-card.long  { border-left: 4px solid #3fb950; }
+  .plan-card.short { border-left: 4px solid #ff7b72; }
+  .plan-card.wait  { border-left: 4px solid #d29922; }
+  .plan-head {
+    display: flex; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; gap: 8px; margin-bottom: 10px;
+  }
+  .plan-action {
+    font-size: 16px; font-weight: 700;
+  }
+  .plan-action.long  { color: #3fb950; }
+  .plan-action.short { color: #ff7b72; }
+  .plan-action.wait  { color: #d29922; }
+  .plan-meta { font-size: 12px; color: #8b949e; }
+
+  .plan-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 8px; margin-bottom: 10px;
+  }
+  .plan-grid .cell {
+    background: #0e1116; border: 1px solid #30363d; border-radius: 6px;
+    padding: 8px 10px;
+  }
+  .plan-grid .cell .label { font-size: 11px; color: #8b949e; }
+  .plan-grid .cell .val { font-size: 16px; font-weight: 600; margin-top: 2px; font-family: 'SF Mono', Menlo, monospace; }
+  .cell.entry .val { color: #58a6ff; }
+  .cell.stop  .val { color: #ff7b72; }
+  .cell.tp1   .val { color: #3fb950; }
+  .cell.tp2   .val { color: #3fb950; }
+  .cell.tp3   .val { color: #3fb950; }
+  .cell.now   .val { color: #c9d1d9; }
+
+  .plan-tps {
+    background: #0e1116; border: 1px solid #30363d; border-radius: 6px;
+    padding: 8px 10px; font-size: 12px; color: #c9d1d9; margin-bottom: 8px;
+  }
+  .plan-tps table { width: 100%; border-collapse: collapse; }
+  .plan-tps th, .plan-tps td { text-align: left; padding: 4px 6px; border-bottom: 1px solid #21262d; }
+  .plan-tps th { color: #8b949e; font-weight: 500; font-size: 11px; }
+  .plan-tps td.price { font-family: 'SF Mono', Menlo, monospace; color: #3fb950; }
+  .plan-tps tr:last-child td { border-bottom: 0; }
+
+  .plan-notes { font-size: 11px; color: #8b949e; line-height: 1.6; }
+  .plan-notes div::before { content: "· "; }
+  .plan-disclaimer { color: #d29922; }
+
+  .latest {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 8px; margin-bottom: 16px;
+  }
+  .latest .item {
+    background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+    padding: 8px 10px;
+  }
+  .latest .item .label { font-size: 11px; color: #8b949e; }
+  .latest .item .value { font-size: 16px; font-weight: 600; margin-top: 2px; }
+
+  .grid {
+    display: grid; gap: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  }
+  .card {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    padding: 12px;
+  }
+  .card h3 { margin: 0 0 8px; font-size: 14px; color: #c9d1d9; }
+  .chart-wrap { position: relative; height: 240px; }
+  .err {
+    color: #ff7b72; background: #da363322; border: 1px solid #ff7b72;
+    padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; display: none;
+  }
+</style>
+</head>
+<body>
+
+<h1>BTC/USDT 宏观市场状态监控</h1>
+<div class="meta">
+  数据源：Binance USDT 永续合约 1H K线 ·
+  <span id="updatedAt">--</span> ·
+  <a href="/">← 返回资金费率盯盘</a>
+  <a href="#" id="refreshBtn">手动刷新</a>
+</div>
+
+<div id="err" class="err"></div>
+
+<div class="regime-banner">
+  <div id="regimeTag" class="regime-tag regime-unknown">--</div>
+  <div>
+    <div style="font-size:13px;color:#c9d1d9;">当前 Regime</div>
+    <div id="regimeReason" class="regime-reason">--</div>
+  </div>
+</div>
+
+<!-- 交易计划卡片：基于 ATR/ADX/DI/Regime 自动给出建议价位 -->
+<div id="planCard" class="plan-card wait">
+  <div class="plan-head">
+    <div>
+      <div id="planAction" class="plan-action wait">📋 交易计划：暂无</div>
+      <div id="planBasis" class="plan-meta">--</div>
+    </div>
+    <div id="planConfidence" class="plan-meta">--</div>
+  </div>
+  <div id="planBody">
+    <div class="plan-grid" id="planGrid" style="display:none;">
+      <div class="cell now"><div class="label">当前价</div><div class="val" id="planNow">--</div></div>
+      <div class="cell entry"><div class="label">入场价 (回踩 0.5×ATR)</div><div class="val" id="planEntry">--</div></div>
+      <div class="cell stop"><div class="label">止损 (-1.5×ATR)</div><div class="val" id="planStop">--</div></div>
+      <div class="cell now"><div class="label">建议仓位</div><div class="val" id="planPos">--</div></div>
+    </div>
+    <div class="plan-tps" id="planTps" style="display:none;">
+      <table>
+        <thead><tr><th>分批</th><th>价格</th><th>R 倍</th><th>预期收益</th><th>平仓</th><th>操作</th></tr></thead>
+        <tbody id="planTpsBody"></tbody>
+      </table>
+    </div>
+    <div class="plan-notes" id="planNotes"></div>
+  </div>
+</div>
+
+<div class="latest" id="latest"></div>
+
+<div class="grid">
+  <div class="card">
+    <h3>BTC 价格 K 线</h3>
+    <div class="chart-wrap"><canvas id="chartPrice"></canvas></div>
+  </div>
+  <div class="card">
+    <h3>ATR(14) 平均真实波幅</h3>
+    <div class="chart-wrap"><canvas id="chartAtr"></canvas></div>
+  </div>
+  <div class="card">
+    <h3>ADX(14) / +DI / -DI</h3>
+    <div class="chart-wrap"><canvas id="chartAdx"></canvas></div>
+  </div>
+  <div class="card">
+    <h3>HV 历史波动率（年化 %，类 VIX）</h3>
+    <div class="chart-wrap"><canvas id="chartHv"></canvas></div>
+  </div>
+  <div class="card">
+    <h3>ROC(14) 波动速率（%）</h3>
+    <div class="chart-wrap"><canvas id="chartRoc"></canvas></div>
+  </div>
+  <div class="card">
+    <h3>Slope 价格斜率（每根 K 线 $/h，最小二乘）</h3>
+    <div class="chart-wrap"><canvas id="chartSlope"></canvas></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  Chart.defaults.color = '#8b949e';
+  Chart.defaults.borderColor = '#30363d';
+
+  const charts = {};
+  const colors = {
+    blue:   '#58a6ff',
+    purple: '#d2a8ff',
+    red:    '#ff7b72',
+    green:  '#3fb950',
+    yellow: '#d29922',
+    gray:   '#8b949e',
+  };
+
+  const fmt = (v, d = 2) =>
+    v == null || !isFinite(v) ? '--' : Number(v).toFixed(d);
+
+  function setRegime(reg) {
+    const el = document.getElementById('regimeTag');
+    const reason = document.getElementById('regimeReason');
+    // regimeModule.js 使用大写 regime 标识 (TREND/RANGE/PANIC/NEUTRAL)
+    const key = String(reg.regime || 'unknown').toLowerCase();
+    el.className = 'regime-tag regime-' + key;
+    el.textContent = reg.label || '未知';
+    // 兼容: regimeModule.js 用 desc, 旧版用 reason
+    reason.textContent = reg.desc || reg.reason || '';
+  }
+
+  function setLatest(latest) {
+    const items = [
+      { label: 'Close',     value: fmt(latest.close, 2) },
+      { label: 'ATR',       value: fmt(latest.atr, 2) },
+      { label: 'ADX',       value: fmt(latest.adx, 2) },
+      { label: '+DI',       value: fmt(latest.plusDI, 2) },
+      { label: '-DI',       value: fmt(latest.minusDI, 2) },
+      { label: 'HV %',      value: fmt(latest.hv, 2) },
+      { label: 'ROC %',     value: fmt(latest.roc, 2) },
+      { label: 'Slope $/h', value: fmt(latest.slope, 2) },
+    ];
+    const root = document.getElementById('latest');
+    root.innerHTML = items.map((it) =>
+      `<div class="item"><div class="label">${it.label}</div><div class="value">${it.value}</div></div>`
+    ).join('');
+  }
+
+  // 通用：line chart 渲染或更新
+  function lineChart(canvasId, datasets, opts = {}) {
+    const ctx = document.getElementById(canvasId).getContext('2d');
+    if (charts[canvasId]) {
+      charts[canvasId].data.datasets = datasets;
+      charts[canvasId].update('none');
+      return;
+    }
+    charts[canvasId] = new Chart(ctx, {
+      type: 'line',
+      data: { datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        parsing: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: !!opts.legend, labels: { color: '#c9d1d9' } },
+          tooltip: { mode: 'index', intersect: false },
+        },
+        scales: {
+          x: {
+            type: 'time',
+            time: { unit: 'day', tooltipFormat: 'yyyy-LL-dd HH:mm' },
+            grid: { color: 'rgba(255,255,255,0.05)' },
+          },
+          y: {
+            grid: { color: 'rgba(255,255,255,0.05)' },
+          },
+        },
+      },
+    });
+  }
+
+  // 蜡烛图（金融插件）
+  function candleChart(canvasId, candles) {
+    const ctx = document.getElementById(canvasId).getContext('2d');
+    const data = candles.map((c) => ({
+      x: c.t, o: c.o, h: c.h, l: c.l, c: c.c,
+    }));
+    if (charts[canvasId]) {
+      charts[canvasId].data.datasets[0].data = data;
+      charts[canvasId].update('none');
+      return;
+    }
+    charts[canvasId] = new Chart(ctx, {
+      type: 'candlestick',
+      data: {
+        datasets: [{
+          label: 'BTCUSDT 1H',
+          data,
+          color: { up: colors.green, down: colors.red, unchanged: colors.gray },
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: {
+            type: 'time',
+            time: { unit: 'day', tooltipFormat: 'yyyy-LL-dd HH:mm' },
+            grid: { color: 'rgba(255,255,255,0.05)' },
+          },
+          y: { grid: { color: 'rgba(255,255,255,0.05)' } },
+        },
+      },
+    });
+  }
+
+  function buildPoints(candles, series) {
+    return candles.map((c, i) => ({
+      x: c.t,
+      y: series[i] == null || !isFinite(series[i]) ? null : series[i],
+    })).filter((p) => p.y != null);
+  }
+
+  function setTradePlan(plan) {
+    const card = document.getElementById('planCard');
+    const action = document.getElementById('planAction');
+    const basis = document.getElementById('planBasis');
+    const conf = document.getElementById('planConfidence');
+    const grid = document.getElementById('planGrid');
+    const tpsBox = document.getElementById('planTps');
+    const tpsBody = document.getElementById('planTpsBody');
+    const notes = document.getElementById('planNotes');
+
+    if (!plan) {
+      card.className = 'plan-card wait';
+      action.className = 'plan-action wait';
+      action.textContent = '📋 交易计划：等待数据';
+      basis.textContent = '--';
+      conf.textContent = '--';
+      grid.style.display = 'none';
+      tpsBox.style.display = 'none';
+      notes.innerHTML = '';
+      return;
+    }
+
+    if (!plan.ok) {
+      card.className = 'plan-card wait';
+      action.className = 'plan-action wait';
+      action.textContent = '📋 交易计划：🟡 观望';
+      basis.textContent = plan.reason || '';
+      conf.textContent = plan.currentPrice ? '当前价 ' + plan.currentPrice : '';
+      grid.style.display = 'none';
+      tpsBox.style.display = 'none';
+      notes.innerHTML = '<div class="plan-disclaimer">⚠️ 仅供参考，纯盯盘模式不会自动下单</div>';
+      return;
+    }
+
+    const dir = plan.direction; // 'long' | 'short'
+    card.className = 'plan-card ' + dir;
+    action.className = 'plan-action ' + dir;
+    action.textContent = (dir === 'long' ? '📈 ' : '📉 ') + '交易计划：' + plan.action;
+    basis.textContent = plan.basis || '';
+    conf.textContent = '置信度 ' + plan.confidenceLabel + ' · 仓位 ' + plan.suggestedPositionPct + '%';
+
+    document.getElementById('planNow').textContent = plan.currentPrice;
+    document.getElementById('planEntry').textContent = plan.entry;
+    document.getElementById('planStop').textContent = plan.stopLoss + '  (-' + plan.riskPct + '%)';
+    document.getElementById('planPos').textContent = plan.suggestedPositionPct + '%';
+    grid.style.display = 'grid';
+
+    tpsBody.innerHTML = plan.takeProfits.map(t =>
+      `<tr>
+        <td>${t.level}</td>
+        <td class="price">${t.price}</td>
+        <td>${t.rr}</td>
+        <td>+${t.gainPct}%</td>
+        <td>${t.closePct}%</td>
+        <td>${t.note}</td>
+      </tr>`
+    ).join('');
+    tpsBox.style.display = 'block';
+
+    notes.innerHTML = (plan.notes || []).map(n => {
+      const cls = n.startsWith('⚠️') ? ' class="plan-disclaimer"' : '';
+      const text = n.replace(/</g, '&lt;');
+      return `<div${cls}>${text}</div>`;
+    }).join('');
+  }
+
+  function render(data) {
+    setRegime(data.regime);
+    setLatest(data.latest);
+    setTradePlan(data.tradePlan);
+    document.getElementById('updatedAt').textContent =
+      '更新于 ' + new Date(data.updatedAt).toLocaleString();
+
+    const c = data.candles;
+    const s = data.series;
+
+    candleChart('chartPrice', c);
+
+    lineChart('chartAtr', [
+      { label: 'ATR(14)', data: buildPoints(c, s.atr),
+        borderColor: colors.blue, backgroundColor: colors.blue + '33',
+        borderWidth: 1.5, pointRadius: 0, tension: 0.1 },
+    ]);
+
+    lineChart('chartAdx', [
+      { label: 'ADX', data: buildPoints(c, s.adx),
+        borderColor: colors.yellow, borderWidth: 1.8, pointRadius: 0, tension: 0.1 },
+      { label: '+DI', data: buildPoints(c, s.plusDI),
+        borderColor: colors.green, borderWidth: 1.2, pointRadius: 0, tension: 0.1 },
+      { label: '-DI', data: buildPoints(c, s.minusDI),
+        borderColor: colors.red, borderWidth: 1.2, pointRadius: 0, tension: 0.1 },
+    ], { legend: true });
+
+    lineChart('chartHv', [
+      { label: 'HV (annualized %)', data: buildPoints(c, s.hv),
+        borderColor: colors.purple, backgroundColor: colors.purple + '33',
+        borderWidth: 1.5, pointRadius: 0, tension: 0.1, fill: true },
+    ]);
+
+    lineChart('chartRoc', [
+      { label: 'ROC(14) %', data: buildPoints(c, s.roc),
+        borderColor: colors.green, borderWidth: 1.5, pointRadius: 0, tension: 0.1 },
+    ]);
+
+    lineChart('chartSlope', [
+      { label: 'Slope %', data: buildPoints(c, s.slope),
+        borderColor: colors.blue, borderWidth: 1.5, pointRadius: 0, tension: 0.1 },
+    ]);
+  }
+
+  function showErr(msg) {
+    const el = document.getElementById('err');
+    if (msg) {
+      el.textContent = msg;
+      el.style.display = 'block';
+    } else {
+      el.style.display = 'none';
+    }
+  }
+
+  async function load() {
+    try {
+      const r = await fetch('/api/regime/snapshot?tail=168'); // 最近 7 天
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        showErr(body.error || body.message || ('HTTP ' + r.status));
+        return;
+      }
+      const data = await r.json();
+      showErr(data.error);
+      render(data);
+    } catch (e) {
+      showErr('请求失败：' + e.message);
+    }
+  }
+
+  document.getElementById('refreshBtn').addEventListener('click', async (e) => {
+    e.preventDefault();
+    await fetch('/api/regime/refresh', { method: 'POST' });
+    await load();
+  });
+
+  load();
+  // 前端每 60s 自拉一次（后端每 5min 真正去 Binance）
+  setInterval(load, 60 * 1000);
+})();
+</script>
+</body>
+</html>
