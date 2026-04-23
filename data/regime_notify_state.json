@@ -1,5 +1,8 @@
 {
-  "lastTradeAction": "LONG",
+  "lastTradeAction": "SHORT",
   "startupSent": true,
-  "savedAt": "2026-04-21T10:46:38.790Z"
+  "lastSubRegime": "WEAK_BEAR",
+  "lastRsiZone": "NEUTRAL",
+  "lastMacdSide": "BEAR",
+  "savedAt": "2026-04-23T11:16:58.497Z"
 }

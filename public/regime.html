@@ -35,6 +35,17 @@
   .regime-neutral { background: #6e768133; color: #8b949e; }
   .regime-unknown { background: #30363d;   color: #8b949e; }
   .regime-reason { color: #8b949e; font-size: 13px; }
+  .regime-sub {
+    margin-left: 10px; padding: 2px 8px; border-radius: 4px;
+    font-size: 12px; font-weight: 600;
+  }
+  .regime-sub.strong_bull,.regime-sub.weak_bull   { background: #3fb95033; color: #3fb950; }
+  .regime-sub.strong_bear,.regime-sub.weak_bear   { background: #ff7b7233; color: #ff7b72; }
+  .regime-sub.range_neutral                       { background: #d2a8ff33; color: #d2a8ff; }
+  .regime-sub.panic                               { background: #da363355; color: #ff7b72; }
+  .regime-sub.unclear                             { background: #30363d;   color: #8b949e; }
+  .regime-extra { color: #c9d1d9; font-size: 12px; margin-top: 4px; }
+  .regime-extra .risk { color: #d29922; }
 
   /* 交易计划卡片 */
   .plan-card {
@@ -128,9 +139,13 @@
 
 <div class="regime-banner">
   <div id="regimeTag" class="regime-tag regime-unknown">--</div>
-  <div>
-    <div style="font-size:13px;color:#c9d1d9;">当前 Regime</div>
+  <div style="flex:1;">
+    <div style="font-size:13px;color:#c9d1d9;">
+      当前 Regime
+      <span id="regimeSubTag" class="regime-sub unclear" style="display:none;">--</span>
+    </div>
     <div id="regimeReason" class="regime-reason">--</div>
+    <div class="regime-extra" id="regimeExtra"></div>
   </div>
 </div>
 
@@ -187,6 +202,14 @@
     <h3>Slope 价格斜率（每根 K 线 $/h，最小二乘）</h3>
     <div class="chart-wrap"><canvas id="chartSlope"></canvas></div>
   </div>
+  <div class="card">
+    <h3>MACD (12, 26, 9) · 最近 50 根</h3>
+    <div class="chart-wrap"><canvas id="chartMacd"></canvas></div>
+  </div>
+  <div class="card">
+    <h3>RSI (14) · 最近 50 根</h3>
+    <div class="chart-wrap"><canvas id="chartRsi"></canvas></div>
+  </div>
 </div>
 
 <script>
@@ -212,12 +235,40 @@
   function setRegime(reg) {
     const el = document.getElementById('regimeTag');
     const reason = document.getElementById('regimeReason');
-    // regimeModule.js 使用大写 regime 标识 (TREND/RANGE/PANIC/NEUTRAL)
+    const subTag = document.getElementById('regimeSubTag');
+    const extra = document.getElementById('regimeExtra');
+
     const key = String(reg.regime || 'unknown').toLowerCase();
     el.className = 'regime-tag regime-' + key;
     el.textContent = reg.label || '未知';
-    // 兼容: regimeModule.js 用 desc, 旧版用 reason
     reason.textContent = reg.desc || reg.reason || '';
+
+    // 新增：细分 Regime (强多头/弱多头/...)
+    if (reg.subRegime && reg.subLabel) {
+      const sub = String(reg.subRegime).toLowerCase();
+      subTag.className = 'regime-sub ' + sub;
+      subTag.textContent = reg.subLabel;
+      subTag.style.display = 'inline-block';
+    } else {
+      subTag.style.display = 'none';
+    }
+
+    // 方向 / 置信度 / 风险提示
+    const parts = [];
+    if (reg.direction) {
+      const dirZh = ({ long: '📈 做多', short: '📉 做空', neutral: '➖ 观望' })[reg.direction] || reg.direction;
+      parts.push(`方向：${dirZh}`);
+    }
+    if (reg.confidenceLabel) parts.push(`置信度：${reg.confidenceLabel}`);
+    if (reg.signals) {
+      if (reg.signals.macdCross === 'GOLDEN') parts.push('🟢 MACD 金叉');
+      if (reg.signals.macdCross === 'DEATH') parts.push('🔴 MACD 死叉');
+      if (reg.signals.rsiZone === 'OVERBOUGHT') parts.push('⚠️ RSI 超买');
+      if (reg.signals.rsiZone === 'OVERSOLD') parts.push('⚠️ RSI 超卖');
+    }
+    let html = parts.join(' · ');
+    if (reg.riskNote) html += `<br><span class="risk">⚠️ ${reg.riskNote}</span>`;
+    extra.innerHTML = html;
   }
 
   function setLatest(latest) {
@@ -230,6 +281,10 @@
       { label: 'HV %',      value: fmt(latest.hv, 2) },
       { label: 'ROC %',     value: fmt(latest.roc, 2) },
       { label: 'Slope $/h', value: fmt(latest.slope, 2) },
+      { label: 'MACD',      value: fmt(latest.macd, 3) },
+      { label: 'Signal',    value: fmt(latest.signal, 3) },
+      { label: 'Hist',      value: fmt(latest.hist, 3) },
+      { label: 'RSI(14)',   value: fmt(latest.rsi, 2) },
     ];
     const root = document.getElementById('latest');
     root.innerHTML = items.map((it) =>
@@ -314,6 +369,165 @@
       x: c.t,
       y: series[i] == null || !isFinite(series[i]) ? null : series[i],
     })).filter((p) => p.y != null);
+  }
+
+  /**
+   * MACD 专用图：柱状图 Hist + 折线 DIF/DEA
+   * datasets 中 bar 会自动与 line 叠加渲染（Chart.js 混合类型）
+   */
+  function macdChart(canvasId, times, macd, signal, hist) {
+    const ctx = document.getElementById(canvasId).getContext('2d');
+    const dataHist = times.map((t, i) => ({ x: t, y: hist[i] == null ? null : hist[i] }));
+    const dataMacd = times.map((t, i) => ({ x: t, y: macd[i] == null ? null : macd[i] }));
+    const dataSignal = times.map((t, i) => ({ x: t, y: signal[i] == null ? null : signal[i] }));
+
+    const histColors = dataHist.map(d => (d.y == null ? '#888' : d.y >= 0 ? colors.green + 'b0' : colors.red + 'b0'));
+
+    if (charts[canvasId]) {
+      charts[canvasId].data.datasets[0].data = dataHist;
+      charts[canvasId].data.datasets[0].backgroundColor = histColors;
+      charts[canvasId].data.datasets[1].data = dataMacd;
+      charts[canvasId].data.datasets[2].data = dataSignal;
+      charts[canvasId].update('none');
+      return;
+    }
+    charts[canvasId] = new Chart(ctx, {
+      data: {
+        datasets: [
+          { type: 'bar',  label: 'Hist',   data: dataHist,   backgroundColor: histColors, borderWidth: 0,
+            barPercentage: 0.95, categoryPercentage: 1.0 },
+          { type: 'line', label: 'DIF',    data: dataMacd,   borderColor: colors.blue,
+            borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 0, pointHitRadius: 6, tension: 0.1, spanGaps: true },
+          { type: 'line', label: 'DEA',    data: dataSignal, borderColor: colors.yellow,
+            borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 0, pointHitRadius: 6, tension: 0.1, spanGaps: true },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        parsing: false,
+        normalized: true,
+        hover: { animationDuration: 0 },
+        interaction: { mode: 'index', axis: 'x', intersect: false },
+        plugins: {
+          legend: { display: true, labels: { color: '#c9d1d9' } },
+          tooltip: { enabled: true, animation: false, mode: 'index', axis: 'x', intersect: false },
+          decimation: { enabled: false },
+        },
+        scales: {
+          x: {
+            type: 'time',
+            time: { unit: 'day', tooltipFormat: 'yyyy-LL-dd HH:mm' },
+            grid: { color: 'rgba(255,255,255,0.05)' },
+            ticks: { maxRotation: 0, autoSkipPadding: 20 },
+          },
+          y: { grid: { color: 'rgba(255,255,255,0.05)' } },
+        },
+      },
+    });
+  }
+
+  /**
+   * RSI 专用图：折线 + 超买 / 超卖水平参考线
+   *
+   * Hover 性能优化要点（解决鼠标移动顿挫）：
+   *  - parsing: false：数据已经是 {x: ms, y: number} 的标准结构，跳过 Chart.js 重复解析
+   *  - animation / hover.animationDuration / tooltip.animation：全部 0，关闭所有交互动画
+   *  - pointRadius / pointHoverRadius = 0：避免 hover 时点突然放大触发 layout
+   *  - interaction: { mode:'nearest', axis:'x', intersect:false }：只有 1 条线时比 'index' 轻
+   *  - hitRadius：给一个命中半径，避免 hover 在密集数据间抖动
+   *  - 水平线插件 afterDatasetsDraw 一次性绘制三条，减少 save/restore 次数
+   */
+  function rsiChart(canvasId, times, rsi) {
+    const ctx = document.getElementById(canvasId).getContext('2d');
+    const data = times.map((t, i) => ({ x: t, y: rsi[i] == null ? null : rsi[i] }));
+
+    // 水平参考线插件：afterDatasetsDraw 确保在线条之上、tooltip 之下
+    const hLines = {
+      id: 'rsiHLines_' + canvasId,
+      afterDatasetsDraw(chart) {
+        const { ctx, chartArea, scales: { y } } = chart;
+        if (!y || !chartArea) return;
+        const left = chartArea.left, right = chartArea.right;
+        ctx.save();
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        const pairs = [[70, colors.red], [50, '#555'], [30, colors.green]];
+        for (const [v, color] of pairs) {
+          const yy = y.getPixelForValue(v);
+          ctx.strokeStyle = color;
+          ctx.beginPath();
+          ctx.moveTo(left, yy);
+          ctx.lineTo(right, yy);
+          ctx.stroke();
+        }
+        ctx.restore();
+      },
+    };
+
+    if (charts[canvasId]) {
+      charts[canvasId].data.datasets[0].data = data;
+      charts[canvasId].update('none');
+      return;
+    }
+    charts[canvasId] = new Chart(ctx, {
+      type: 'line',
+      data: {
+        datasets: [{
+          label: 'RSI(14)',
+          data,
+          borderColor: colors.purple,
+          backgroundColor: colors.purple + '22',
+          borderWidth: 1.5,
+          pointRadius: 0,
+          pointHoverRadius: 0,
+          pointHitRadius: 8,
+          tension: 0.1,
+          fill: true,
+          spanGaps: true,
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        parsing: false,                      // ← 关键：跳过每次交互的重复解析
+        normalized: true,                    // x 单调递增，Chart.js 内部优化查找
+        hover: { animationDuration: 0 },
+        interaction: { mode: 'nearest', axis: 'x', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            enabled: true,
+            animation: false,
+            mode: 'nearest',
+            axis: 'x',
+            intersect: false,
+            callbacks: {
+              // 仅格式化一次 title/label，避免默认模板的额外工作
+              title: (items) => items[0] ? new Date(items[0].parsed.x).toLocaleString() : '',
+              label: (item) => 'RSI(14): ' + (item.parsed.y == null ? '--' : item.parsed.y.toFixed(2)),
+            },
+          },
+          decimation: { enabled: false },     // 50 根数据无需抽稀
+        },
+        scales: {
+          x: {
+            type: 'time',
+            time: { unit: 'day', tooltipFormat: 'yyyy-LL-dd HH:mm' },
+            grid: { color: 'rgba(255,255,255,0.05)' },
+            ticks: { maxRotation: 0, autoSkipPadding: 20 },
+          },
+          y: {
+            min: 0, max: 100,
+            grid: { color: 'rgba(255,255,255,0.05)' },
+            ticks: { stepSize: 20 },
+          },
+        },
+      },
+      plugins: [hLines],
+    });
   }
 
   function setTradePlan(plan) {
@@ -424,6 +638,22 @@
       { label: 'Slope %', data: buildPoints(c, s.slope),
         borderColor: colors.blue, borderWidth: 1.5, pointRadius: 0, tension: 0.1 },
     ]);
+
+    // 新增：MACD / RSI（优先使用 data.macdRsi 最近 50 根；
+    //      若后端未返回则回退到 series 切片的 tail=50）
+    const mr = data.macdRsi || (function () {
+      const times = c.map(x => x.t);
+      const tail = 50;
+      const take = (arr) => Array.isArray(arr) ? arr.slice(-tail) : [];
+      return {
+        times: times.slice(-tail),
+        macd: take(s.macd), signal: take(s.signal), hist: take(s.hist), rsi: take(s.rsi),
+      };
+    })();
+    if (mr && mr.times && mr.times.length) {
+      macdChart('chartMacd', mr.times, mr.macd || [], mr.signal || [], mr.hist || []);
+      rsiChart('chartRsi', mr.times, mr.rsi || []);
+    }
   }
 
   function showErr(msg) {

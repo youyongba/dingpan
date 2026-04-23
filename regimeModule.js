@@ -13,7 +13,14 @@ const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
 
+const { computeMACD, computeRSI, detectMacdCross, classifyRSI } = require('./indicators/macdRsi');
+const { enhance: enhanceRegime, SUB_LABELS } = require('./regime/enhancedJudge');
+const webhook = require('./notifier/feishuWebhook');
+
 const router = express.Router();
+
+// 前端图表尾部切片：近 50 根
+const CHART_TAIL = 50;
 
 // ---------------------- 配置 ----------------------
 const BINANCE_FAPI = 'https://fapi.binance.com';
@@ -86,6 +93,10 @@ const notifyState = {
   startupSent: false,
   consecutiveFailures: 0,
   failureAlerted: false,
+  // 新增：Webhook 信号跟踪（防止同一信号重复推送）
+  lastSubRegime: null,     // 上一次增强 Regime 的 subRegime
+  lastRsiZone: null,       // 'OVERBOUGHT' / 'OVERSOLD' / 'NEUTRAL'
+  lastMacdSide: null,      // 'BULL' / 'BEAR' / 'FLAT'
 };
 
 // 配置项: 状态持久化文件路径
@@ -102,7 +113,10 @@ function loadNotifyState() {
     if (obj && obj.startupSent === true) {
       notifyState.startupSent = true;
     }
-    console.log(`[regime] 通知状态已恢复: lastTradeAction=${notifyState.lastTradeAction}, startupSent=${notifyState.startupSent}`);
+    if (obj && typeof obj.lastSubRegime === 'string') notifyState.lastSubRegime = obj.lastSubRegime;
+    if (obj && typeof obj.lastRsiZone === 'string') notifyState.lastRsiZone = obj.lastRsiZone;
+    if (obj && typeof obj.lastMacdSide === 'string') notifyState.lastMacdSide = obj.lastMacdSide;
+    console.log(`[regime] 通知状态已恢复: lastTradeAction=${notifyState.lastTradeAction}, startupSent=${notifyState.startupSent}, lastSubRegime=${notifyState.lastSubRegime}`);
   } catch (e) { /* 文件不存在则忽略 */ }
 }
 function saveNotifyState() {
@@ -112,6 +126,9 @@ function saveNotifyState() {
     fs.writeFileSync(NOTIFY_STATE_FILE, JSON.stringify({
       lastTradeAction: notifyState.lastTradeAction,
       startupSent: notifyState.startupSent,
+      lastSubRegime: notifyState.lastSubRegime,
+      lastRsiZone: notifyState.lastRsiZone,
+      lastMacdSide: notifyState.lastMacdSide,
       savedAt: new Date().toISOString(),
     }, null, 2));
   } catch (e) { console.error('[regime] saveNotifyState 失败:', e.message); }
@@ -472,21 +489,46 @@ async function refresh() {
     const roc = computeROC(c, 14);
     const slope = computeSlope(c, 14);
 
-    const indicators = { atr, adx, plusDI, minusDI, hv, roc, slope };
-    const regime = judgeRegime(indicators);
-    const tradePlan = buildTradePlan(indicators, regime, klines);
+    // 新增：MACD(12,26,9) 与 RSI(14)
+    const { macd, signal, hist } = computeMACD(c, { fast: 12, slow: 26, signal: 9 });
+    const rsi = computeRSI(c, 14);
+
+    const indicators = { atr, adx, plusDI, minusDI, hv, roc, slope, macd, signal, hist, rsi };
+    const baseRegime = judgeRegime(indicators);
+
+    // 增强 Regime：融合 MACD/RSI，产出细分状态 + 方向 + 置信度 + 风险提示
+    const lastIdx = klines.length - 1;
+    const enhanced = enhanceRegime(baseRegime, {
+      adx: adx[lastIdx],
+      plusDI: plusDI[lastIdx],
+      minusDI: minusDI[lastIdx],
+      hv: hv[lastIdx],
+      macd: macd[lastIdx],
+      signal: signal[lastIdx],
+      hist: hist[lastIdx],
+      rsi: rsi[lastIdx],
+      close: c[lastIdx],
+      histSeries: hist,
+    });
+
+    const tradePlan = buildTradePlan(indicators, enhanced, klines);
 
     const prevRegime = cache.regime;
     cache = {
       updatedAt: Date.now(),
       klines,
       indicators,
-      regime,
+      regime: enhanced,
       tradePlan,
       error: null,
     };
-    console.log(`[regime] refreshed @ ${new Date().toISOString()} -> ${regime.label} | plan: ${tradePlan.action}`);
-    handleNotificationsOnSuccess(prevRegime, regime, klines, tradePlan);
+    console.log(
+      `[regime] refreshed @ ${new Date().toISOString()} -> ${enhanced.label}/${enhanced.subLabel} ` +
+      `(dir=${enhanced.direction}, conf=${enhanced.confidenceLabel}) | plan: ${tradePlan.action}`
+    );
+    handleNotificationsOnSuccess(prevRegime, enhanced, klines, tradePlan);
+    // 关键信号 → 飞书 Webhook（独立于 IM API 通道）
+    dispatchWebhookSignals(prevRegime, enhanced, tradePlan, klines);
   } catch (err) {
     cache.error = err.message;
     console.error('[regime] refresh failed:', err.message);
@@ -518,8 +560,12 @@ function buildPlanRichLines(plan, regime, klines) {
   lines.push([{ text: '🎖️ 置信度：', bold: true }, { text: plan.confidenceLabel, bold: true }]);
   lines.push([{ text: '━━━━━ 指标依据 ━━━━━' }]);
   lines.push([{ text: '判定依据：', bold: true }, { text: plan.basis }]);
-  lines.push([{ text: `Regime: ${regime.label} · ADX: ${fmt(m.adx)} · +DI/-DI: ${fmt(m.plusDI)}/${fmt(m.minusDI)}` }]);
+  const em = regime.enhancedMetrics || {};
+  const subTag = regime.subLabel ? ` / ${regime.subLabel}` : '';
+  lines.push([{ text: `Regime: ${regime.label}${subTag} · ADX: ${fmt(m.adx)} · +DI/-DI: ${fmt(m.plusDI)}/${fmt(m.minusDI)}` }]);
   lines.push([{ text: `HV: ${fmt(m.hv)}% · ATR: ${fmt(plan.riskPerUnit / 1.5)} · Close: ${fmt(lastClose)}` }]);
+  lines.push([{ text: `MACD: DIF ${fmt(em.macd)} / DEA ${fmt(em.signal)} / HIST ${fmt(em.hist)} · RSI(14): ${fmt(em.rsi)}` }]);
+  if (regime.riskNote) lines.push([{ text: '⚠️ ' + regime.riskNote, italic: true }]);
   lines.push([{ text: '⚠️ 仅作建议，系统为纯盯盘模式不会自动下单', italic: true }]);
   return lines;
 }
@@ -551,10 +597,15 @@ function buildSnapshotRichLines(regime, klines, indicators, tradePlan, fundingDa
   const roc = indicators.roc[lastIdx];
   const slope = indicators.slope[lastIdx];
 
+  const em = regime?.enhancedMetrics || {};
+  const subTag = regime?.subLabel ? ` · ${regime.subLabel}` : '';
   const lines = [
     [{ text: '⏰ 推送时间：', bold: true }, { text: new Date().toLocaleString() }],
-    [{ text: '📊 当前 Regime：', bold: true }, { text: regime?.label || '--', bold: true },
+    [{ text: '📊 当前 Regime：', bold: true }, { text: (regime?.label || '--') + subTag, bold: true },
       { text: `  (${regime?.desc || ''})` }],
+    [{ text: '🎯 方向 / 置信度：', bold: true },
+      { text: `${dirZh(regime?.direction)} · ${regime?.confidenceLabel || '--'}` }],
+    [{ text: '💡 风险提示：', bold: true }, { text: regime?.riskNote || '—' }],
     [{ text: '━━━━━ 技术指标 ━━━━━' }],
     [{ text: '💰 最新价格：', bold: true }, { text: fmt(lastClose) }],
     [{ text: '📏 ATR(14)：', bold: true }, { text: fmt(atr) }],
@@ -562,6 +613,9 @@ function buildSnapshotRichLines(regime, klines, indicators, tradePlan, fundingDa
     [{ text: '🌡️ HV(年化)：', bold: true }, { text: fmt(hv) + '%' }, { text: `   分位带 [${fmt(m.hvLow)}%, ${fmt(m.hvHigh)}%]` }],
     [{ text: '⚡ ROC(14)：', bold: true }, { text: fmt(roc) + '%' }],
     [{ text: '📐 Slope：', bold: true }, { text: fmt(slope) + ' $/h' }],
+    [{ text: '📶 MACD：', bold: true },
+      { text: `DIF ${fmt(em.macd)} · DEA ${fmt(em.signal)} · HIST ${fmt(em.hist)}` }],
+    [{ text: '🧭 RSI(14)：', bold: true }, { text: fmt(em.rsi) }],
   ];
 
   // 资金费率数据（若 server.js 注入了 fundingProvider）
@@ -602,6 +656,136 @@ function buildSnapshotRichLines(regime, klines, indicators, tradePlan, fundingDa
     lines.push([{ text: '原因：', bold: true }, { text: tradePlan?.reason || '信号不足' }]);
   }
   return lines;
+}
+
+// ---------------------- 飞书 Webhook 关键信号推送 ----------------------
+/**
+ * 三类事件都会尝试推送（各自独立冷却）：
+ *   1) regimeChange  - subRegime 变化（如 RANGE_NEUTRAL → STRONG_BULL）
+ *   2) macdCross     - MACD 金叉 / 死叉
+ *   3) rsiZone       - RSI 进入/离开超买超卖区
+ * 启动第一轮不推送（避免冷启动噪音），只初始化 lastXxx 状态。
+ */
+function dispatchWebhookSignals(prevRegime, curRegime, tradePlan, klines) {
+  const sig = curRegime.signals || {};
+  const em = curRegime.enhancedMetrics || {};
+  const lastClose = klines.length ? klines[klines.length - 1].close : null;
+
+  // 首轮：初始化 baseline，不推送
+  const isBootstrap = notifyState.lastSubRegime === null;
+  if (isBootstrap) {
+    notifyState.lastSubRegime = curRegime.subRegime;
+    notifyState.lastRsiZone = sig.rsiZone || null;
+    notifyState.lastMacdSide = sig.macdSide || null;
+    saveNotifyState();
+    return;
+  }
+
+  // 1) Regime 切换
+  if (curRegime.subRegime !== notifyState.lastSubRegime) {
+    const fromLabel = SUB_LABELS[notifyState.lastSubRegime] || notifyState.lastSubRegime;
+    const toLabel = curRegime.subLabel;
+    webhook.sendRich(
+      `🔔 Regime 切换：${fromLabel} → ${toLabel}`,
+      buildWebhookRegimeLines(prevRegime, curRegime, tradePlan, lastClose),
+      { eventKey: 'regimeChange' }
+    );
+    notifyState.lastSubRegime = curRegime.subRegime;
+    saveNotifyState();
+  }
+
+  // 2) MACD 金叉 / 死叉（基于 signals.macdCross，本轮才新发生）
+  if (sig.macdCross === 'GOLDEN' || sig.macdCross === 'DEATH') {
+    const isGolden = sig.macdCross === 'GOLDEN';
+    webhook.sendRich(
+      isGolden ? '📈 MACD 金叉' : '📉 MACD 死叉',
+      buildWebhookMacdLines(curRegime, tradePlan, lastClose, isGolden),
+      { eventKey: `macdCross_${sig.macdCross}` }
+    );
+  }
+  if (sig.macdSide && sig.macdSide !== notifyState.lastMacdSide) {
+    notifyState.lastMacdSide = sig.macdSide;
+    saveNotifyState();
+  }
+
+  // 3) RSI 区间变化（只在进入超买/超卖区时推送，离开→中性不单独发）
+  const curZone = sig.rsiZone;
+  if (curZone && curZone !== notifyState.lastRsiZone) {
+    if (curZone === 'OVERBOUGHT' || curZone === 'OVERSOLD') {
+      webhook.sendRich(
+        curZone === 'OVERBOUGHT' ? '⚠️ RSI 进入超买区' : '⚠️ RSI 进入超卖区',
+        buildWebhookRsiLines(curRegime, tradePlan, lastClose, curZone),
+        { eventKey: `rsiZone_${curZone}` }
+      );
+    }
+    notifyState.lastRsiZone = curZone;
+    saveNotifyState();
+  }
+}
+
+function buildWebhookRegimeLines(prevRegime, cur, plan, lastClose) {
+  const em = cur.enhancedMetrics || {};
+  const m = cur.metrics || {};
+  const lines = [
+    [{ text: '⏰ 时间：', bold: true }, { text: new Date().toLocaleString() }],
+    [{ text: '📊 Regime：', bold: true }, { text: `${cur.label} / ${cur.subLabel}`, bold: true }],
+    [{ text: '🎯 方向：', bold: true }, { text: dirZh(cur.direction), bold: true },
+      { text: `  · 置信度 ${cur.confidenceLabel}` }],
+    [{ text: '💰 当前价：', bold: true }, { text: fmt(lastClose) }],
+    [{ text: '━━━━━ 指标 ━━━━━' }],
+    [{ text: `ADX=${fmt(m.adx)}  +DI=${fmt(m.plusDI)}  -DI=${fmt(m.minusDI)}` }],
+    [{ text: `MACD=${fmt(em.macd)}  Signal=${fmt(em.signal)}  Hist=${fmt(em.hist)}` }],
+    [{ text: `RSI(14)=${fmt(em.rsi)}  HV=${fmt(m.hv)}%` }],
+    [{ text: '💡 风险提示：', bold: true }, { text: cur.riskNote || '—' }],
+  ];
+  if (plan && plan.ok) {
+    lines.push([{ text: '━━━━━ 交易建议 ━━━━━' }]);
+    lines.push([{ text: '动作：', bold: true }, { text: plan.action, bold: true },
+      { text: `   仓位 ${plan.suggestedPositionPct}%` }]);
+    lines.push([{ text: `入场 ${plan.entry} / 止损 ${plan.stopLoss} / TP1 ${plan.takeProfits[0].price}` }]);
+  } else if (plan) {
+    lines.push([{ text: '🟡 观望：', bold: true }, { text: plan.reason || '—' }]);
+  }
+  return lines;
+}
+
+function buildWebhookMacdLines(cur, plan, lastClose, isGolden) {
+  const em = cur.enhancedMetrics || {};
+  const m = cur.metrics || {};
+  const hint = isGolden
+    ? '多头动能启动；若同时处于趋势市可顺势加仓，震荡市需警惕假突破'
+    : '空头动能启动；若同时处于趋势市可顺势做空，震荡市需警惕假跌破';
+  return [
+    [{ text: '⏰ 时间：', bold: true }, { text: new Date().toLocaleString() }],
+    [{ text: '📊 当前 Regime：', bold: true }, { text: `${cur.label} / ${cur.subLabel}` }],
+    [{ text: '💰 当前价：', bold: true }, { text: fmt(lastClose) }],
+    [{ text: `MACD=${fmt(em.macd)}  Signal=${fmt(em.signal)}  Hist=${fmt(em.hist)}` }],
+    [{ text: `辅助：ADX=${fmt(m.adx)}  RSI=${fmt(em.rsi)}` }],
+    [{ text: '💡 解读：', bold: true }, { text: hint }],
+    (plan && plan.ok)
+      ? [{ text: '建议：', bold: true }, { text: `${plan.action} / 入场 ${plan.entry} / 止损 ${plan.stopLoss}` }]
+      : [{ text: '建议：', bold: true }, { text: plan?.reason || '观望' }],
+  ];
+}
+
+function buildWebhookRsiLines(cur, plan, lastClose, zone) {
+  const em = cur.enhancedMetrics || {};
+  const m = cur.metrics || {};
+  const isOB = zone === 'OVERBOUGHT';
+  const hint = isOB
+    ? 'RSI 进入超买（≥70）：短线追多风险偏高，趋势市可收紧止盈，震荡市可轻仓反手'
+    : 'RSI 进入超卖（≤30）：短线追空风险偏高，趋势市可收紧止盈，震荡市可轻仓反手';
+  return [
+    [{ text: '⏰ 时间：', bold: true }, { text: new Date().toLocaleString() }],
+    [{ text: '📊 当前 Regime：', bold: true }, { text: `${cur.label} / ${cur.subLabel}` }],
+    [{ text: '💰 当前价：', bold: true }, { text: fmt(lastClose) }],
+    [{ text: `RSI(14)=${fmt(em.rsi)}  MACD=${fmt(em.macd)}  ADX=${fmt(m.adx)}` }],
+    [{ text: '💡 解读：', bold: true }, { text: hint }],
+  ];
+}
+
+function dirZh(d) {
+  return ({ long: '做多 (LONG)', short: '做空 (SHORT)', neutral: '中性 / 观望' })[d] || '—';
 }
 
 // ---------------------- 通知触发（状态机）----------------------
@@ -744,6 +928,11 @@ router.get('/snapshot', (req, res) => {
       hv: ind.hv[lastFullIdx],
       roc: ind.roc[lastFullIdx],
       slope: ind.slope[lastFullIdx],
+      // 新增：MACD / RSI 最新值
+      macd: ind.macd?.[lastFullIdx] ?? null,
+      signal: ind.signal?.[lastFullIdx] ?? null,
+      hist: ind.hist?.[lastFullIdx] ?? null,
+      rsi: ind.rsi?.[lastFullIdx] ?? null,
     },
     candles: klines.map((k) => ({
       t: k.time, o: k.open, h: k.high, l: k.low, c: k.close, v: k.volume,
@@ -756,8 +945,38 @@ router.get('/snapshot', (req, res) => {
       hv: slice(ind.hv),
       roc: slice(ind.roc),
       slope: slice(ind.slope),
+      // 新增：完整切片，与 candles 对齐
+      macd: slice(ind.macd || []),
+      signal: slice(ind.signal || []),
+      hist: slice(ind.hist || []),
+      rsi: slice(ind.rsi || []),
     },
+    // 需求 1.2 / 1.3：独立返回 MACD / RSI 最近 50 个周期的历史数据供图表单独渲染
+    macdRsi: buildMacdRsiChartSlice(cache.klines, ind, CHART_TAIL),
   });
+});
+
+/**
+ * 提取 MACD / RSI 最近 N 个周期，单独返回给前端（满足需求 1.2 / 1.3）
+ */
+function buildMacdRsiChartSlice(klines, ind, tail = CHART_TAIL) {
+  const n = Math.min(tail, klines.length);
+  const start = klines.length - n;
+  const points = klines.slice(start).map(k => k.time);
+  const tailArr = (arr) => (Array.isArray(arr) ? arr.slice(start) : []);
+  return {
+    tail: n,
+    times: points,
+    macd: tailArr(ind.macd),
+    signal: tailArr(ind.signal),
+    hist: tailArr(ind.hist),
+    rsi: tailArr(ind.rsi),
+  };
+}
+
+// Webhook 推送状态查询（便于调试）
+router.get('/webhook/status', (req, res) => {
+  res.json({ ok: true, status: webhook.getStatus() });
 });
 
 // 手动触发刷新 —— 同时强制推送【手动刷新 · 市场快照】飞书消息

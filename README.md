@@ -55,6 +55,56 @@ npm start
 | `BINANCE_TIMEOUT_MS` | 币安接口请求超时（毫秒）| `10000` |
 | `RATE1H_MIN_ABS` | 近 1H 均值最小绝对值阈值 | `0.00005`（=0.5bp）|
 | `RATE1H_MIN_SAMPLES` | 1H 均值生效最少采样点数 | `10`（约 15 分钟）|
+| `FEISHU_WEBHOOK_URL` | 飞书自定义机器人 Webhook 地址（新版 Regime 关键信号推送）| 空（未配则不推）|
+| `FEISHU_WEBHOOK_SECRET` | 机器人"签名校验"密钥（可选）| 空 |
+| `WEBHOOK_ENABLED` | `0` 关闭 Webhook | `1` |
+| `WEBHOOK_MIN_INTERVAL_MS` | 全局 Webhook 最小间隔（毫秒）| `30000` |
+| `WEBHOOK_EVENT_COOLDOWN_MS` | 同事件冷却（毫秒）| `300000` |
+
+---
+
+## 🧩 新版 Regime 模块（MACD / RSI 升级）
+
+本次迭代在 1H Regime 监控上叠加两个经典动能指标：
+
+| 指标 | 参数 | 对齐平台 |
+|------|------|---------|
+| MACD | fast=12 / slow=26 / signal=9，Hist = DIF − DEA | TradingView · Binance |
+| RSI  | period=14，Wilder 平滑（RMA）| 主流交易平台通用版 |
+
+### 融合判断逻辑
+
+保留原 ADX/HV 判定（TREND / RANGE / PANIC / NEUTRAL），在其之上产出 **subRegime** 细分状态 + 方向 + 置信度 + 风险提示：
+
+| subRegime | 触发条件（简） | direction | confidence |
+|-----------|----------------|-----------|------------|
+| `STRONG_BULL` 强多头 | TREND + +DI>-DI + MACD>0 + RSI<70 | long | medium/high |
+| `WEAK_BULL`   弱多头 | TREND 多头 + (RSI≥70 或 MACD 动能转弱) | long | low |
+| `RANGE_NEUTRAL` 震荡 | RANGE + RSI 40~60 + MACD 钝化 | neutral | medium |
+| `WEAK_BEAR`   弱空头 | TREND 空头 + (RSI≤30 或 MACD 动能转弱) | short | low |
+| `STRONG_BEAR` 强空头 | TREND + -DI>+DI + MACD<0 + RSI>30 | short | medium/high |
+| `PANIC`       恐慌  | 高 HV + 低 ADX | neutral | low |
+| `UNCLEAR`     未明  | 信号互相冲突 | neutral | low |
+
+### 关键信号 → 飞书 Webhook
+
+以下事件会触发结构化富文本推送（各自独立 5 分钟冷却 + 全局 30 秒最小间隔，可改）：
+
+- 🔔 **Regime 切换**：subRegime 发生变化（如"震荡 → 强多头"）
+- 📈/📉 **MACD 金叉 / 死叉**：Hist 由非正转正 / 由非负转负
+- ⚠️ **RSI 超买 / 超卖**：RSI 进入 ≥70 或 ≤30 区
+
+推送内容包含：当前价、Regime/subRegime、MACD/RSI/ADX/DI 数值、交易建议（入场价、止损、TP1）、风险提示。
+
+### 前端可视化
+
+面板新增两张图表 + 4 个 latest 字段：
+
+- 📶 **MACD 图**：柱状图（绿/红 Hist）+ DIF / DEA 折线
+- 🧭 **RSI 图**：折线 + 70/50/30 水平参考线
+- 顶部 Regime 旁增加细分标签（强多头/震荡/…）与风险提示文本
+
+原有字段 `regime` / `tradePlan` / `latest.close/atr/adx/...` 完全兼容，旧前端无改动也能继续工作。
 
 ---
 
@@ -131,6 +181,55 @@ npm start
 ### POST `/api/reset`
 
 清空所有历史数据并重置暖机状态（需请求头 `X-Auth-Token`）。
+
+### GET `/api/regime/snapshot?tail=168`
+
+Regime 面板快照（含 K 线 + 所有指标系列 + MACD/RSI 最近 50 根专用切片 `macdRsi`）。
+
+返回字段 (节选)：
+```json
+{
+  "regime": {
+    "regime": "TREND", "label": "趋势市",
+    "subRegime": "STRONG_BULL", "subLabel": "强多头",
+    "direction": "long", "confidence": "medium", "confidenceLabel": "中",
+    "riskNote": "趋势与动能共振，注意回撤保护利润",
+    "signals": { "macdCross": null, "rsiZone": "NEUTRAL", "macdSide": "BULL", "diSide": "BULL" },
+    "enhancedMetrics": { "macd": 123.4, "signal": 110.2, "hist": 13.2, "rsi": 62.5 }
+  },
+  "latest": { "close": 69850, "macd": 123.4, "signal": 110.2, "hist": 13.2, "rsi": 62.5, ... },
+  "macdRsi": { "tail": 50, "times": [...], "macd": [...], "signal": [...], "hist": [...], "rsi": [...] }
+}
+```
+
+### GET `/api/regime/webhook/status`
+
+查看飞书 Webhook 推送状态 (启用与否 / 队列深度 / 最近推送时间 / 各事件冷却状态)。
+
+---
+
+## 📦 依赖安装与运行
+
+本次迭代 **未新增** npm 依赖（仅用到 `crypto` 内置模块），已有的 `axios + express + moment + dotenv` 即可。
+
+```bash
+# 1. 安装依赖
+npm install
+
+# 2. 配置
+cp .env.example .env
+# 关键：若要启用 Regime 关键信号 Webhook 推送，填写：
+#   FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx
+#   FEISHU_WEBHOOK_SECRET=xxxxxxxxxxxx  (若群机器人勾选了"签名校验")
+
+# 3. 启动
+npm start
+```
+
+访问：
+- 原资金费率主面板：http://localhost:3001/
+- Regime 监控面板（含 MACD / RSI 图）：http://localhost:3001/regime
+- Webhook 状态：http://localhost:3001/api/regime/webhook/status
 
 ---
 
