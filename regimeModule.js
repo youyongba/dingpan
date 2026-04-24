@@ -16,6 +16,7 @@ const fs = require('fs');
 const { computeMACD, computeRSI, detectMacdCross, classifyRSI } = require('./indicators/macdRsi');
 const { enhance: enhanceRegime, SUB_LABELS } = require('./regime/enhancedJudge');
 const webhook = require('./notifier/feishuWebhook');
+const tg = require('./notifier/telegram'); // ← 新增：Telegram VIP 群推送（独立通道）
 
 const router = express.Router();
 
@@ -816,8 +817,11 @@ function handleNotificationsOnSuccess(prevRegime, currentRegime, klines, tradePl
     const prev = notifyState.lastTradeAction;
     if (action === 'LONG') {
       notifyRich('📈 交易信号：转为做多 (LONG)', buildPlanRichLines(tradePlan, currentRegime, klines));
+      // ↓ 新增：Telegram VIP 群推送（异步、不阻塞、失败仅打日志）
+      tg.fireAndForget(tg.sendTradeSignal(tradePlan, currentRegime, { eventType: 'OPEN' }));
     } else if (action === 'SHORT') {
       notifyRich('📉 交易信号：转为做空 (SHORT)', buildPlanRichLines(tradePlan, currentRegime, klines));
+      tg.fireAndForget(tg.sendTradeSignal(tradePlan, currentRegime, { eventType: 'OPEN' }));
     } else if (action === 'NEUTRAL') {
       const title = prev === 'LONG'
         ? '🟡 交易信号：做多结束 → 观望'
@@ -825,6 +829,7 @@ function handleNotificationsOnSuccess(prevRegime, currentRegime, klines, tradePl
           ? '🟡 交易信号：做空结束 → 观望'
           : '🟡 交易信号：观望';
       notifyRich(title, buildNeutralRichLines(prev, currentRegime, klines));
+      tg.fireAndForget(tg.sendTradeSignal(tradePlan, currentRegime, { eventType: 'CLOSE' }));
     }
     notifyState.lastTradeAction = action;
     saveNotifyState();
@@ -977,6 +982,17 @@ function buildMacdRsiChartSlice(klines, ind, tail = CHART_TAIL) {
 // Webhook 推送状态查询（便于调试）
 router.get('/webhook/status', (req, res) => {
   res.json({ ok: true, status: webhook.getStatus() });
+});
+
+// Telegram 推送状态查询（便于调试）
+router.get('/telegram/status', (req, res) => {
+  res.json({ ok: true, status: tg.getStatus() });
+});
+
+// 触发一条 TG 自检消息（POST 防误触发）
+router.post('/telegram/ping', async (req, res) => {
+  const r = await tg.ping();
+  res.json({ ok: r.ok === true, result: r });
 });
 
 // 手动触发刷新 —— 同时强制推送【手动刷新 · 市场快照】飞书消息
