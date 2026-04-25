@@ -27,16 +27,40 @@ const priceFeed = require('./priceFeed');
 const recentlyFired = { long: 0, short: 0 };
 const FIRE_COOLDOWN_MS = 1500;
 
+// WS 状态通知冷却 (避免重连失败刷屏)
+const WS_NOTIFY_COOLDOWN_MS = 5 * 60 * 1000;
+let lastWsErrorNotifyAt = 0;
+let lastWsOpenNotifyAt = 0;
+let wsHasBeenConnected = false;
+
 function start() {
   priceFeed.on('tick', onTick);
   priceFeed.on('open', () => {
-    exec.notify({ type: 'ws_ok', title: '🟢 WebSocket 价格源已连接', lines: ['symbol: ' + config.get().symbol] });
+    wsHasBeenConnected = true;
+    const now = Date.now();
+    // 仅首连 + 冷却外的"重连成功"才通知
+    if (now - lastWsOpenNotifyAt > WS_NOTIFY_COOLDOWN_MS) {
+      lastWsOpenNotifyAt = now;
+      exec.notify({ type: 'ws_ok', title: '🟢 WebSocket 价格源已连接', lines: ['symbol: ' + config.get().symbol] });
+    }
   });
   priceFeed.on('close', ({ code, reason }) => {
     console.warn('[trade.risk] WS 关闭:', code, reason);
   });
   priceFeed.on('error', (err) => {
-    exec.notify({ type: 'error', title: '🚨 WebSocket 价格源异常', lines: [String(err?.message || err)], isAlert: true });
+    const now = Date.now();
+    if (now - lastWsErrorNotifyAt < WS_NOTIFY_COOLDOWN_MS) return; // 冷却内静默
+    lastWsErrorNotifyAt = now;
+    exec.notify({
+      type: 'error',
+      title: '🚨 WebSocket 价格源异常',
+      lines: [
+        String(err?.message || err),
+        '提示: 中国大陆需配置 HTTPS_PROXY=http://host:port 才能直连 Binance',
+        '后续 5 分钟内同类错误将静默, 不再刷屏',
+      ],
+      isAlert: true,
+    });
   });
   console.log('[trade.risk] 风控引擎已挂载');
 }

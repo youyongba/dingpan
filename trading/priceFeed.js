@@ -15,7 +15,34 @@ const WebSocket = require('ws');
 const EventEmitter = require('events');
 const config = require('./config');
 
-const FAPI_WS_BASE = 'wss://fstream.binance.com/ws';
+const FAPI_WS_BASE = process.env.BINANCE_WS_BASE || 'wss://fstream.binance.com/ws';
+const HANDSHAKE_TIMEOUT = parseInt(process.env.BINANCE_WS_HANDSHAKE_MS || '20000', 10);
+
+/**
+ * 解析 HTTPS_PROXY / HTTP_PROXY / ALL_PROXY 环境变量, 自动构造 agent
+ *  - http(s)://host:port      → HttpsProxyAgent
+ *  - socks5://host:port       → SocksProxyAgent
+ * 中国大陆访问 binance fapi 必须走代理, 否则握手 10s 超时
+ */
+function buildProxyAgent() {
+  const proxy = process.env.HTTPS_PROXY || process.env.https_proxy
+    || process.env.ALL_PROXY    || process.env.all_proxy
+    || process.env.HTTP_PROXY   || process.env.http_proxy;
+  if (!proxy) return null;
+  try {
+    if (/^socks/i.test(proxy)) {
+      const { SocksProxyAgent } = require('socks-proxy-agent');
+      console.log(`[trade.priceFeed] 使用 SOCKS 代理: ${proxy}`);
+      return new SocksProxyAgent(proxy);
+    }
+    const { HttpsProxyAgent } = require('https-proxy-agent');
+    console.log(`[trade.priceFeed] 使用 HTTPS 代理: ${proxy}`);
+    return new HttpsProxyAgent(proxy);
+  } catch (e) {
+    console.error('[trade.priceFeed] 代理 agent 创建失败, 回退直连:', e.message);
+    return null;
+  }
+}
 
 class PriceFeed extends EventEmitter {
   constructor() {
@@ -74,8 +101,13 @@ class PriceFeed extends EventEmitter {
     const stream = cfg.priceFeed.stream || 'btcusdt@aggTrade';
     const url = `${FAPI_WS_BASE}/${stream}`;
 
-    console.log(`[trade.priceFeed] 连接 ${url} (attempt=${this.attempt + 1})`);
-    const ws = new WebSocket(url, { handshakeTimeout: 10000 });
+    const agent = buildProxyAgent();
+    console.log(`[trade.priceFeed] 连接 ${url} (attempt=${this.attempt + 1}, proxy=${agent ? 'on' : 'direct'}, handshakeTimeout=${HANDSHAKE_TIMEOUT}ms)`);
+    const ws = new WebSocket(url, {
+      handshakeTimeout: HANDSHAKE_TIMEOUT,
+      perMessageDeflate: false,
+      ...(agent ? { agent } : {}),
+    });
     this.ws = ws;
 
     ws.on('open', () => {
