@@ -99,6 +99,50 @@
   .plan-disclaimer { color: #d29922; }
   .plan-armed     { color: #3fb950; }
 
+  /* 仓位状态面板 */
+  .pos-panel {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+    margin-bottom: 16px;
+  }
+  .pos-card {
+    border: 1px solid #30363d; background: #161b22; border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .pos-card.long  { border-left: 4px solid #3fb950; }
+  .pos-card.short { border-left: 4px solid #ff7b72; }
+  .pos-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .pos-title { font-size: 14px; font-weight: 700; }
+  .pos-title.long  { color: #3fb950; }
+  .pos-title.short { color: #ff7b72; }
+  .pos-badge {
+    font-size: 11px; padding: 2px 8px; border-radius: 4px; margin-left: 8px;
+  }
+  .pos-badge.locked { background: #d2992233; color: #d29922; }
+  .pos-badge.idle   { background: #6e768133; color: #8b949e; }
+  .reset-btn {
+    background: #30363d; color: #f85149; border: 1px solid #f8514955;
+    padding: 4px 12px; font-size: 12px; border-radius: 6px; cursor: pointer;
+    transition: .15s;
+  }
+  .reset-btn:hover { background: #f8514922; }
+  .reset-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .pos-body { font-size: 12px; color: #c9d1d9; line-height: 1.7; }
+  .pos-body .row { display: flex; justify-content: space-between; }
+  .pos-body .row .k { color: #8b949e; }
+  .pos-body .row .v { font-family: 'SF Mono', Menlo, monospace; }
+  .pos-body .tp-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 6px;
+  }
+  .pos-body .tp-cell {
+    background: #0e1116; border: 1px solid #30363d; border-radius: 4px;
+    padding: 4px 6px; font-size: 11px; text-align: center;
+  }
+  .pos-body .tp-cell.hit { border-color: #3fb950; color: #3fb950; }
+  .pos-body .empty { color: #8b949e; font-style: italic; }
+
   /* 自动交易开关 */
   .auto-trade-bar {
     display: flex; align-items: center; gap: 14px;
@@ -176,6 +220,30 @@
     开启后系统接收 webhook 信号将自动执行 TP/SL；关闭后仅展示建议价位
     · <span id="autoTradePrice">价格源 --</span>
   </span>
+</div>
+
+<!-- 仓位状态 + 重置按钮 -->
+<div class="pos-panel">
+  <div class="pos-card long">
+    <div class="pos-head">
+      <div>
+        <span class="pos-title long">📈 多头仓位</span>
+        <span id="posLongBadge" class="pos-badge idle">无持仓</span>
+      </div>
+      <button class="reset-btn" id="resetLongBtn">🔓 多头重置</button>
+    </div>
+    <div class="pos-body" id="posLongBody"><div class="empty">尚无开仓信号</div></div>
+  </div>
+  <div class="pos-card short">
+    <div class="pos-head">
+      <div>
+        <span class="pos-title short">📉 空头仓位</span>
+        <span id="posShortBadge" class="pos-badge idle">无持仓</span>
+      </div>
+      <button class="reset-btn" id="resetShortBtn">🔓 空头重置</button>
+    </div>
+    <div class="pos-body" id="posShortBody"><div class="empty">尚无开仓信号</div></div>
+  </div>
 </div>
 
 <div class="regime-banner">
@@ -299,10 +367,80 @@
       const conn = pf.connected ? '✅ 已连接' : '❌ 未连接';
       const last = pf.lastPrice ? ' · 最新价 ' + Number(pf.lastPrice).toFixed(2) : '';
       price.textContent = `价格源 ${conn}${last}`;
+      // 同步刷新仓位卡片
+      renderPositions(j.positions || {}, pf.lastPrice);
     } catch (e) {
       const stateEl = document.getElementById('autoTradeState');
       stateEl.textContent = '后端不可达';
       stateEl.className = 'at-state off';
+    }
+  }
+
+  function renderPositions(positions, lastPrice) {
+    ['long', 'short'].forEach(dir => {
+      const p = positions[dir] || {};
+      const badge = document.getElementById(`pos${cap(dir)}Badge`);
+      const body = document.getElementById(`pos${cap(dir)}Body`);
+      const btn = document.getElementById(`reset${cap(dir)}Btn`);
+      if (!p.active) {
+        badge.className = 'pos-badge idle';
+        badge.textContent = '无持仓 · 未锁定';
+        body.innerHTML = '<div class="empty">尚无开仓信号 (反方向状态独立, 不互相影响)</div>';
+        btn.disabled = false; // 仍允许点击, 后端是幂等的
+        btn.title = '当前无持仓, 点击仅做状态归零';
+        return;
+      }
+      badge.className = 'pos-badge ' + (p.locked ? 'locked' : 'idle');
+      badge.textContent = p.locked ? '🔒 已锁定' : '已开仓';
+      const tps = p.tpHit || {};
+      const tpCell = (key, label, price) => {
+        const hit = tps[key];
+        return `<div class="tp-cell ${hit ? 'hit' : ''}">${label} ${hit ? '✓' : ''}<br><span style="font-family: 'SF Mono', Menlo, monospace;">${price != null ? Number(price).toFixed(2) : '--'}</span></div>`;
+      };
+      const pnl = (p.entryPrice && lastPrice)
+        ? (((lastPrice - p.entryPrice) / p.entryPrice * 100) * (dir === 'long' ? 1 : -1)).toFixed(2) + '%'
+        : '--';
+      body.innerHTML = `
+        <div class="row"><span class="k">入场价</span><span class="v">${fmt(p.entryPrice, 2)}</span></div>
+        <div class="row"><span class="k">当前盈亏</span><span class="v">${pnl}</span></div>
+        <div class="row"><span class="k">仓位 / 杠杆</span><span class="v">${p.positionSize || '--'} / ${p.leverage || '--'}x</span></div>
+        <div class="row"><span class="k">${p.protectionArmed ? '当前止损 (保本)' : '当前止损'}</span><span class="v" style="color:#ff7b72;">${fmt(p.currentStopLoss, 2)}</span></div>
+        <div class="tp-grid">
+          ${tpCell('tp1', 'TP1 50%', p.tp1)}
+          ${tpCell('tp2', 'TP2 30%', p.tp2)}
+          ${tpCell('tp3', 'TP3 20%', p.tp3)}
+        </div>
+      `;
+      btn.disabled = false;
+      btn.title = '取消该方向所有未触发的 TP/SL 并解锁';
+    });
+  }
+  function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+
+  async function resetDirection(direction) {
+    const ok = confirm(`确定要重置${direction === 'long' ? '多头' : '空头'}吗？\n这会取消该方向所有未触发的 TP/SL 并解锁开仓权限。`);
+    if (!ok) return;
+    try {
+      const r = await fetch('/api/auto-trade/reset', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          // 若设置了 CONFIG_AUTH_TOKEN, 此处可读取 localStorage
+          'X-Auth-Token': localStorage.getItem('CONFIG_AUTH_TOKEN') || '',
+        },
+        body: JSON.stringify({ direction }),
+      });
+      const j = await r.json();
+      if (r.status === 401) {
+        const token = prompt('需要管理 token (X-Auth-Token), 请输入:');
+        if (!token) return;
+        localStorage.setItem('CONFIG_AUTH_TOKEN', token);
+        return resetDirection(direction); // 重试
+      }
+      if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+      await fetchAutoTradeStatus();
+    } catch (e) {
+      alert('重置失败：' + e.message);
     }
   }
 
@@ -793,6 +931,8 @@
   document.getElementById('autoTradeToggle').addEventListener('change', (e) => {
     setAutoTrade(e.target.checked);
   });
+  document.getElementById('resetLongBtn').addEventListener('click', () => resetDirection('long'));
+  document.getElementById('resetShortBtn').addEventListener('click', () => resetDirection('short'));
 
   // 启动顺序：先拉自动交易状态(决定文案), 再加载行情数据
   fetchAutoTradeStatus().then(load);
