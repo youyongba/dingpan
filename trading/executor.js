@@ -89,8 +89,15 @@ function buildSlPayload(direction, trigger = 'sl') {
 }
 
 function buildOpenForwardPayload(rawSignal) {
+  const cfg = config.get();
   // 用户模板里 open 信号本身就完整，直接转发
-  return { ...rawSignal, timestamp: rawSignal.timestamp || new Date().toISOString() };
+  // 如果原始信号缺失 leverage 或 position_size，自动补齐系统默认值
+  return { 
+    ...rawSignal, 
+    leverage: rawSignal.leverage ?? cfg.defaultLeverage,
+    position_size: rawSignal.position_size ?? cfg.defaultPositionSize,
+    timestamp: rawSignal.timestamp || new Date().toISOString() 
+  };
 }
 
 // ---------------- 触发动作（核心 API） ----------------
