@@ -125,17 +125,23 @@ async function forwardOpen(rawSignal) {
   return { res, payload };
 }
 
-// ---------------- 通知整合（飞书 + TG） ----------------
+// ---------------- 通知整合（仅飞书 + 日志） ----------------
 
 /**
- * 业务事件统一推送（飞书富文本 + TG HTML）
+ * 业务事件统一推送
+ *
+ * ⚠️ 设计：trading 引擎内部所有事件 (开仓/止盈/止损/重置/WS/错误)
+ *    只推送到 飞书 + 控制台日志, **不推 Telegram**.
+ *    Telegram 通道仅由 regimeModule 用作"喊单"(tg.sendTradeSignal).
+ *
+ * 如需要把 trading 事件也发到 TG, 把 config.get().notify.telegram 设为 true,
+ * 并在 .env 同时显式开启 TRADING_NOTIFY_TG=1
+ *
  * @param {object} ev
  *   { type, title, lines: Array<string>, isAlert?: boolean }
- *   type: 'open_ok' | 'open_blocked' | 'wait' | 'tp' | 'sl' | 'reset' | 'unlock' | 'error'
  */
 function notify(ev) {
   const cfg = config.get();
-  const text = (ev.lines || []).join('\n');
 
   // 飞书：复用 feishuWebhook 富文本
   if (cfg.notify.feishu) {
@@ -147,8 +153,9 @@ function notify(ev) {
     }
   }
 
-  // Telegram：HTML 格式
-  if (cfg.notify.telegram) {
+  // Telegram：默认关闭, 只在显式打开时才推 (避免污染 VIP 群喊单)
+  const tgAllowed = cfg.notify.telegram && process.env.TRADING_NOTIFY_TG === '1';
+  if (tgAllowed) {
     try {
       const html = `<b>${escapeHTML(ev.title)}</b>\n\n${(ev.lines || []).map(escapeHTML).join('\n')}`;
       tg().fireAndForget(tg().sendMessage(html));

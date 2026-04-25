@@ -49,9 +49,12 @@ const DEFAULT_CONFIG = {
   // 默认与 webhook URL 末段一致，也可单独修改
   // （这里使用 token 字段作为校验值，复用同名）
   // 多通道推送开关
+  // ⚠️ telegram 默认 false：trading 引擎所有事件 (开仓/止盈/止损/WS/重置)
+  //    都不推 TG, 仅飞书 + 日志. TG 只接收 regime 喊单信号.
+  //    如确实想让 trading 事件也发 TG, 在 .env 设 TRADING_NOTIFY_TG=1 同时打开此处
   notify: {
     feishu: true,
-    telegram: true,
+    telegram: false,
   },
 };
 
