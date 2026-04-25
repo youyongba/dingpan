@@ -5,4 +5,4 @@ node_modules
 npm-debug.log
 *.log
 # 通知状态持久化目录（防重复推送用）
-data/
+data/*

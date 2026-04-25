@@ -92,6 +92,15 @@ async function doPost(payload, retry = 2) {
       // 业务错误
       lastErr = new Error(`[webhook biz] ${JSON.stringify(resp.data)}`);
       console.error('[webhook] 业务错误:', resp.data);
+      // 19002 通常是 content 节点字段非法 — 打印 payload 摘要协助排查
+      if (resp.data && resp.data.code === 19002 && attempt === 0) {
+        try {
+          const dbg = JSON.stringify(payload).slice(0, 500);
+          console.error('[webhook] 🔧 payload 摘要 (前 500 字):', dbg);
+        } catch (_) {}
+      }
+      // 19002 是参数错误, 重试也是 19002, 直接放弃
+      if (resp.data && resp.data.code === 19002) return { ok: false, error: lastErr.message, skip: '19002_no_retry' };
     } catch (err) {
       lastErr = err;
       console.error(`[webhook] 第 ${attempt + 1} 次发送失败:`, err.response?.data || err.message);
@@ -144,6 +153,11 @@ function sendText(text, opt = {}) {
 
 /**
  * 发送飞书 post 富文本消息
+ *
+ * ⚠️ 飞书 post 富文本(tag:'text')官方只支持 { tag, text, un_escape } 三个字段,
+ *    传入 style/bold/italic 等未知字段会触发 19002 (params error, unknown content value).
+ *    bold/italic 这里只做"语义保留", 真要排版请改用 interactive 卡片消息.
+ *
  * @param {string} title
  * @param {Array<Array<{text:string, bold?:boolean, italic?:boolean, href?:string}>>} lines
  * @param {object} [opt]
@@ -155,18 +169,28 @@ function sendRich(title, lines, opt = {}) {
       console.log(`[webhook] 跳过(${gate.reason}):`, title);
       return { ok: false, skipped: gate.reason };
     }
-    const post_content = lines.map(line =>
-      (line.length ? line : [{ text: ' ' }]).map(seg => {
-        if (seg.href) return { tag: 'a', text: String(seg.text ?? ''), href: seg.href };
-        const node = { tag: 'text', text: String(seg.text ?? '') };
-        const style = [];
-        if (seg.bold) style.push('bold');
-        if (seg.italic) style.push('italic');
-        if (style.length) node.style = style;
-        return node;
+    const safeTitle = String(title || '通知').slice(0, 200) || '通知';
+    const safeLines = Array.isArray(lines) && lines.length ? lines : [[{ text: ' ' }]];
+
+    const post_content = safeLines
+      .map(line => {
+        const segs = (Array.isArray(line) && line.length ? line : [{ text: ' ' }])
+          .map(seg => {
+            // a 链接节点
+            if (seg && seg.href) {
+              const text = String(seg.text ?? seg.href ?? ' ') || ' ';
+              return { tag: 'a', text, href: String(seg.href) };
+            }
+            // 普通文本节点 — 只保留 tag + text, 严禁 style/bold/italic
+            const text = String((seg && seg.text) ?? '') || ' ';
+            return { tag: 'text', text };
+          })
+          .filter(Boolean);
+        return segs.length ? segs : [{ tag: 'text', text: ' ' }];
       })
-    );
-    const payload = buildPayload('post', { post: { zh_cn: { title, content: post_content } } });
+      .filter(arr => arr && arr.length);
+
+    const payload = buildPayload('post', { post: { zh_cn: { title: safeTitle, content: post_content } } });
     const result = await doPost(payload);
     if (result.ok) markSent(opt.eventKey);
     return result;
