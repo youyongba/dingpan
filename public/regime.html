@@ -400,8 +400,24 @@
       const pnl = (p.entryPrice && lastPrice)
         ? (((lastPrice - p.entryPrice) / p.entryPrice * 100) * (dir === 'long' ? 1 : -1)).toFixed(2) + '%'
         : '--';
+      const sourceMap = {
+        regime_plan: '<span style="color:#3fb950;">✅ regime plan (与 TG 一致)</span>',
+        template_fallback: '<span style="color:#d29922;">⚠️ 模板回退</span>',
+        signal_explicit: '<span style="color:#58a6ff;">📝 外部信号显式</span>',
+      };
+      const srcLabel = sourceMap[p.priceSource] || (p.priceSource || '--');
+      // 滑点 = 市价相对 plan 理想入场价的偏离 (按方向有方向感)
+      let slipHtml = '';
+      if (p.planEntry && p.entryPrice) {
+        const slip = ((p.entryPrice - p.planEntry) / p.planEntry * 100) * (dir === 'long' ? 1 : -1);
+        const sign = slip >= 0 ? '+' : '';
+        const color = slip >= 0 ? '#ff7b72' : '#3fb950'; // 正滑点(更差)红, 负滑点(更好)绿
+        slipHtml = `   <span style="color:${color};font-size:11px;">滑点 ${sign}${slip.toFixed(3)}%</span>`;
+      }
       body.innerHTML = `
-        <div class="row"><span class="k">入场价</span><span class="v">${fmt(p.entryPrice, 2)}</span></div>
+        <div class="row"><span class="k">价位来源</span><span class="v">${srcLabel}</span></div>
+        <div class="row"><span class="k">市价入场</span><span class="v">${fmt(p.entryPrice, 2)}${slipHtml}</span></div>
+        ${p.planEntry ? `<div class="row"><span class="k">plan 理想入场</span><span class="v" style="color:#8b949e;">${fmt(p.planEntry, 2)}</span></div>` : ''}
         <div class="row"><span class="k">当前盈亏</span><span class="v">${pnl}</span></div>
         <div class="row"><span class="k">仓位 / 杠杆</span><span class="v">${p.positionSize || '--'} / ${p.leverage || '--'}x</span></div>
         <div class="row"><span class="k">${p.protectionArmed ? '当前止损 (保本)' : '当前止损'}</span><span class="v" style="color:#ff7b72;">${fmt(p.currentStopLoss, 2)}</span></div>

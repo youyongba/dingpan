@@ -1015,4 +1015,18 @@ router.get('/page', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'regime.html'));
 });
 
-module.exports = { router, setNotifier, setFundingProvider };
+/**
+ * 对外暴露：读取最近一次成功生成的 tradePlan / regime
+ * 供 trading 引擎在收到 open_long/open_short 信号时, 使用本系统计算出的精准价位
+ * @returns {{tradePlan, regime, latest, updatedAt}}
+ */
+function getLatestPlan() {
+  return {
+    tradePlan: cache.tradePlan,
+    regime: cache.regime,
+    latest: cache.indicators ? cache.indicators[cache.indicators.length - 1] : null,
+    updatedAt: cache.updatedAt,
+  };
+}
+
+module.exports = { router, setNotifier, setFundingProvider, getLatestPlan };

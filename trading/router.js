@@ -39,7 +39,7 @@ function parsePercent(v) {
   return m ? parseFloat(m[1]) : null;
 }
 
-/** 按模板算 TP/SL */
+/** 按模板算 TP/SL (回退方案) */
 function calcLevels(direction, entryPrice) {
   const t = config.get().template;
   const seg = t[direction];
@@ -51,6 +51,44 @@ function calcLevels(direction, entryPrice) {
     tp2: pct(seg.tp2),
     tp3: pct(seg.tp3),
     sl: entryPrice * (1 - sign * (seg.sl / 100)),  // 反向
+  };
+}
+
+/**
+ * 拉取 regimeModule 最近一次 tradePlan 的 TP/SL/仓位
+ * 注意：不返回 entry — 入场价由调用方用 WS lastPrice (市价立即成交)
+ * @returns {null | {tp1, tp2, tp3, sl, positionSize, confidence, planEntry, source:'regime_plan'}}
+ */
+function planLevelsFromRegime(direction) {
+  let getLatestPlan;
+  try {
+    ({ getLatestPlan } = require('../regimeModule'));
+  } catch (_) {
+    return null;
+  }
+  if (typeof getLatestPlan !== 'function') return null;
+
+  const { tradePlan, updatedAt } = getLatestPlan() || {};
+  if (!tradePlan || !tradePlan.ok) return null;
+  if (tradePlan.direction !== direction) return null;
+  const tps = Array.isArray(tradePlan.takeProfits) ? tradePlan.takeProfits : [];
+  if (tps.length < 3) return null;
+
+  // 时效性：5min 刷新, 30min 内视为有效
+  const ageMs = updatedAt ? Date.now() - updatedAt : Infinity;
+  if (ageMs > 30 * 60 * 1000) return null;
+
+  return {
+    // ↓ 不返回 entryPrice, 由调用方注入 WS 实时价 (市价开仓)
+    planEntry: Number(tradePlan.entry),     // 仅做"理想入场价"展示, 不参与撮合
+    tp1: Number(tps[0].price),
+    tp2: Number(tps[1].price),
+    tp3: Number(tps[2].price),
+    sl: Number(tradePlan.stopLoss),
+    positionSize: tradePlan.suggestedPositionPct + '%',
+    confidence: tradePlan.confidenceLabel,
+    planAgeSec: Math.round(ageMs / 1000),
+    source: 'regime_plan',
   };
 }
 
@@ -95,45 +133,103 @@ router.post('/signal', async (req, res) => {
       return res.status(409).json({ ok: false, error: gate.reason });
     }
 
-    const entryPrice = priceFeed.getStatus().lastPrice;
-    if (!Number.isFinite(entryPrice)) {
+    // ---- 入场价：始终用 WS 实时价 (市价立即成交, 不等回踩) ----
+    const marketPrice = priceFeed.getStatus().lastPrice;
+    if (!Number.isFinite(marketPrice)) {
       return res.status(503).json({ ok: false, error: 'price_feed_not_ready' });
     }
 
-    // 计算 TP/SL
-    const lv = calcLevels(direction, entryPrice);
+    // ---- TP/SL/仓位决策：优先用 regime plan, 否则回退 template ----
+    const planLv = planLevelsFromRegime(direction);
+    let entryPrice = marketPrice;
+    let tp1, tp2, tp3, sl, positionSize, source, confidence, planAgeSec, planEntry;
+    if (planLv) {
+      // ✅ 与 TG 推送的 plan 完全一致（除 entry 外）
+      ({ tp1, tp2, tp3, sl, positionSize, confidence, planAgeSec, planEntry } = planLv);
+      source = 'regime_plan';
+    } else {
+      const lv = calcLevels(direction, entryPrice);
+      tp1 = lv.tp1; tp2 = lv.tp2; tp3 = lv.tp3; sl = lv.sl;
+      positionSize = sig.position_size ?? cfg.defaultPositionSize;
+      source = 'template_fallback';
+    }
+
+    // 信号里如果显式带字段, 最高优先级
+    if (sig.entry != null) entryPrice = Number(sig.entry);
+    if (sig.stop_loss != null) sl = Number(sig.stop_loss);
+    if (sig.tp1 != null) tp1 = Number(sig.tp1);
+    if (sig.tp2 != null) tp2 = Number(sig.tp2);
+    if (sig.tp3 != null) tp3 = Number(sig.tp3);
+    if (sig.position_size != null) positionSize = sig.position_size;
+    if (sig.entry != null || sig.stop_loss != null) source = 'signal_explicit';
+
+    // ---- 数值健全性校验：止损/止盈方向必须正确 ----
+    const isLong = direction === 'long';
+    const slOk = isLong ? sl < entryPrice : sl > entryPrice;
+    const tpOk = isLong
+      ? (tp1 > entryPrice && tp2 > tp1 && tp3 > tp2)
+      : (tp1 < entryPrice && tp2 < tp1 && tp3 < tp2);
+    if (!slOk || !tpOk) {
+      // 当前价已穿越 plan 区间, 直接拒绝, 避免一开仓就触发
+      const reason = !slOk ? 'sl_wrong_side' : 'tp_wrong_order';
+      exec.notify({
+        type: 'open_blocked',
+        title: `🚫 ${direction.toUpperCase()} 开仓被拦截 (${reason})`,
+        lines: [
+          `市价 ${entryPrice} 已偏离 plan 区间, 撮合后会立刻触发, 已拒绝`,
+          `plan 入场价: ${planEntry ?? '--'} | sl: ${sl} | tp1: ${tp1}`,
+          `建议: 等待下一根 K 线刷新 plan, 或检查 regime 信号方向`,
+        ],
+        isAlert: true,
+      });
+      return res.status(409).json({ ok: false, error: reason, marketPrice, sl, tp1, tp2, tp3, planEntry });
+    }
 
     // 登记仓位（locked = true）
     const pos = state.openPosition(direction, {
-      entryPrice,
+      entryPrice,                  // 实际入场价（市价）
+      planEntry: planEntry || null, // 理想入场价（plan 算的, 仅展示）
       entryAt: new Date().toISOString(),
       leverage: sig.leverage ?? cfg.defaultLeverage,
-      positionSize: sig.position_size ?? cfg.defaultPositionSize,
-      tp1: lv.tp1, tp2: lv.tp2, tp3: lv.tp3,
-      initialStopLoss: lv.sl,
-      currentStopLoss: lv.sl,
+      positionSize,
+      tp1, tp2, tp3,
+      initialStopLoss: sl,
+      currentStopLoss: sl,
       raw: sig,
+      priceSource: source,
     });
 
-    // 转发开仓 webhook (异步, 不阻塞响应)
+    // 计算实际滑点（市价 vs plan 理想入场价）
+    const slipPct = (planEntry && planEntry > 0)
+      ? (((entryPrice - planEntry) / planEntry * 100) * (isLong ? 1 : -1)).toFixed(3)
+      : null;
+
+    const sourceZh = ({
+      regime_plan: '✅ regime tradePlan (与 TG 推送一致)',
+      template_fallback: '⚠️ 模板回退 (regime plan 不可用)',
+      signal_explicit: '📝 外部信号显式指定',
+    })[source] || source;
     exec.forwardOpen(sig).then((r) => {
       exec.notify({
         type: 'open_ok',
-        title: `${direction === 'long' ? '🟢' : '🔴'} ${direction.toUpperCase()} 开仓成功`,
+        title: `${direction === 'long' ? '🟢' : '🔴'} ${direction.toUpperCase()} 开仓成功 (市价)`,
         lines: [
           `symbol: ${cfg.symbol}`,
-          `入场价: ${entryPrice}`,
-          `仓位: ${pos.positionSize} / 杠杆: ${pos.leverage}x`,
-          `TP1: ${lv.tp1.toFixed(2)} (50%)`,
-          `TP2: ${lv.tp2.toFixed(2)} (30%)`,
-          `TP3: ${lv.tp3.toFixed(2)} (20%)`,
-          `SL : ${lv.sl.toFixed(2)} (100%)`,
+          `价位来源: ${sourceZh}` + (planAgeSec != null ? ` · plan 距今 ${planAgeSec}s` : ''),
+          confidence ? `置信度: ${confidence}` : null,
+          `市价入场: ${Number(entryPrice).toFixed(2)}`,
+          planEntry ? `plan 理想入场: ${planEntry.toFixed(2)}${slipPct != null ? ` · 滑点 ${slipPct}%` : ''}` : null,
+          `仓位: ${positionSize} / 杠杆: ${pos.leverage}x`,
+          `TP1: ${tp1.toFixed(2)} (50%)`,
+          `TP2: ${tp2.toFixed(2)} (30%)`,
+          `TP3: ${tp3.toFixed(2)} (20%)`,
+          `SL : ${sl.toFixed(2)} (100%)`,
           `转发开仓 webhook: ${r.res.ok ? '✅ 已发送' : '❌ ' + (r.res.error || r.res.skipped)}`,
-        ],
+        ].filter(Boolean),
       });
     });
 
-    return res.json({ ok: true, action, position: pos });
+    return res.json({ ok: true, action, position: pos, priceSource: source });
   }
 
   // ===== 外部直接发来的 take_profit / stop_loss =====
