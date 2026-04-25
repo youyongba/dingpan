@@ -53,6 +53,10 @@ app.use(express.static('public'));
 
 // === Regime 监控（独立模块）：JSON 接口 + Chart.js 面板 + 飞书通知 ===
 app.use('/api/regime', regimeMod.router);
+
+// === 自动平仓引擎（独立模块）：WS 监控 + 风控 + 出站 webhook ===
+const autoTrade = require('./trading');
+autoTrade.attach(app);
 // 直接访问 /regime 即跳转到面板
 app.get('/regime', (req, res) => res.redirect('/api/regime/page'));
 // 依赖注入：飞书通知（支持富文本 rich / 纯文本 / alert）
