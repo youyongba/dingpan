@@ -17,6 +17,14 @@ const { computeMACD, computeRSI, detectMacdCross, classifyRSI } = require('./ind
 const { enhance: enhanceRegime, SUB_LABELS } = require('./regime/enhancedJudge');
 const webhook = require('./notifier/feishuWebhook');
 const tg = require('./notifier/telegram'); // ← 新增：Telegram VIP 群推送（独立通道）
+const tradeConfig = require('./trading/config'); // 自动交易开关（用于动态文案）
+
+// 根据当前自动交易开关返回提示文案
+function autoTradeNote() {
+  return tradeConfig.get().enabled
+    ? '✅ 自动交易已开启，系统将按本计划自动执行 TP/SL'
+    : '⚠️ 自动交易未开启，本建议价位仅作参考';
+}
 
 const router = express.Router();
 
@@ -440,7 +448,7 @@ function buildTradePlan(ind, regime, klines) {
       `止损距离 = 1.5 × ATR = ${risk.toFixed(2)} (${(risk / entry * 100).toFixed(2)}%)`,
       `R:R = 1 : 3，期望盈亏比正向`,
       `仓位建议 ${positionPct}% 仓位（按账户资金计算）`,
-      '⚠️ 建议价位仅供参考，系统为纯盯盘模式不会自动下单',
+      autoTradeNote(),
     ],
   };
 }
@@ -567,7 +575,7 @@ function buildPlanRichLines(plan, regime, klines) {
   lines.push([{ text: `HV: ${fmt(m.hv)}% · ATR: ${fmt(plan.riskPerUnit / 1.5)} · Close: ${fmt(lastClose)}` }]);
   lines.push([{ text: `MACD: DIF ${fmt(em.macd)} / DEA ${fmt(em.signal)} / HIST ${fmt(em.hist)} · RSI(14): ${fmt(em.rsi)}` }]);
   if (regime.riskNote) lines.push([{ text: '⚠️ ' + regime.riskNote, italic: true }]);
-  lines.push([{ text: '⚠️ 仅作建议，系统为纯盯盘模式不会自动下单', italic: true }]);
+  lines.push([{ text: autoTradeNote(), italic: true }]);
   return lines;
 }
 

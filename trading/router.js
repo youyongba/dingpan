@@ -194,6 +194,23 @@ router.get('/status', (req, res) => {
   });
 });
 
+// ============ POST /toggle: 一键开关自动交易 ============
+// body: { enabled: true|false }
+// 设计上不强制 X-Auth-Token, 只切换 enabled 一个布尔; 改其它字段仍走 /config
+router.post('/toggle', (req, res) => {
+  const next = !!(req.body && req.body.enabled);
+  const updated = config.patch({ enabled: next });
+  exec.notify({
+    type: next ? 'unlock' : 'reset',
+    title: next ? '✅ 自动交易已开启' : '⛔ 自动交易已关闭',
+    lines: [
+      next ? '系统将自动接收信号并执行 TP/SL/平仓 webhook' : '系统进入纯盯盘模式, 不再自动下单',
+      '可在前端开关或 POST /api/auto-trade/toggle 切换',
+    ],
+  });
+  res.json({ ok: true, enabled: updated.enabled });
+});
+
 // ============ GET /config ============
 router.get('/config', (req, res) => {
   // 出于安全, token 不全量回显

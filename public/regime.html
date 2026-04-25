@@ -97,6 +97,33 @@
   .plan-notes { font-size: 11px; color: #8b949e; line-height: 1.6; }
   .plan-notes div::before { content: "· "; }
   .plan-disclaimer { color: #d29922; }
+  .plan-armed     { color: #3fb950; }
+
+  /* 自动交易开关 */
+  .auto-trade-bar {
+    display: flex; align-items: center; gap: 14px;
+    padding: 10px 14px; margin-bottom: 12px; border-radius: 8px;
+    border: 1px solid #30363d; background: #161b22;
+  }
+  .auto-trade-bar .at-label { font-size: 13px; color: #c9d1d9; font-weight: 600; }
+  .auto-trade-bar .at-state { font-size: 12px; padding: 2px 8px; border-radius: 4px; }
+  .auto-trade-bar .at-state.on  { background: #3fb95033; color: #3fb950; }
+  .auto-trade-bar .at-state.off { background: #d2992233; color: #d29922; }
+  .auto-trade-bar .at-meta { font-size: 11px; color: #8b949e; margin-left: auto; }
+  /* iOS 风格开关 */
+  .switch { position: relative; display: inline-block; width: 44px; height: 24px; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch .slider {
+    position: absolute; cursor: pointer; inset: 0;
+    background: #30363d; border-radius: 24px; transition: .2s;
+  }
+  .switch .slider::before {
+    content: ""; position: absolute; height: 18px; width: 18px;
+    left: 3px; top: 3px; background: white; border-radius: 50%; transition: .2s;
+  }
+  .switch input:checked + .slider { background: #3fb950; }
+  .switch input:checked + .slider::before { transform: translateX(20px); }
+  .switch input:disabled + .slider { opacity: 0.5; cursor: not-allowed; }
 
   .latest {
     display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
@@ -136,6 +163,20 @@
 </div>
 
 <div id="err" class="err"></div>
+
+<!-- 自动交易开关 -->
+<div class="auto-trade-bar">
+  <span class="at-label">自动下单</span>
+  <label class="switch">
+    <input type="checkbox" id="autoTradeToggle" disabled>
+    <span class="slider"></span>
+  </label>
+  <span id="autoTradeState" class="at-state off">读取中...</span>
+  <span class="at-meta">
+    开启后系统接收 webhook 信号将自动执行 TP/SL；关闭后仅展示建议价位
+    · <span id="autoTradePrice">价格源 --</span>
+  </span>
+</div>
 
 <div class="regime-banner">
   <div id="regimeTag" class="regime-tag regime-unknown">--</div>
@@ -231,6 +272,62 @@
 
   const fmt = (v, d = 2) =>
     v == null || !isFinite(v) ? '--' : Number(v).toFixed(d);
+
+  // 自动交易开关全局状态
+  const autoTrade = { enabled: false, ready: false };
+
+  function renderAutoTradeNote() {
+    return autoTrade.enabled
+      ? '<div class="plan-armed">✅ 自动交易已开启，系统将按本计划自动执行 TP/SL</div>'
+      : '<div class="plan-disclaimer">⚠️ 自动交易未开启，本建议价位仅供参考</div>';
+  }
+
+  async function fetchAutoTradeStatus() {
+    try {
+      const r = await fetch('/api/auto-trade/status');
+      const j = await r.json();
+      autoTrade.enabled = !!j.enabled;
+      autoTrade.ready = true;
+      const stateEl = document.getElementById('autoTradeState');
+      const toggle = document.getElementById('autoTradeToggle');
+      const price = document.getElementById('autoTradePrice');
+      stateEl.textContent = autoTrade.enabled ? '已开启' : '已关闭';
+      stateEl.className = 'at-state ' + (autoTrade.enabled ? 'on' : 'off');
+      toggle.checked = autoTrade.enabled;
+      toggle.disabled = false;
+      const pf = j.priceFeed || {};
+      const conn = pf.connected ? '✅ 已连接' : '❌ 未连接';
+      const last = pf.lastPrice ? ' · 最新价 ' + Number(pf.lastPrice).toFixed(2) : '';
+      price.textContent = `价格源 ${conn}${last}`;
+    } catch (e) {
+      const stateEl = document.getElementById('autoTradeState');
+      stateEl.textContent = '后端不可达';
+      stateEl.className = 'at-state off';
+    }
+  }
+
+  async function setAutoTrade(enabled) {
+    const stateEl = document.getElementById('autoTradeState');
+    const toggle = document.getElementById('autoTradeToggle');
+    toggle.disabled = true;
+    stateEl.textContent = '切换中...';
+    try {
+      const r = await fetch('/api/auto-trade/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+      autoTrade.enabled = !!j.enabled;
+    } catch (e) {
+      alert('切换失败：' + e.message);
+    } finally {
+      await fetchAutoTradeStatus();
+      // 刷新一下交易计划文案
+      try { await load(); } catch (_) {}
+    }
+  }
 
   function setRegime(reg) {
     const el = document.getElementById('regimeTag');
@@ -560,7 +657,7 @@
       conf.textContent = plan.currentPrice ? '当前价 ' + plan.currentPrice : '';
       grid.style.display = 'none';
       tpsBox.style.display = 'none';
-      notes.innerHTML = '<div class="plan-disclaimer">⚠️ 仅供参考，纯盯盘模式不会自动下单</div>';
+      notes.innerHTML = renderAutoTradeNote();
       return;
     }
 
@@ -589,11 +686,16 @@
     ).join('');
     tpsBox.style.display = 'block';
 
-    notes.innerHTML = (plan.notes || []).map(n => {
-      const cls = n.startsWith('⚠️') ? ' class="plan-disclaimer"' : '';
+    // 移除后端静态的"自动交易提示"行, 改用前端实时拼装(以开关状态为准)
+    const filtered = (plan.notes || []).filter(n =>
+      !/自动交易|纯盯盘|仅作参考|仅供参考/.test(n)
+    );
+    notes.innerHTML = filtered.map(n => {
+      const cls = n.startsWith('⚠️') ? ' class="plan-disclaimer"' :
+                  n.startsWith('✅') ? ' class="plan-armed"' : '';
       const text = n.replace(/</g, '&lt;');
       return `<div${cls}>${text}</div>`;
-    }).join('');
+    }).join('') + renderAutoTradeNote();
   }
 
   function render(data) {
@@ -688,9 +790,16 @@
     await load();
   });
 
-  load();
-  // 前端每 60s 自拉一次（后端每 5min 真正去 Binance）
+  document.getElementById('autoTradeToggle').addEventListener('change', (e) => {
+    setAutoTrade(e.target.checked);
+  });
+
+  // 启动顺序：先拉自动交易状态(决定文案), 再加载行情数据
+  fetchAutoTradeStatus().then(load);
+  // 行情每 60s 自拉一次（后端每 5min 真正去 Binance）
   setInterval(load, 60 * 1000);
+  // 自动交易状态每 5s 同步一次(展示 WS 连接 + 最新价 + 双端状态一致)
+  setInterval(fetchAutoTradeStatus, 5 * 1000);
 })();
 </script>
 </body>
