@@ -173,10 +173,36 @@ function escapeHTML(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+/**
+ * 把出站 webhook payload 序列化成 notify lines, 直接发飞书核对.
+ *
+ *   📤 webhook payload (open_long):
+ *   {
+ *     "token": "...",
+ *     "action": "open_long",
+ *     ...
+ *   }
+ *
+ * @param {string} label    标签, 如 'open_long' / 'tp_1' / 'sl'
+ * @param {object} payload  实际 POST 给 webhookUrl 的 JSON 对象
+ * @returns {string[]}      lines 数组, 调用方直接 spread 进 notify({lines})
+ */
+function formatPayloadLines(label, payload) {
+  if (payload == null) return [`📤 webhook payload (${label}): <无, 该通道未启用或被跳过>`];
+  let body;
+  try {
+    body = JSON.stringify(payload, null, 2);
+  } catch (_) {
+    body = String(payload);
+  }
+  return [`📤 webhook payload (${label}):`, ...body.split('\n')];
+}
+
 module.exports = {
   postWebhook,
   fireTakeProfit,
   fireStopLoss,
   forwardOpen,
   notify,
+  formatPayloadLines,
 };

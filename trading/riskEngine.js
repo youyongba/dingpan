@@ -130,6 +130,7 @@ async function fireTp(direction, level, triggerPrice) {
       `入场价: ${p.entryPrice}`,
       `平仓比例: ${closePct}`,
       `平仓 webhook: ${res.ok ? '✅ 已发送' : '❌ 失败 ' + (res.error || '')}`,
+      ...exec.formatPayloadLines(level, payload),
     ],
   });
 
@@ -175,6 +176,7 @@ async function fireSl(direction, triggerPrice, triggerTag = 'sl') {
       `入场价: ${p.entryPrice}`,
       `止损价: ${p.currentStopLoss}`,
       `平仓 webhook: ${res.ok ? '✅ 已发送' : '❌ 失败 ' + (res.error || '')}`,
+      ...exec.formatPayloadLines(triggerTag, payload),
     ],
     isAlert: true,
   });

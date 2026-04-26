@@ -825,11 +825,12 @@ function handleNotificationsOnSuccess(prevRegime, currentRegime, klines, tradePl
     const prev = notifyState.lastTradeAction;
     if (action === 'LONG') {
       notifyRich('📈 交易信号：转为做多 (LONG)', buildPlanRichLines(tradePlan, currentRegime, klines));
-      // ↓ 新增：Telegram VIP 群推送（异步、不阻塞、失败仅打日志）
       tg.fireAndForget(tg.sendTradeSignal(tradePlan, currentRegime, { eventType: 'OPEN' }));
+      triggerAutoTrade('open_long', tradePlan);
     } else if (action === 'SHORT') {
       notifyRich('📉 交易信号：转为做空 (SHORT)', buildPlanRichLines(tradePlan, currentRegime, klines));
       tg.fireAndForget(tg.sendTradeSignal(tradePlan, currentRegime, { eventType: 'OPEN' }));
+      triggerAutoTrade('open_short', tradePlan);
     } else if (action === 'NEUTRAL') {
       const title = prev === 'LONG'
         ? '🟡 交易信号：做多结束 → 观望'
@@ -842,6 +843,54 @@ function handleNotificationsOnSuccess(prevRegime, currentRegime, klines, tradePl
     notifyState.lastTradeAction = action;
     saveNotifyState();
   }
+}
+
+/**
+ * 把 regime 喊单自动桥接到本仓库的 trading 引擎
+ *
+ *  - 复用 trading/router.js 内部的 processSignal(), 与外部 webhook 走同一入口,
+ *    所以 token 校验 / state.canOpen() / 反向独立 / TP-SL 健全性校验 / regime plan 价位
+ *    全部沿用现成逻辑, 这里只是触发器.
+ *
+ *  - 同方向已锁定时 processSignal 会以 409 拒绝; 反方向不受影响.
+ *  - 价位 / 仓位 / 置信度 不在这里传, 由 processSignal 内部的 planLevelsFromRegime()
+ *    取最新 cache.tradePlan, 与 TG 喊单保持完全一致.
+ *  - 默认开启, 通过环境变量 AUTO_TRADE_FROM_REGIME=0 可一键关闭.
+ *
+ * 注意: fire-and-forget, 任何失败都不影响 TG/飞书喊单消息.
+ */
+function triggerAutoTrade(action, tradePlan) {
+  if (process.env.AUTO_TRADE_FROM_REGIME === '0') return;
+
+  const cfg = tradeConfig.get();
+  if (!cfg.enabled) {
+    console.log(`[regime→trade] ⏭ 跳过 ${action}: trading.enabled=false`);
+    return;
+  }
+  if (!tradePlan || !tradePlan.ok) {
+    console.log(`[regime→trade] ⏭ 跳过 ${action}: tradePlan.ok=false`);
+    return;
+  }
+
+  const { processSignal } = require('./trading/router');
+  if (typeof processSignal !== 'function') {
+    console.error('[regime→trade] ❌ trading/router.js 未导出 processSignal');
+    return;
+  }
+
+  Promise.resolve()
+    .then(() => processSignal(
+      { token: cfg.token, action, symbol: cfg.symbol },
+      { source: 'regime' }
+    ))
+    .then((r) => {
+      const tag = r.status >= 200 && r.status < 300 ? '✅' : '⏭';
+      const summary = r.body && (r.body.error || (r.body.position && `entry=${r.body.position.entryPrice} sl=${r.body.position.initialStopLoss}`)) || '';
+      console.log(`[regime→trade] ${tag} ${action} status=${r.status} ${summary}`);
+    })
+    .catch((e) => {
+      console.error(`[regime→trade] ❌ ${action} 异常:`, e?.message || e);
+    });
 }
 
 function handleNotificationsOnFailure(errMsg) {

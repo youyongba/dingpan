@@ -11,6 +11,10 @@
  *    POST /api/auto-trade/config      局部更新配置 (鉴权)
  *
  *  鉴权：通过请求头 X-Auth-Token, 与 process.env.CONFIG_AUTH_TOKEN 比对
+ *
+ *  对内 API:
+ *    processSignal(sig, opts) - 同 /signal 路由的核心处理体, 供 regimeModule 等
+ *                               in-process 模块直接调用, 无需绕 HTTP
  * ============================================================
  */
 'use strict';
@@ -50,7 +54,7 @@ function calcLevels(direction, entryPrice) {
     tp1: pct(seg.tp1),
     tp2: pct(seg.tp2),
     tp3: pct(seg.tp3),
-    sl: entryPrice * (1 - sign * (seg.sl / 100)),  // 反向
+    sl: entryPrice * (1 - sign * (seg.sl / 100)),
   };
 }
 
@@ -74,13 +78,11 @@ function planLevelsFromRegime(direction) {
   const tps = Array.isArray(tradePlan.takeProfits) ? tradePlan.takeProfits : [];
   if (tps.length < 3) return null;
 
-  // 时效性：5min 刷新, 30min 内视为有效
   const ageMs = updatedAt ? Date.now() - updatedAt : Infinity;
   if (ageMs > 30 * 60 * 1000) return null;
 
   return {
-    // ↓ 不返回 entryPrice, 由调用方注入 WS 实时价 (市价开仓)
-    planEntry: Number(tradePlan.entry),     // 仅做"理想入场价"展示, 不参与撮合
+    planEntry: Number(tradePlan.entry),
     tp1: Number(tps[0].price),
     tp2: Number(tps[1].price),
     tp3: Number(tps[2].price),
@@ -92,59 +94,69 @@ function planLevelsFromRegime(direction) {
   };
 }
 
-// ============ POST /signal: 核心入口 ============
-router.post('/signal', async (req, res) => {
+/**
+ * 处理一条 trading 信号 (开仓 / 平仓 / 止盈)
+ *
+ * 抽出为独立函数, 便于:
+ *   1) Express 路由 POST /signal 直接复用
+ *   2) regimeModule 在生成 LONG/SHORT plan 时直接 in-process 调用,
+ *      无需绕 HTTP, 无需配置端口, 也避免 listen 顺序问题
+ *
+ * @param {object} sig         信号 payload (与外部 webhook 入参完全一致)
+ * @param {object} [opts]
+ * @param {string} [opts.source='external']  调用来源标记, 仅用于日志/通知排查
+ * @returns {Promise<{status:number, body:object}>}
+ */
+async function processSignal(sig, opts = {}) {
   const cfg = config.get();
-  const sig = req.body || {};
+  sig = sig || {};
+  const callerSource = opts.source || 'external';
 
-  // 1. token 校验
   if (!sig.token || sig.token !== cfg.token) {
-    return res.status(401).json({ ok: false, error: 'invalid_token' });
+    return { status: 401, body: { ok: false, error: 'invalid_token' } };
   }
   if (!cfg.enabled) {
-    return res.status(503).json({ ok: false, error: 'auto_trade_disabled' });
+    return { status: 503, body: { ok: false, error: 'auto_trade_disabled' } };
   }
 
   const action = sig.action;
 
-  // ===== 观望 =====
   if (action === 'wait') {
-    exec.notify({ type: 'wait', title: '⏸ 观望信号已忽略', lines: [`symbol: ${sig.symbol || cfg.symbol}`] });
-    return res.json({ ok: true, action: 'wait', skipped: true });
+    exec.notify({
+      type: 'wait',
+      title: '⏸ 观望信号已忽略',
+      lines: [`symbol: ${sig.symbol || cfg.symbol}`, `来源: ${callerSource}`],
+    });
+    return { status: 200, body: { ok: true, action: 'wait', skipped: true } };
   }
 
-  // ===== 开仓 =====
   if (action === 'open_long' || action === 'open_short') {
     const direction = action === 'open_long' ? 'long' : 'short';
 
-    // 同方向锁定 → 拒绝
     const gate = state.canOpen(direction);
     if (!gate.ok) {
       exec.notify({
         type: 'open_blocked',
         title: `🚫 ${direction.toUpperCase()} 重复开仓被拦截`,
         lines: [
+          `来源: ${callerSource}`,
           `原因: ${gate.reason}`,
           `当前持仓入场价: ${gate.position?.entryPrice}`,
           `已触发 TP1=${gate.position?.tpHit?.tp1} TP2=${gate.position?.tpHit?.tp2}`,
         ],
       });
-      // 关键：不影响反方向, 反方向可以正常开
-      return res.status(409).json({ ok: false, error: gate.reason });
+      return { status: 409, body: { ok: false, error: gate.reason } };
     }
 
-    // ---- 入场价：始终用 WS 实时价 (市价立即成交, 不等回踩) ----
     const marketPrice = priceFeed.getStatus().lastPrice;
     if (!Number.isFinite(marketPrice)) {
-      return res.status(503).json({ ok: false, error: 'price_feed_not_ready' });
+      return { status: 503, body: { ok: false, error: 'price_feed_not_ready' } };
     }
 
-    // ---- TP/SL/仓位决策：优先用 regime plan, 否则回退 template ----
     const planLv = planLevelsFromRegime(direction);
     let entryPrice = marketPrice;
     let tp1, tp2, tp3, sl, positionSize, source, confidence, planAgeSec, planEntry;
     if (planLv) {
-      // ✅ 与 TG 推送的 plan 完全一致（除 entry 外）
       ({ tp1, tp2, tp3, sl, positionSize, confidence, planAgeSec, planEntry } = planLv);
       source = 'regime_plan';
     } else {
@@ -154,7 +166,6 @@ router.post('/signal', async (req, res) => {
       source = 'template_fallback';
     }
 
-    // 信号里如果显式带字段, 最高优先级
     if (sig.entry != null) entryPrice = Number(sig.entry);
     if (sig.stop_loss != null) sl = Number(sig.stop_loss);
     if (sig.tp1 != null) tp1 = Number(sig.tp1);
@@ -163,32 +174,33 @@ router.post('/signal', async (req, res) => {
     if (sig.position_size != null) positionSize = sig.position_size;
     if (sig.entry != null || sig.stop_loss != null) source = 'signal_explicit';
 
-    // ---- 数值健全性校验：止损/止盈方向必须正确 ----
     const isLong = direction === 'long';
     const slOk = isLong ? sl < entryPrice : sl > entryPrice;
     const tpOk = isLong
       ? (tp1 > entryPrice && tp2 > tp1 && tp3 > tp2)
       : (tp1 < entryPrice && tp2 < tp1 && tp3 < tp2);
     if (!slOk || !tpOk) {
-      // 当前价已穿越 plan 区间, 直接拒绝, 避免一开仓就触发
       const reason = !slOk ? 'sl_wrong_side' : 'tp_wrong_order';
       exec.notify({
         type: 'open_blocked',
         title: `🚫 ${direction.toUpperCase()} 开仓被拦截 (${reason})`,
         lines: [
+          `来源: ${callerSource}`,
           `市价 ${entryPrice} 已偏离 plan 区间, 撮合后会立刻触发, 已拒绝`,
           `plan 入场价: ${planEntry ?? '--'} | sl: ${sl} | tp1: ${tp1}`,
           `建议: 等待下一根 K 线刷新 plan, 或检查 regime 信号方向`,
         ],
         isAlert: true,
       });
-      return res.status(409).json({ ok: false, error: reason, marketPrice, sl, tp1, tp2, tp3, planEntry });
+      return {
+        status: 409,
+        body: { ok: false, error: reason, marketPrice, sl, tp1, tp2, tp3, planEntry },
+      };
     }
 
-    // 登记仓位（locked = true）
     const pos = state.openPosition(direction, {
-      entryPrice,                  // 实际入场价（市价）
-      planEntry: planEntry || null, // 理想入场价（plan 算的, 仅展示）
+      entryPrice,
+      planEntry: planEntry || null,
       entryAt: new Date().toISOString(),
       leverage: sig.leverage ?? cfg.defaultLeverage,
       positionSize,
@@ -199,7 +211,6 @@ router.post('/signal', async (req, res) => {
       priceSource: source,
     });
 
-    // 计算实际滑点（市价 vs plan 理想入场价）
     const slipPct = (planEntry && planEntry > 0)
       ? (((entryPrice - planEntry) / planEntry * 100) * (isLong ? 1 : -1)).toFixed(3)
       : null;
@@ -209,12 +220,14 @@ router.post('/signal', async (req, res) => {
       template_fallback: '⚠️ 模板回退 (regime plan 不可用)',
       signal_explicit: '📝 外部信号显式指定',
     })[source] || source;
+
     exec.forwardOpen(sig).then((r) => {
       exec.notify({
         type: 'open_ok',
         title: `${direction === 'long' ? '🟢' : '🔴'} ${direction.toUpperCase()} 开仓成功 (市价)`,
         lines: [
           `symbol: ${cfg.symbol}`,
+          `信号来源: ${callerSource}`,
           `价位来源: ${sourceZh}` + (planAgeSec != null ? ` · plan 距今 ${planAgeSec}s` : ''),
           confidence ? `置信度: ${confidence}` : null,
           `市价入场: ${Number(entryPrice).toFixed(2)}`,
@@ -225,19 +238,18 @@ router.post('/signal', async (req, res) => {
           `TP3: ${tp3.toFixed(2)} (20%)`,
           `SL : ${sl.toFixed(2)} (100%)`,
           `转发开仓 webhook: ${r.res.ok ? '✅ 已发送' : '❌ ' + (r.res.error || r.res.skipped)}`,
+          ...exec.formatPayloadLines(action, r.payload),
         ].filter(Boolean),
       });
     });
 
-    return res.json({ ok: true, action, position: pos, priceSource: source });
+    return { status: 200, body: { ok: true, action, position: pos, priceSource: source } };
   }
 
-  // ===== 外部直接发来的 take_profit / stop_loss =====
-  // (一般是本系统 WS 自动触发, 但允许外部手动 trigger)
   if (action === 'take_profit' || action === 'stop_loss') {
     const direction = sig.direction;
     if (!['long', 'short'].includes(direction)) {
-      return res.status(400).json({ ok: false, error: 'missing_direction' });
+      return { status: 400, body: { ok: false, error: 'missing_direction' } };
     }
     if (action === 'stop_loss') {
       const r = await exec.fireStopLoss(direction, { trigger: sig.trigger || 'sl' });
@@ -245,19 +257,37 @@ router.post('/signal', async (req, res) => {
       exec.notify({
         type: 'sl',
         title: `🔻 ${direction.toUpperCase()} 外部触发止损 (100% 全平)`,
-        lines: [`webhook: ${r.res.ok ? '✅' : '❌ ' + (r.res.error || '')}`],
+        lines: [
+          `来源: ${callerSource}`,
+          `webhook: ${r.res.ok ? '✅' : '❌ ' + (r.res.error || '')}`,
+          ...exec.formatPayloadLines(sig.trigger || 'sl', r.payload),
+        ],
         isAlert: true,
       });
-      return res.json({ ok: true, ...r.res });
+      return { status: 200, body: { ok: true, ...r.res } };
     }
-    // take_profit
     const r = await exec.fireTakeProfit(direction, sig.trigger, {
       setProtectionSl: !!sig.set_protection_sl,
     });
-    return res.json({ ok: true, ...r.res });
+    exec.notify({
+      type: 'tp',
+      title: `📤 ${direction.toUpperCase()} 外部触发止盈 (${sig.trigger || 'tp'})`,
+      lines: [
+        `来源: ${callerSource}`,
+        `webhook: ${r.res.ok ? '✅' : '❌ ' + (r.res.error || '')}`,
+        ...exec.formatPayloadLines(sig.trigger || 'tp', r.payload),
+      ],
+    });
+    return { status: 200, body: { ok: true, ...r.res } };
   }
 
-  return res.status(400).json({ ok: false, error: `unknown_action: ${action}` });
+  return { status: 400, body: { ok: false, error: `unknown_action: ${action}` } };
+}
+
+// ============ POST /signal: 核心入口 ============
+router.post('/signal', async (req, res) => {
+  const r = await processSignal(req.body || {}, { source: 'http' });
+  res.status(r.status).json(r.body);
 });
 
 // ============ POST /reset: 手动重置（解锁 + 取消所有 TP/SL） ============
@@ -309,7 +339,6 @@ router.post('/toggle', (req, res) => {
 
 // ============ GET /config ============
 router.get('/config', (req, res) => {
-  // 出于安全, token 不全量回显
   const c = config.get();
   res.json({ ok: true, config: { ...c, token: c.token ? c.token.slice(0, 8) + '***' : '' } });
 });
@@ -321,3 +350,4 @@ router.post('/config', requireAdmin, (req, res) => {
 });
 
 module.exports = router;
+module.exports.processSignal = processSignal;
