@@ -93,14 +93,19 @@ function check(name, ok, detail) {
   check('long 冷却中, short 能通过', r3.res.ok === true);
   check('axios.post 累计 2 次', postCount === 2, `实际 postCount=${postCount}`);
 
-  // ============= Case 4: 平仓 (TP/SL) 仍保留默认重试 =============
-  console.log('\n=== Case 4: fireTakeProfit / fireStopLoss 仍有重试 ===');
+  // ============= Case 4: 平仓 (TP/SL) 也走 retry=0 (跟开仓一致, 接收方非幂等) =============
+  console.log('\n=== Case 4: fireTakeProfit / fireStopLoss 也走 retry=0 ===');
   await reset();
   mockMode = 'fail';
-  tradeConfig.patch({ webhookRetry: 2 });
+  tradeConfig.patch({ webhookRetry: 2 });    // 默认配置不变, 但 fireStopLoss 内部强制 retry=0
   const r4 = await exec.fireStopLoss('long', { trigger: 'sl' });
-  check('SL 失败时尝试 3 次 (1 + retry 2)', r4.res.attempts === 3, `实际 attempts=${r4.res.attempts}`);
-  check('axios.post 累计 3 次', postCount === 3, `实际 postCount=${postCount}`);
+  check('SL 失败也仅 1 次尝试 (retry=0)', r4.res.attempts === 1, `实际 attempts=${r4.res.attempts}`);
+  check('axios.post 累计 1 次', postCount === 1, `实际 postCount=${postCount}`);
+
+  await reset();
+  mockMode = 'fail';
+  const r4b = await exec.fireTakeProfit('long', 'tp_1', {});
+  check('TP 失败也仅 1 次尝试 (retry=0)', r4b.res.attempts === 1, `实际 attempts=${r4b.res.attempts}`);
 
   // ============= 总结 =============
   console.log(`\n--- 结果: ${passed} passed, ${failed} failed ---`);

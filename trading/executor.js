@@ -115,13 +115,16 @@ function buildOpenForwardPayload(rawSignal) {
 async function fireTakeProfit(direction, level, opts = {}) {
   const closePercent = ({ tp_1: '50%', tp_2: '30%', tp_3: '20%' })[level];
   const payload = buildTpPayload(direction, level, closePercent, opts);
-  const res = await postWebhook(payload, `${direction.toUpperCase()} ${level}`);
+  // ⚠️ 接收方非幂等 (同 payload 会重复下单), TP/SL 也必须 retry=0.
+  // riskEngine 已先把 tpHit 写盘, 即便此次失败, 后续 tick 不会重复 fireTp.
+  // 失败时飞书会告警, 用户人工去交易所核对.
+  const res = await postWebhook(payload, `${direction.toUpperCase()} ${level}`, { retry: 0 });
   return { res, payload };
 }
 
 async function fireStopLoss(direction, opts = {}) {
   const payload = buildSlPayload(direction, opts.trigger || 'sl');
-  const res = await postWebhook(payload, `${direction.toUpperCase()} SL`);
+  const res = await postWebhook(payload, `${direction.toUpperCase()} SL`, { retry: 0 });
   return { res, payload };
 }
 

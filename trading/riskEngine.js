@@ -23,7 +23,16 @@ const exec = require('./executor');
 const config = require('./config');
 const priceFeed = require('./priceFeed');
 
-// 防抖：刚触发的动作 1.5s 内同方向不再触发
+// ---------------- 防重复触发 ----------------
+//
+// 三道闸 (优先级从严到松):
+//   A) _inFlight: 进入 fireTp/fireSl 立即 set true, finally 释放. 同方向 evaluate 直接 return,
+//      解决 "await postWebhook 期间事件循环切回处理新 tick" 的核心 race condition.
+//   B) 状态前置写盘: fireTp 进入第一时间调 state.markTpHit (写 disk), fireSl 进入第一时间
+//      调 state.closeAndUnlock (active=false). 即便 _inFlight 因异常路径漏释放, 后续 tick
+//      也会被 active=false / tpHit.tpN=true 拦下来.
+//   C) recentlyFired 防抖: 同方向 1.5s 冷却, 应对极端情况下的同 tick 重入.
+const _inFlight = { long: false, short: false };
 const recentlyFired = { long: 0, short: 0 };
 const FIRE_COOLDOWN_MS = 1500;
 
@@ -74,9 +83,10 @@ function onTick({ price }) {
 }
 
 function evaluate(direction, price) {
+  if (_inFlight[direction]) return;          // 闸 A: webhook 还没发完, 直接拒绝再入
   const p = state.getPosition(direction);
-  if (!p || !p.active) return;
-  if (Date.now() - recentlyFired[direction] < FIRE_COOLDOWN_MS) return;
+  if (!p || !p.active) return;               // 闸 B (隐式): SL 触发后 active=false 立刻拦
+  if (Date.now() - recentlyFired[direction] < FIRE_COOLDOWN_MS) return;  // 闸 C: 防抖
 
   const isLong = direction === 'long';
   const above = (a, b) => a >= b;   // 多: 价格上穿 TP
@@ -109,82 +119,117 @@ function evaluate(direction, price) {
 }
 
 async function fireTp(direction, level, triggerPrice) {
+  if (_inFlight[direction]) return;                    // 双保险: evaluate 已拦, 再兜一道
+  _inFlight[direction] = true;
   recentlyFired[direction] = Date.now();
-  const setProtection = (level === 'tp_1');
-  const { res, payload } = await exec.fireTakeProfit(direction, level, { setProtectionSl: setProtection });
+  try {
+    const setProtection = (level === 'tp_1');
+    const tpKey = level === 'tp_1' ? 'tp1' : level === 'tp_2' ? 'tp2' : 'tp3';
+    const pBefore = state.getPosition(direction);
+    const newSl = setProtection ? pBefore.entryPrice : undefined;
 
-  const p = state.getPosition(direction);
-  const newSl = setProtection ? p.entryPrice : undefined;
-  state.markTpHit(direction, level === 'tp_1' ? 'tp1' : level === 'tp_2' ? 'tp2' : 'tp3',
-    { newStopLoss: newSl, armProtection: setProtection });
+    // ⚠️ 关键: 先写 disk (tpHit.tpN=true) 再发 webhook.
+    // 即便后续 webhook 失败, 这个 TP 也已经标记 "已触发", 后续 tick 不会再 fireTp 同 level.
+    // 比起 "重复平仓 N 次但每次都成功", 用户更愿意 "可能漏发 1 次平仓 (飞书会告警去人工补)".
+    state.markTpHit(direction, tpKey, { newStopLoss: newSl, armProtection: setProtection });
 
-  const closePct = ({ tp_1: '50%', tp_2: '30%', tp_3: '20%' })[level];
-  const titleEmoji = direction === 'long' ? '📈' : '📉';
-  exec.notify({
-    type: 'tp',
-    title: `${titleEmoji} ${direction.toUpperCase()} ${level.toUpperCase()} 触发 (${closePct} 平仓)`,
-    lines: [
-      `symbol: ${config.get().symbol}`,
-      `方向: ${direction}`,
-      `触发价: ${triggerPrice}`,
-      `入场价: ${p.entryPrice}`,
-      `平仓比例: ${closePct}`,
-      `平仓 webhook: ${res.ok ? '✅ 已发送' : '❌ 失败 ' + (res.error || '')}`,
-      ...exec.formatPayloadLines(level, payload),
-    ],
-  });
+    const { res, payload } = await exec.fireTakeProfit(direction, level, { setProtectionSl: setProtection });
 
-  if (setProtection) {
+    const closePct = ({ tp_1: '50%', tp_2: '30%', tp_3: '20%' })[level];
+    const titleEmoji = direction === 'long' ? '📈' : '📉';
     exec.notify({
       type: 'tp',
-      title: `🛡️ ${direction.toUpperCase()} 已成功设置保本止损`,
+      title: `${titleEmoji} ${direction.toUpperCase()} ${level.toUpperCase()} 触发 (${closePct} 平仓)`,
       lines: [
-        `保本止损价 = 入场价 = ${p.entryPrice}`,
-        `若价格回踩入场价将触发 100% 平仓 + 自动解锁`,
+        `symbol: ${config.get().symbol}`,
+        `方向: ${direction}`,
+        `触发价: ${triggerPrice}`,
+        `入场价: ${pBefore.entryPrice}`,
+        `平仓比例: ${closePct}`,
+        `平仓 webhook: ${res.ok ? '✅ 已发送' : '❌ 失败 ' + (res.error || '')}`,
+        ...exec.formatPayloadLines(level, payload),
       ],
+      isAlert: !res.ok,
     });
-  }
 
-  // TP3 触发即解锁
-  if (level === 'tp_3') {
-    state.closeAndUnlock(direction, 'tp_3');
-    exec.notify({
-      type: 'unlock',
-      title: `🔓 ${direction.toUpperCase()} 已自动解锁 (TP3 全部止盈)`,
-      lines: [`方向 ${direction} 现可重新接收开仓信号`],
-    });
+    if (setProtection) {
+      exec.notify({
+        type: 'tp',
+        title: `🛡️ ${direction.toUpperCase()} 已成功设置保本止损`,
+        lines: [
+          `保本止损价 = 入场价 = ${pBefore.entryPrice}`,
+          `若价格回踩入场价将触发 100% 平仓 + 自动解锁`,
+        ],
+      });
+    }
+
+    if (level === 'tp_3') {
+      state.closeAndUnlock(direction, 'tp_3');
+      exec.notify({
+        type: 'unlock',
+        title: `🔓 ${direction.toUpperCase()} 已自动解锁 (TP3 全部止盈)`,
+        lines: [`方向 ${direction} 现可重新接收开仓信号`],
+      });
+    }
+  } finally {
+    _inFlight[direction] = false;
   }
 }
 
 async function fireSl(direction, triggerPrice, triggerTag = 'sl') {
+  if (_inFlight[direction]) return;
+  _inFlight[direction] = true;
   recentlyFired[direction] = Date.now();
-  const { res, payload } = await exec.fireStopLoss(direction, { trigger: triggerTag });
-  const p = state.getPosition(direction);
-  state.closeAndUnlock(direction, triggerTag);
+  try {
+    // 先快照 entryPrice / currentStopLoss 用于通知 (closeAndUnlock 后 state 会清空)
+    const pBefore = state.getPosition(direction);
+    const snapshot = {
+      entryPrice: pBefore?.entryPrice,
+      currentStopLoss: pBefore?.currentStopLoss,
+    };
 
-  const titleEmoji = triggerTag === 'sl_protection' ? '🛡️' : '🔻';
-  const titleText = triggerTag === 'sl_protection'
-    ? `${direction.toUpperCase()} 保本止损触发 (100% 全平)`
-    : `${direction.toUpperCase()} 止损触发 (100% 全平)`;
-  exec.notify({
-    type: 'sl',
-    title: `${titleEmoji} ${titleText}`,
-    lines: [
-      `symbol: ${config.get().symbol}`,
-      `方向: ${direction}`,
-      `触发价: ${triggerPrice}`,
-      `入场价: ${p.entryPrice}`,
-      `止损价: ${p.currentStopLoss}`,
-      `平仓 webhook: ${res.ok ? '✅ 已发送' : '❌ 失败 ' + (res.error || '')}`,
-      ...exec.formatPayloadLines(triggerTag, payload),
-    ],
-    isAlert: true,
-  });
-  exec.notify({
-    type: 'unlock',
-    title: `🔓 ${direction.toUpperCase()} 已自动解锁 (止损/保本止损)`,
-    lines: [`方向 ${direction} 现可重新接收开仓信号`],
-  });
+    // ⚠️ 关键: 先写 disk (active=false, locked=false) 再发 webhook.
+    // 之后 evaluate 看到 active=false 立即 return, 即便 _inFlight 异常没释放也兜得住.
+    state.closeAndUnlock(direction, triggerTag);
+
+    const { res, payload } = await exec.fireStopLoss(direction, { trigger: triggerTag });
+
+    const titleEmoji = triggerTag === 'sl_protection' ? '🛡️' : '🔻';
+    const titleText = triggerTag === 'sl_protection'
+      ? `${direction.toUpperCase()} 保本止损触发 (100% 全平)`
+      : `${direction.toUpperCase()} 止损触发 (100% 全平)`;
+    exec.notify({
+      type: 'sl',
+      title: `${titleEmoji} ${titleText}`,
+      lines: [
+        `symbol: ${config.get().symbol}`,
+        `方向: ${direction}`,
+        `触发价: ${triggerPrice}`,
+        `入场价: ${snapshot.entryPrice}`,
+        `止损价: ${snapshot.currentStopLoss}`,
+        `平仓 webhook: ${res.ok ? '✅ 已发送' : '❌ 失败 ' + (res.error || '')}`,
+        ...exec.formatPayloadLines(triggerTag, payload),
+      ],
+      isAlert: true,
+    });
+    exec.notify({
+      type: 'unlock',
+      title: `🔓 ${direction.toUpperCase()} 已自动解锁 (止损/保本止损)`,
+      lines: [`方向 ${direction} 现可重新接收开仓信号`],
+    });
+  } finally {
+    _inFlight[direction] = false;
+  }
 }
 
-module.exports = { start, evaluate, _reset: () => { recentlyFired.long = 0; recentlyFired.short = 0; } };
+module.exports = {
+  start,
+  evaluate,
+  _reset: () => {
+    recentlyFired.long = 0;
+    recentlyFired.short = 0;
+    _inFlight.long = false;
+    _inFlight.short = false;
+  },
+  __getInFlight: () => ({ ..._inFlight }),       // 仅测试用
+};
