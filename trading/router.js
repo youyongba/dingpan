@@ -215,11 +215,16 @@ async function processSignal(sig, opts = {}) {
       ? (((entryPrice - planEntry) / planEntry * 100) * (isLong ? 1 : -1)).toFixed(3)
       : null;
 
-    const sourceZh = ({
-      regime_plan: '✅ regime tradePlan (与 TG 推送一致)',
-      template_fallback: '⚠️ 模板回退 (regime plan 不可用)',
-      signal_explicit: '📝 外部信号显式指定',
-    })[source] || source;
+    const sourceZh = (() => {
+      if (source === 'regime_plan') return '✅ regime tradePlan (与 TG 推送一致)';
+      if (source === 'template_fallback') return '⚠️ 模板回退 (regime plan 不可用)';
+      if (source === 'signal_explicit') {
+        return callerSource === 'regime'
+          ? '✅ regime 喊单锁定价位 (TG 推送时定格)'
+          : '📝 外部信号显式指定';
+      }
+      return source;
+    })();
 
     exec.forwardOpen(sig).then((r) => {
       exec.notify({

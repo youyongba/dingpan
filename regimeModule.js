@@ -853,8 +853,10 @@ function handleNotificationsOnSuccess(prevRegime, currentRegime, klines, tradePl
  *    全部沿用现成逻辑, 这里只是触发器.
  *
  *  - 同方向已锁定时 processSignal 会以 409 拒绝; 反方向不受影响.
- *  - 价位 / 仓位 / 置信度 不在这里传, 由 processSignal 内部的 planLevelsFromRegime()
- *    取最新 cache.tradePlan, 与 TG 喊单保持完全一致.
+ *  - 价位锁定: 把 TG 喊单时的 tp1/tp2/tp3/stopLoss/positionSize 显式塞进 payload,
+ *    保证后续 regime 5min 刷新出新 plan 也不会影响这次开仓的监控价位.
+ *  - 入场价 (entry) 不传: 由 trading 引擎按 WS 实时市价撮合, 避免用过期 plan entry
+ *    污染保本止损基准 (TP1 后会把 SL 移到 entryPrice).
  *  - 默认开启, 通过环境变量 AUTO_TRADE_FROM_REGIME=0 可一键关闭.
  *
  * 注意: fire-and-forget, 任何失败都不影响 TG/飞书喊单消息.
@@ -878,11 +880,28 @@ function triggerAutoTrade(action, tradePlan) {
     return;
   }
 
+  const tps = Array.isArray(tradePlan.takeProfits) ? tradePlan.takeProfits : [];
+  const payload = {
+    token: cfg.token,
+    action,
+    symbol: cfg.symbol,
+    stop_loss: Number(tradePlan.stopLoss),
+    tp1: tps[0]?.price != null ? Number(tps[0].price) : undefined,
+    tp2: tps[1]?.price != null ? Number(tps[1].price) : undefined,
+    tp3: tps[2]?.price != null ? Number(tps[2].price) : undefined,
+    position_size: tradePlan.suggestedPositionPct != null
+      ? `${tradePlan.suggestedPositionPct}%`
+      : undefined,
+  };
+  Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k]);
+
+  console.log(
+    `[regime→trade] ▶ 锁定 TG 喊单价位: sl=${payload.stop_loss} tp1=${payload.tp1} `
+    + `tp2=${payload.tp2} tp3=${payload.tp3} pos=${payload.position_size}`
+  );
+
   Promise.resolve()
-    .then(() => processSignal(
-      { token: cfg.token, action, symbol: cfg.symbol },
-      { source: 'regime' }
-    ))
+    .then(() => processSignal(payload, { source: 'regime' }))
     .then((r) => {
       const tag = r.status >= 200 && r.status < 300 ? '✅' : '⏭';
       const summary = r.body && (r.body.error || (r.body.position && `entry=${r.body.position.entryPrice} sl=${r.body.position.initialStopLoss}`)) || '';
