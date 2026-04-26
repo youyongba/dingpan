@@ -16,40 +16,52 @@
 const axios = require('axios');
 const config = require('./config');
 
-// 复用现有通知通道（懒引用避免循环依赖）
 let _tg = null, _feishu = null;
 function tg() { return _tg || (_tg = require('../notifier/telegram')); }
 function feishu() {
-  // server.js 注入的 notifier 是 (title, body, opts) 形式，但我们通过 axios 直接发送会更可靠；
-  // 这里改为直接调用 feishuWebhook（如果用户配置了），同时保留 tg 通道。
   return _feishu || (_feishu = require('../notifier/feishuWebhook'));
 }
 
 // ---------------- 出站 webhook ----------------
 
-async function postWebhook(payload, label = 'auto-trade') {
+/**
+ * 通用 HTTP POST.
+ *
+ * @param {object} payload
+ * @param {string} label
+ * @param {object} [opts]
+ * @param {number} [opts.retry]      覆盖 cfg.webhookRetry, 开仓必须显式传 0
+ * @param {number} [opts.timeoutMs]  覆盖 cfg.webhookTimeoutMs
+ *
+ * ⚠️ 开仓 (forwardOpen) 一律 retry=0:
+ *   接收方多为"先下单后响应", 一旦客户端超时重试 = 重复下单.
+ *   平仓 (TP/SL) 可保留默认重试: 即便重复触发, 服务端通常按"剩余仓位"幂等执行,
+ *   最坏情况是少平 0% (已平), 不会扩大风险敞口.
+ */
+async function postWebhook(payload, label = 'auto-trade', opts = {}) {
   const cfg = config.get();
   if (!cfg.webhookUrl) {
     console.warn(`[trade.executor] webhookUrl 未配置, 跳过 (${label})`);
     return { ok: false, skipped: 'no_url' };
   }
-  const retry = cfg.webhookRetry ?? 2;
+  const retry = opts.retry != null ? opts.retry : (cfg.webhookRetry ?? 2);
+  const timeout = opts.timeoutMs ?? cfg.webhookTimeoutMs ?? 15000;
   let lastErr = null;
   for (let i = 0; i <= retry; i++) {
     try {
       const resp = await axios.post(cfg.webhookUrl, payload, {
-        timeout: cfg.webhookTimeoutMs || 8000,
+        timeout,
         headers: { 'Content-Type': 'application/json' },
       });
-      console.log(`[trade.executor] ✅ ${label} 发送成功 status=${resp.status}`);
-      return { ok: true, status: resp.status, data: resp.data };
+      console.log(`[trade.executor] ✅ ${label} 发送成功 status=${resp.status} (尝试 ${i + 1}/${retry + 1})`);
+      return { ok: true, status: resp.status, data: resp.data, attempts: i + 1 };
     } catch (err) {
       lastErr = err;
-      console.error(`[trade.executor] ❌ ${label} 第 ${i + 1} 次失败:`, err.response?.data || err.message);
+      console.error(`[trade.executor] ❌ ${label} 第 ${i + 1}/${retry + 1} 次失败:`, err.response?.data || err.message);
     }
     if (i < retry) await new Promise(r => setTimeout(r, 800 * (i + 1)));
   }
-  return { ok: false, error: lastErr?.message };
+  return { ok: false, error: lastErr?.message, attempts: retry + 1 };
 }
 
 // ---------------- payload 工厂（严格按用户模板） ----------------
@@ -90,13 +102,11 @@ function buildSlPayload(direction, trigger = 'sl') {
 
 function buildOpenForwardPayload(rawSignal) {
   const cfg = config.get();
-  // 用户模板里 open 信号本身就完整，直接转发
-  // 如果原始信号缺失 leverage 或 position_size，自动补齐系统默认值
-  return { 
-    ...rawSignal, 
+  return {
+    ...rawSignal,
     leverage: rawSignal.leverage ?? cfg.defaultLeverage,
     position_size: rawSignal.position_size ?? cfg.defaultPositionSize,
-    timestamp: rawSignal.timestamp || new Date().toISOString() 
+    timestamp: rawSignal.timestamp || new Date().toISOString(),
   };
 }
 
@@ -115,13 +125,48 @@ async function fireStopLoss(direction, opts = {}) {
   return { res, payload };
 }
 
+// ---------------- 开仓冷却闸 (内存级双保险) ----------------
+//
+// state.canOpen 已经能阻止"内部已锁"的同方向二次开仓, 但它依赖 state 持久化文件
+// 写盘成功且新进程启动时正确读盘. 本闸是冗余保护: 进程内, 同方向 forwardOpen
+// 在 cfg.openForwardCooldownMs 内重复调用直接拒绝, 不会发出第二份 HTTP.
+const _lastForwardAt = { open_long: 0, open_short: 0 };
+let _testClock = null;
+function _now() { return _testClock ? _testClock() : Date.now(); }
+function __setTestClock(fn) { _testClock = fn || null; }      // 仅测试用
+function __resetForwardCooldown() {                            // 仅测试用
+  _lastForwardAt.open_long = 0;
+  _lastForwardAt.open_short = 0;
+}
+
 async function forwardOpen(rawSignal) {
   const cfg = config.get();
   if (!cfg.forwardOpenOrders) {
     return { res: { ok: false, skipped: 'forward_open_disabled' }, payload: null };
   }
+
+  const action = rawSignal.action;
+  if (action === 'open_long' || action === 'open_short') {
+    const cooldown = cfg.openForwardCooldownMs ?? 15000;
+    const last = _lastForwardAt[action] || 0;
+    const now = _now();
+    if (last && now - last < cooldown) {
+      const ageMs = now - last;
+      console.warn(
+        `[trade.executor] 🚧 ${action} 在冷却期被拦截 (距上次 ${ageMs}ms < ${cooldown}ms), 不发 webhook`
+      );
+      return {
+        res: { ok: false, skipped: 'open_cooldown', cooldownAgeMs: ageMs },
+        payload: null,
+      };
+    }
+    _lastForwardAt[action] = now;
+  }
+
   const payload = buildOpenForwardPayload(rawSignal);
-  const res = await postWebhook(payload, `${rawSignal.action}`);
+
+  // ⚠️ 开仓必须 retry=0: 接收方"先下单后响应"模式下, 客户端超时重试 = 重复下单
+  const res = await postWebhook(payload, action || 'open', { retry: 0 });
   return { res, payload };
 }
 
@@ -205,4 +250,6 @@ module.exports = {
   forwardOpen,
   notify,
   formatPayloadLines,
+  __setTestClock,
+  __resetForwardCooldown,
 };

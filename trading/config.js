@@ -29,8 +29,10 @@ const DEFAULT_CONFIG = {
   // 是否将开仓信号转发到 webhookUrl（外部下单端）
   forwardOpenOrders: true,
   // 出站 HTTP 超时
-  webhookTimeoutMs: 8000,
-  webhookRetry: 2,                            // 失败重试次数（不含首次）
+  webhookTimeoutMs: 15000,                    // 8s→15s, 减少"接收方已下单但响应慢被误判超时"的概率
+  webhookRetry: 2,                            // 失败重试次数 (不含首次), ⚠️ 仅作用于平仓 (TP/SL); forwardOpen 始终 retry=0
+  // 开仓后 cooldown: 同方向 forwardOpen 在该时间内重复触发会被拒绝, 防止极端情况下的二次下单
+  openForwardCooldownMs: 15000,
   // TP/SL 模板：在 open_long/open_short 信号没有显式价位时按此计算
   // mode: 'percent'  → 用 % 距离
   //       'absolute' → 信号必须自带价位
