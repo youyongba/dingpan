@@ -42,6 +42,36 @@ let lastWsErrorNotifyAt = 0;
 let lastWsOpenNotifyAt = 0;
 let wsHasBeenConnected = false;
 
+/**
+ * 根据当前网络环境(是否已设代理) + 错误类型, 动态生成排障提示.
+ * 直连模式 (如海外云主机) 不再误导用户去配置代理.
+ */
+function buildWsErrorHint(err) {
+  const proxy = process.env.HTTPS_PROXY || process.env.https_proxy
+    || process.env.ALL_PROXY    || process.env.all_proxy
+    || process.env.HTTP_PROXY   || process.env.http_proxy;
+  const msg = String(err?.message || err || '');
+
+  if (proxy) {
+    if (msg === 'no_first_tick') {
+      return `提示: 已走代理 ${proxy}, 握手成功但无 tick 数据, 多半是代理节点不支持 wss 持续连接, 建议换节点`;
+    }
+    if (msg === 'stale_no_tick') {
+      return `提示: 已走代理 ${proxy}, 收过 tick 后断流, 网络抖动或节点限速, 自动重连中`;
+    }
+    return `提示: 已走代理 ${proxy}, 请确认代理可达 fstream.binance.com:443 且支持 wss`;
+  }
+
+  // 直连
+  if (msg === 'no_first_tick') {
+    return '提示: 直连握手成功但无 tick 数据, 检查机房出网/防火墙/Binance 是否屏蔽该 IP';
+  }
+  if (msg === 'stale_no_tick') {
+    return '提示: 直连收过 tick 后断流, 网络抖动, 自动重连中';
+  }
+  return '提示: 直连模式, 请确认本机能访问 fstream.binance.com:443 (海外机房通常无需代理)';
+}
+
 function start() {
   priceFeed.on('tick', onTick);
   priceFeed.on('open', () => {
@@ -65,7 +95,7 @@ function start() {
       title: '🚨 WebSocket 价格源异常',
       lines: [
         String(err?.message || err),
-        '提示: 中国大陆需配置 HTTPS_PROXY=http://host:port 才能直连 Binance',
+        buildWsErrorHint(err),
         '后续 5 分钟内同类错误将静默, 不再刷屏',
       ],
       isAlert: true,

@@ -15,7 +15,10 @@ const WebSocket = require('ws');
 const EventEmitter = require('events');
 const config = require('./config');
 
-const FAPI_WS_BASE = process.env.BINANCE_WS_BASE || 'wss://fstream.binance.com/ws';
+// 2026 起 Binance fapi 永续合约 WS 端点升级为 /market/ws/<stream>,
+// 旧路径 /ws/<stream> 在部分线路握手能成功但不再下发数据 (no_first_tick).
+// 如需回退老路径或自定义入口, 在 .env 设 BINANCE_WS_BASE=wss://fstream.binance.com/ws
+const FAPI_WS_BASE = process.env.BINANCE_WS_BASE || 'wss://fstream.binance.com/market/ws';
 const HANDSHAKE_TIMEOUT = parseInt(process.env.BINANCE_WS_HANDSHAKE_MS || '20000', 10);
 
 /**
