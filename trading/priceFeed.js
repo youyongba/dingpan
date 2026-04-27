@@ -89,10 +89,17 @@ class PriceFeed extends EventEmitter {
   }
 
   _safeClose() {
-    if (this.ws) {
-      try { this.ws.removeAllListeners(); this.ws.terminate(); } catch (_) {}
-      this.ws = null;
-    }
+    if (!this.ws) return;
+    const ws = this.ws;
+    this.ws = null;
+    try {
+      ws.removeAllListeners();
+      // 关键: 握手未完成时 terminate() 会异步 emit 'error'
+      // ('WebSocket was closed before the connection was established')
+      // 上面已 removeAllListeners, 不挂兜底就会变成 unhandled 'error', 进程崩溃
+      ws.on('error', () => {});
+      ws.terminate();
+    } catch (_) { /* ignore */ }
   }
 
   _connect() {
