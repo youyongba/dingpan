@@ -119,6 +119,9 @@ class PriceFeed extends EventEmitter {
 
     ws.on('open', () => {
       this.connectedAt = Date.now();
+      // 关键: 上一次连接残留的 lastTickAt 在新连接里没意义,
+      // 不清会让 stale watcher 在 5s 内立刻按"上次断开到现在"的差值误杀新连接
+      this.lastTickAt = 0;
       this.attempt = 0;
       console.log('[trade.priceFeed] ✅ 已连接');
       this.emit('open');
@@ -157,11 +160,18 @@ class PriceFeed extends EventEmitter {
   _armStaleWatcher() {
     if (this.staleTimer) clearInterval(this.staleTimer);
     this.staleTimer = setInterval(() => {
-      if (!this.lastTickAt) return;
-      const idle = Date.now() - this.lastTickAt;
+      // 基准: 已收到 tick 后用 lastTickAt; 未收到首笔时回退到 connectedAt,
+      // 否则代理握手成功但不过数据时会永远卡在 "✅ 已连接 · 无最新价"
+      const ref = this.lastTickAt || this.connectedAt;
+      if (!ref) return;
+      const idle = Date.now() - ref;
       if (idle > 30 * 1000) {
-        console.warn(`[trade.priceFeed] ⚠️ ${idle}ms 无新数据, 强制重连`);
-        this.emit('error', new Error('stale_no_tick'));
+        const isFirst = !this.lastTickAt;
+        const reason = isFirst ? 'no_first_tick' : 'stale_no_tick';
+        console.warn(
+          `[trade.priceFeed] ⚠️ ${idle}ms ${isFirst ? '连上但无首笔 tick' : '无新数据'}, 强制重连`
+        );
+        this.emit('error', new Error(reason));
         this._safeClose();
         this._scheduleReconnect(0);
       }
