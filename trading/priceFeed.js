@@ -134,6 +134,17 @@ class PriceFeed extends EventEmitter {
       this._armStaleWatcher();
     });
 
+    // emit('tick') 节流: aggTrade 在 BTC 波动期一秒推 200-500 帧, 每帧都触发整条
+    // riskEngine 事件链 (evaluate × 多空双方向 + console.log) 会把 1 vCPU 顶满.
+    // 此处节流策略与 riskEngine.onTick 一致 — "取最新价"模式, lastPrice 实时更新,
+    // 到节流间隔后 emit 一次. 不丢风控: TP/SL 容忍度远 > 200ms.
+    let _emitLastAt = 0;
+    let _emitPendingTimer = null;
+    const _doEmit = () => {
+      _emitLastAt = Date.now();
+      _emitPendingTimer = null;
+      this.emit('tick', { price: this.lastPrice, ts: this.lastTickAt, raw: null });
+    };
     ws.on('message', (buf) => {
       let msg;
       try { msg = JSON.parse(buf.toString()); } catch { return; }
@@ -144,7 +155,18 @@ class PriceFeed extends EventEmitter {
       if (!Number.isFinite(price)) return;
       this.lastPrice = price;
       this.lastTickAt = Date.now();
-      this.emit('tick', { price, ts: this.lastTickAt, raw: msg });
+
+      const throttle = (config.get().priceFeed && config.get().priceFeed.evalThrottleMs) || 0;
+      if (throttle <= 0) {
+        this.emit('tick', { price, ts: this.lastTickAt, raw: msg });
+        return;
+      }
+      const since = this.lastTickAt - _emitLastAt;
+      if (since >= throttle) {
+        _doEmit();
+      } else if (!_emitPendingTimer) {
+        _emitPendingTimer = setTimeout(_doEmit, throttle - since);
+      }
     });
 
     ws.on('ping', (data) => { try { ws.pong(data); } catch (_) {} });

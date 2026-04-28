@@ -139,36 +139,48 @@ function onTick({ price }) {
 function evaluate(direction, price) {
   if (_inFlight[direction]) return;          // 闸 A: webhook 还没发完, 直接拒绝再入
   const p = state.getPosition(direction);
-  if (!p || !p.active) return;               // 闸 B (隐式): SL 触发后 active=false 立刻拦
+  if (!p) return;
   if (Date.now() - recentlyFired[direction] < FIRE_COOLDOWN_MS) return;  // 闸 C: 防抖
 
   const isLong = direction === 'long';
   const above = (a, b) => a >= b;   // 多: 价格上穿 TP
   const below = (a, b) => a <= b;   // 多: 价格下穿 SL
 
-  // ---- 1) 止损 (initial 或 protection 都走这条)
-  if (p.currentStopLoss != null) {
-    const slHit = isLong ? below(price, p.currentStopLoss) : above(price, p.currentStopLoss);
-    if (slHit) {
-      const trigger = p.protectionArmed ? 'sl_protection' : 'sl';
-      return fireSl(direction, price, trigger);
+  // ============ 优先处理 active 持仓的 TP / SL ============
+  if (p.active) {
+    if (p.currentStopLoss != null) {
+      const slHit = isLong ? below(price, p.currentStopLoss) : above(price, p.currentStopLoss);
+      if (slHit) {
+        const trigger = p.protectionArmed ? 'sl_protection' : 'sl';
+        return fireSl(direction, price, trigger);
+      }
     }
+    if (!p.tpHit.tp3 && p.tp3 != null && p.tpHit.tp2) {
+      const hit = isLong ? above(price, p.tp3) : below(price, p.tp3);
+      if (hit) return fireTp(direction, 'tp_3', price);
+    }
+    if (!p.tpHit.tp2 && p.tp2 != null && p.tpHit.tp1) {
+      const hit = isLong ? above(price, p.tp2) : below(price, p.tp2);
+      if (hit) return fireTp(direction, 'tp_2', price);
+    }
+    if (!p.tpHit.tp1 && p.tp1 != null) {
+      const hit = isLong ? above(price, p.tp1) : below(price, p.tp1);
+      if (hit) return fireTp(direction, 'tp_1', price);
+    }
+    return;
   }
 
-  // ---- 2) TP3 (要求 TP2 已触发)
-  if (!p.tpHit.tp3 && p.tp3 != null && p.tpHit.tp2) {
-    const hit = isLong ? above(price, p.tp3) : below(price, p.tp3);
-    if (hit) return fireTp(direction, 'tp_3', price);
-  }
-  // ---- 3) TP2 (要求 TP1 已触发)
-  if (!p.tpHit.tp2 && p.tp2 != null && p.tpHit.tp1) {
-    const hit = isLong ? above(price, p.tp2) : below(price, p.tp2);
-    if (hit) return fireTp(direction, 'tp_2', price);
-  }
-  // ---- 4) TP1
-  if (!p.tpHit.tp1 && p.tp1 != null) {
-    const hit = isLong ? above(price, p.tp1) : below(price, p.tp1);
-    if (hit) return fireTp(direction, 'tp_1', price);
+  // ============ 处理 pending (限价待触发) 计划 ============
+  if (p.pending && p.pendingPlan) {
+    // 超时 expire
+    if (p.pendingExpireAt && Date.now() > p.pendingExpireAt) {
+      return firePendingExpired(direction);
+    }
+    // entry 触达: 多头价格回踩到 entry 以下, 空头反弹到 entry 以上
+    const entry = p.pendingPlan.entry;
+    if (entry == null || !Number.isFinite(entry)) return;
+    const hit = isLong ? price <= entry : price >= entry;
+    if (hit) return firePendingFill(direction, price);
   }
 }
 
@@ -225,6 +237,98 @@ async function fireTp(direction, level, triggerPrice) {
         lines: [`方向 ${direction} 现可重新接收开仓信号`],
       });
     }
+  } finally {
+    _inFlight[direction] = false;
+  }
+}
+
+/**
+ * pending 限价计划触达 entry → 真正发出 forwardOpen webhook + 转 active 仓位.
+ *
+ * ⚠️ 关键顺序 (与 fireTp/fireSl 一致): **先写盘后发 webhook**.
+ *   markPendingFilled 把 pending=false / active=true 落盘后, 后续 tick 看到 pending=false 立即不再 fill,
+ *   即便 _inFlight 异常没释放也兜得住. webhook 失败时飞书会告警, 已 active 仓位等待人工处理或下次 SL.
+ *
+ * @param {'long'|'short'} direction
+ * @param {number} fillPrice  当前 tick 的市价
+ */
+async function firePendingFill(direction, fillPrice) {
+  if (_inFlight[direction]) return;
+  _inFlight[direction] = true;
+  recentlyFired[direction] = Date.now();
+  try {
+    const before = state.getPosition(direction);
+    if (!before || !before.pending || !before.pendingPlan) return;
+    const plan = before.pendingPlan;
+    const cfg = config.get();
+
+    // 先写盘: pending → active. plan.entry 作为 entryPrice (限价语义),
+    // fillPrice 仅供审计 (滑点 = fillPrice - plan.entry)
+    const filled = state.markPendingFilled(direction, fillPrice);
+
+    // 再推 forwardOpen webhook (与 immediate 模式同一接口, 接收方无感)
+    const sig = {
+      ...(plan.raw || {}),
+      token: cfg.token,
+      action: direction === 'long' ? 'open_long' : 'open_short',
+      symbol: cfg.symbol,
+      stop_loss: plan.sl,
+      tp1: plan.tp1, tp2: plan.tp2, tp3: plan.tp3,
+      position_size: plan.positionSize,
+      leverage: plan.leverage ?? cfg.defaultLeverage,
+    };
+    const r = await exec.forwardOpen(sig);
+
+    const isLong = direction === 'long';
+    const slipPct = plan.entry
+      ? (((fillPrice - plan.entry) / plan.entry * 100) * (isLong ? 1 : -1)).toFixed(3)
+      : null;
+
+    exec.notify({
+      type: 'pending_filled',
+      title: `${isLong ? '🟢' : '🔴'} ${direction.toUpperCase()} 限价触达 → 已下单`,
+      lines: [
+        `symbol: ${cfg.symbol}`,
+        `arm 时间: ${before.pendingArmedAt}`,
+        `计划 entry: ${Number(plan.entry).toFixed(2)}`,
+        `实际触发价: ${Number(fillPrice).toFixed(2)} (滑点 ${slipPct ?? '--'}%)`,
+        `仓位: ${filled.positionSize} / 杠杆: ${filled.leverage}x`,
+        `TP1: ${plan.tp1?.toFixed?.(2)} (50%) · TP2: ${plan.tp2?.toFixed?.(2)} (30%) · TP3: ${plan.tp3?.toFixed?.(2)} (20%)`,
+        `SL : ${plan.sl?.toFixed?.(2)} (100%)`,
+        `转发开仓 webhook: ${r.res.ok ? '✅ 已发送' : '❌ ' + (r.res.error || r.res.skipped || '')}`,
+        ...exec.formatPayloadLines(direction === 'long' ? 'open_long' : 'open_short', r.payload),
+      ],
+      isAlert: !r.res.ok,
+    });
+  } catch (e) {
+    console.error('[trade.risk] firePendingFill error:', e?.message || e);
+  } finally {
+    _inFlight[direction] = false;
+  }
+}
+
+/**
+ * pending 计划超时未触达, 自动取消 — 不发 webhook, 仅清状态 + 通知.
+ */
+function firePendingExpired(direction) {
+  if (_inFlight[direction]) return;
+  _inFlight[direction] = true;
+  recentlyFired[direction] = Date.now();
+  try {
+    const prev = state.cancelPending(direction, 'ttl_expired');
+    if (!prev) return;
+    exec.notify({
+      type: 'pending_expired',
+      title: `⏳ ${direction.toUpperCase()} pending 计划超时未触达, 已自动取消`,
+      lines: [
+        `symbol: ${config.get().symbol}`,
+        `arm 时间: ${prev.pendingArmedAt}`,
+        `过期时间: ${new Date(prev.pendingExpireAt).toLocaleString()}`,
+        `原 entry: ${prev.pendingPlan?.entry}`,
+        `原 SL/TP1: ${prev.pendingPlan?.sl} / ${prev.pendingPlan?.tp1}`,
+        `方向 ${direction} 已解锁, 可接收新信号`,
+      ],
+    });
   } finally {
     _inFlight[direction] = false;
   }

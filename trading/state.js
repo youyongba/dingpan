@@ -43,6 +43,14 @@ const EMPTY_POSITION = () => ({
   // 用于"价格回到入场价"判定：仅在 TP1 触发后开启
   protectionArmed: false,
   raw: null,             // 保留原始入仓信号（调试用）
+  // ----- pending 限价待触发 (新增) -----
+  // 开仓信号到达后, 不立即推 webhook, 而是把方案的 entry/SL/TP 落到 pendingPlan,
+  // 由 riskEngine 监听价格触达 entry 时再 fill (推 forwardOpen webhook + 转 active).
+  pending: false,
+  pendingPlan: null,     // {entry, sl, tp1, tp2, tp3, positionSize, leverage, source, ...}
+  pendingArmedAt: null,  // ISO string
+  pendingExpireAt: null, // 毫秒时间戳; 超时自动 cancel
+  fillPrice: null,       // 实际触发 fill 时的市价 (与 entryPrice 区分, 仅供 audit)
 });
 
 let state = null;
@@ -94,6 +102,7 @@ function getPosition(direction) {
 /**
  * 是否允许开新仓
  * 规则：同方向已 active 且 locked → 拒绝；
+ *       同方向已 pending (限价待触发) → 拒绝, 防重复 (新增);
  *       反方向状态完全不影响（多空独立）
  */
 function canOpen(direction) {
@@ -102,6 +111,9 @@ function canOpen(direction) {
   if (p.active && p.locked) {
     return { ok: false, reason: `${direction}_locked`, position: p };
   }
+  if (p.pending) {
+    return { ok: false, reason: `${direction}_pending`, position: p };
+  }
   return { ok: true };
 }
 
@@ -109,6 +121,88 @@ function canOpen(direction) {
 function openPosition(direction, payload) {
   if (!state) load();
   const next = { ...EMPTY_POSITION(), ...payload, direction, active: true, locked: true };
+  state[direction] = next;
+  save();
+  return next;
+}
+
+/**
+ * 登记一笔 pending (限价待触发) 计划.
+ * 价格触达 plan.entry 之前, webhook 不会发, 只有内存 + 落盘记录.
+ *
+ * @param {'long'|'short'} direction
+ * @param {object} plan      {entry, sl, tp1, tp2, tp3, positionSize, leverage, source, raw, ...}
+ * @param {object} [opts]
+ * @param {number} [opts.ttlMs]   pending 超时毫秒数 (默认 30min)
+ */
+function armPending(direction, plan, opts = {}) {
+  if (!state) load();
+  const ttlMs = opts.ttlMs || 30 * 60 * 1000;
+  const now = Date.now();
+  const next = {
+    ...EMPTY_POSITION(),
+    direction,
+    pending: true,
+    pendingPlan: plan,
+    pendingArmedAt: new Date(now).toISOString(),
+    pendingExpireAt: now + ttlMs,
+    raw: plan?.raw || null,
+  };
+  state[direction] = next;
+  save();
+  return next;
+}
+
+/**
+ * 取消 pending 计划 (手动取消 / 超时 / 主动撤单).
+ * 旧的 active 仓位字段不会被影响 — 因为 pending 只在 EMPTY 仓位上 arm.
+ */
+function cancelPending(direction, reason = 'manual') {
+  if (!state) load();
+  const prev = state[direction];
+  if (!prev || !prev.pending) return null;
+  state[direction] = { ...EMPTY_POSITION() };
+  state[direction].lastPendingCancel = {
+    reason,
+    plan: prev.pendingPlan,
+    armedAt: prev.pendingArmedAt,
+    cancelledAt: new Date().toISOString(),
+  };
+  save();
+  return prev;
+}
+
+/**
+ * pending → active: 价格触达 plan.entry, 已发出 forwardOpen webhook 之后调用.
+ * entryPrice 用 plan.entry (限价语义, TP/SL 与方案完全对齐),
+ * fillPrice  存当下市价 (滑点审计).
+ *
+ * @param {'long'|'short'} direction
+ * @param {number} fillPrice    实际触发时的市价
+ */
+function markPendingFilled(direction, fillPrice) {
+  if (!state) load();
+  const prev = state[direction];
+  if (!prev || !prev.pending || !prev.pendingPlan) return null;
+  const plan = prev.pendingPlan;
+  const next = {
+    ...EMPTY_POSITION(),
+    direction,
+    active: true,
+    locked: true,
+    entryPrice: plan.entry,
+    entryAt: new Date().toISOString(),
+    leverage: plan.leverage,
+    positionSize: plan.positionSize,
+    tp1: plan.tp1, tp2: plan.tp2, tp3: plan.tp3,
+    initialStopLoss: plan.sl,
+    currentStopLoss: plan.sl,
+    raw: plan.raw,
+    priceSource: plan.source,
+    planEntry: plan.entry,
+    fillPrice,
+    pendingArmedAt: prev.pendingArmedAt,  // 保留审计
+  };
   state[direction] = next;
   save();
   return next;
@@ -151,4 +245,6 @@ module.exports = {
   get, getPosition,
   canOpen, openPosition,
   markTpHit, closeAndUnlock, manualReset,
+  // pending 限价待触发
+  armPending, cancelPending, markPendingFilled,
 };

@@ -29,6 +29,13 @@ const exec = require('./executor');
 
 const ADMIN_TOKEN = process.env.CONFIG_AUTH_TOKEN || '';
 
+// pending 限价待触发模式: 默认开启.
+//   1 (默认): open_long/open_short 信号 → 把 plan 价位写入 state.armPending,
+//            riskEngine 监听价格触达 plan.entry 才推 forwardOpen webhook.
+//   0       : 旧行为, 收到信号立即按市价 forwardOpen + openPosition.
+const PENDING_MODE = process.env.AUTO_TRADE_PENDING_MODE !== '0';
+const PENDING_TTL_MS = (parseInt(process.env.AUTO_TRADE_PENDING_TTL_MIN, 10) || 30) * 60 * 1000;
+
 function requireAdmin(req, res, next) {
   if (!ADMIN_TOKEN) return res.status(503).json({ ok: false, error: 'CONFIG_AUTH_TOKEN 未配置, 管理接口已禁用' });
   if (req.headers['x-auth-token'] !== ADMIN_TOKEN) return res.status(401).json({ ok: false, error: '鉴权失败' });
@@ -137,15 +144,18 @@ async function processSignal(sig, opts = {}) {
     if (!gate.ok) {
       exec.notify({
         type: 'open_blocked',
-        title: `🚫 ${direction.toUpperCase()} 重复开仓被拦截`,
+        title: `🚫 ${direction.toUpperCase()} 重复开仓被拦截 (${gate.reason})`,
         lines: [
           `来源: ${callerSource}`,
           `原因: ${gate.reason}`,
-          `当前持仓入场价: ${gate.position?.entryPrice}`,
+          gate.position?.pending
+            ? `已有 pending 计划 entry=${gate.position?.pendingPlan?.entry}, 过期: ${new Date(gate.position?.pendingExpireAt).toLocaleString()}`
+            : `当前持仓入场价: ${gate.position?.entryPrice}`,
           `已触发 TP1=${gate.position?.tpHit?.tp1} TP2=${gate.position?.tpHit?.tp2}`,
-        ],
+          gate.position?.pending ? '如需重新挂单, 请先 POST /api/auto-trade/cancel-pending' : null,
+        ].filter(Boolean),
       });
-      return { status: 409, body: { ok: false, error: gate.reason } };
+      return { status: 409, body: { ok: false, error: gate.reason, position: gate.position } };
     }
 
     const marketPrice = priceFeed.getStatus().lastPrice;
@@ -158,6 +168,7 @@ async function processSignal(sig, opts = {}) {
     let tp1, tp2, tp3, sl, positionSize, source, confidence, planAgeSec, planEntry;
     if (planLv) {
       ({ tp1, tp2, tp3, sl, positionSize, confidence, planAgeSec, planEntry } = planLv);
+      entryPrice = planEntry;       // pending 模式下 entry 就是 plan.entry, 不再是当下市价
       source = 'regime_plan';
     } else {
       const lv = calcLevels(direction, entryPrice);
@@ -166,7 +177,7 @@ async function processSignal(sig, opts = {}) {
       source = 'template_fallback';
     }
 
-    if (sig.entry != null) entryPrice = Number(sig.entry);
+    if (sig.entry != null) { entryPrice = Number(sig.entry); planEntry = entryPrice; }
     if (sig.stop_loss != null) sl = Number(sig.stop_loss);
     if (sig.tp1 != null) tp1 = Number(sig.tp1);
     if (sig.tp2 != null) tp2 = Number(sig.tp2);
@@ -186,7 +197,7 @@ async function processSignal(sig, opts = {}) {
         title: `🚫 ${direction.toUpperCase()} 开仓被拦截 (${reason})`,
         lines: [
           `来源: ${callerSource}`,
-          `市价 ${entryPrice} 已偏离 plan 区间, 撮合后会立刻触发, 已拒绝`,
+          `entry ${entryPrice} 与 sl/tp 关系不合法, 已拒绝`,
           `plan 入场价: ${planEntry ?? '--'} | sl: ${sl} | tp1: ${tp1}`,
           `建议: 等待下一根 K 线刷新 plan, 或检查 regime 信号方向`,
         ],
@@ -197,6 +208,71 @@ async function processSignal(sig, opts = {}) {
         body: { ok: false, error: reason, marketPrice, sl, tp1, tp2, tp3, planEntry },
       };
     }
+
+    const sourceZh = (() => {
+      if (source === 'regime_plan') return '✅ regime tradePlan (与 TG 推送一致)';
+      if (source === 'template_fallback') return '⚠️ 模板回退 (regime plan 不可用)';
+      if (source === 'signal_explicit') {
+        return callerSource === 'regime'
+          ? '✅ regime 喊单锁定价位 (TG 推送时定格)'
+          : '📝 外部信号显式指定';
+      }
+      return source;
+    })();
+
+    // ============ 分支: pending (限价待触发) vs immediate (立即市价) ============
+    // pending 模式 (默认): 把 plan.entry/SL/TP 落到 state.armPending,
+    // 由 riskEngine 监听价格触达 entry 时再 fill.
+    // immediate 模式: 旧行为, 立即按市价 forwardOpen + openPosition.
+    // sig.market === true 可单条信号强制立即, 兜底紧急情况.
+    const wantImmediate = !PENDING_MODE || sig.market === true || sig.immediate === true;
+
+    if (!wantImmediate) {
+      // pending 模式: 校验当下市价是否已穿透 entry — 穿透说明信号晚了, 用 immediate fallback
+      const alreadyTouched = isLong ? marketPrice <= entryPrice : marketPrice >= entryPrice;
+      if (alreadyTouched) {
+        // 价格已经在 entry 那一侧, 走立即 fill 路径 (riskEngine 下一 tick 就会触发,
+        // 这里直接 arm pending 即可, 不做特殊处理 — riskEngine 会立刻 fill)
+        // 设计上保持简单: arm pending, 让 riskEngine 处理.
+      }
+
+      const pos = state.armPending(direction, {
+        entry: entryPrice,
+        sl, tp1, tp2, tp3,
+        positionSize,
+        leverage: sig.leverage ?? cfg.defaultLeverage,
+        source,
+        confidence: confidence || null,
+        planEntry: planEntry || null,
+        planAgeSec: planAgeSec || null,
+        callerSource,
+        raw: sig,
+      }, { ttlMs: PENDING_TTL_MS });
+
+      exec.notify({
+        type: 'pending_armed',
+        title: `📋 ${direction.toUpperCase()} 开仓计划已锁定 (待价回踩 entry)`,
+        lines: [
+          `symbol: ${cfg.symbol}`,
+          `信号来源: ${callerSource}`,
+          `价位来源: ${sourceZh}` + (planAgeSec != null ? ` · plan 距今 ${planAgeSec}s` : ''),
+          confidence ? `置信度: ${confidence}` : null,
+          `📍 当下市价: ${marketPrice.toFixed(2)}`,
+          `🚪 待触发 entry: ${Number(entryPrice).toFixed(2)} ${alreadyTouched ? '(⚡ 已穿透, 下一 tick 立即 fill)' : ''}`,
+          `仓位: ${positionSize} / 杠杆: ${pos.pendingPlan.leverage}x`,
+          `TP1: ${tp1.toFixed(2)} (50%) · TP2: ${tp2.toFixed(2)} (30%) · TP3: ${tp3.toFixed(2)} (20%)`,
+          `SL : ${sl.toFixed(2)} (100%)`,
+          `⏳ 自动过期: ${new Date(pos.pendingExpireAt).toLocaleString()}`,
+          `❎ 取消挂单: POST /api/auto-trade/cancel-pending {"direction":"${direction}"}`,
+        ].filter(Boolean),
+      });
+
+      return { status: 200, body: { ok: true, action, mode: 'pending', position: pos, priceSource: source } };
+    }
+
+    // ============ immediate 模式 (旧行为, 完整保留) ============
+    // 此模式下 entry 用当下市价, 立即推 forwardOpen webhook + 写 active 仓位.
+    if (source === 'regime_plan') entryPrice = marketPrice;  // immediate 走市价
 
     const pos = state.openPosition(direction, {
       entryPrice,
@@ -215,21 +291,10 @@ async function processSignal(sig, opts = {}) {
       ? (((entryPrice - planEntry) / planEntry * 100) * (isLong ? 1 : -1)).toFixed(3)
       : null;
 
-    const sourceZh = (() => {
-      if (source === 'regime_plan') return '✅ regime tradePlan (与 TG 推送一致)';
-      if (source === 'template_fallback') return '⚠️ 模板回退 (regime plan 不可用)';
-      if (source === 'signal_explicit') {
-        return callerSource === 'regime'
-          ? '✅ regime 喊单锁定价位 (TG 推送时定格)'
-          : '📝 外部信号显式指定';
-      }
-      return source;
-    })();
-
     exec.forwardOpen(sig).then((r) => {
       exec.notify({
         type: 'open_ok',
-        title: `${direction === 'long' ? '🟢' : '🔴'} ${direction.toUpperCase()} 开仓成功 (市价)`,
+        title: `${direction === 'long' ? '🟢' : '🔴'} ${direction.toUpperCase()} 开仓成功 (市价 immediate)`,
         lines: [
           `symbol: ${cfg.symbol}`,
           `信号来源: ${callerSource}`,
@@ -248,7 +313,7 @@ async function processSignal(sig, opts = {}) {
       });
     });
 
-    return { status: 200, body: { ok: true, action, position: pos, priceSource: source } };
+    return { status: 200, body: { ok: true, action, mode: 'immediate', position: pos, priceSource: source } };
   }
 
   if (action === 'take_profit' || action === 'stop_loss') {
@@ -320,9 +385,39 @@ router.get('/status', (req, res) => {
     ok: true,
     enabled: config.get().enabled,
     symbol: config.get().symbol,
+    pendingMode: PENDING_MODE,
+    pendingTtlMin: PENDING_TTL_MS / 60000,
     priceFeed: priceFeed.getStatus(),
     positions: state.get(),
   });
+});
+
+// ============ POST /cancel-pending: 取消某方向的待触发挂单 ============
+//   body: { direction: 'long' | 'short' }
+//   仅取消 pending 计划; 已 active 的真实仓位不受影响.
+//   不需要 X-Auth-Token, 因为 pending 没真正下单, 风险等价于"不下单".
+router.post('/cancel-pending', (req, res) => {
+  const direction = req.body?.direction;
+  if (!['long', 'short'].includes(direction)) {
+    return res.status(400).json({ ok: false, error: 'direction must be long|short' });
+  }
+  const prev = state.cancelPending(direction, req.body?.reason || 'manual_api');
+  if (!prev) {
+    return res.status(404).json({ ok: false, error: 'no_pending', direction });
+  }
+  exec.notify({
+    type: 'pending_cancelled',
+    title: `🛑 ${direction.toUpperCase()} pending 计划已手动取消`,
+    lines: [
+      `symbol: ${config.get().symbol}`,
+      `方向: ${direction}`,
+      `原 entry: ${prev.pendingPlan?.entry}`,
+      `原 SL/TP1: ${prev.pendingPlan?.sl} / ${prev.pendingPlan?.tp1}`,
+      `arm 时间: ${prev.pendingArmedAt}`,
+      `操作: 手动 API 取消`,
+    ],
+  });
+  res.json({ ok: true, direction, prev });
 });
 
 // ============ POST /manual-open: 手动按 Regime 开仓 ============
