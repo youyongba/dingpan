@@ -154,6 +154,45 @@
   .auto-trade-bar .at-state.on  { background: #3fb95033; color: #3fb950; }
   .auto-trade-bar .at-state.off { background: #d2992233; color: #d29922; }
   .auto-trade-bar .at-meta { font-size: 11px; color: #8b949e; margin-left: auto; }
+
+  /* 手动交易操作栏 (开多 / 开空 / 全平) */
+  .trade-actions-bar {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 10px 14px; margin-bottom: 12px; border-radius: 8px;
+    border: 1px solid #30363d; background: #161b22;
+  }
+  .trade-actions-bar .ta-label { font-size: 13px; color: #c9d1d9; font-weight: 600; }
+  .manual-btn {
+    border: 1px solid #30363d; background: #21262d; color: #e6edf3;
+    padding: 6px 14px; font-size: 13px; font-weight: 600; border-radius: 6px;
+    cursor: pointer; transition: .15s; min-width: 110px;
+  }
+  .manual-btn:hover:not(:disabled) { transform: translateY(-1px); }
+  .manual-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .manual-btn.long { border-color: #3fb95066; color: #3fb950; }
+  .manual-btn.long:hover:not(:disabled) { background: #3fb95022; border-color: #3fb950; }
+  .manual-btn.short { border-color: #ff7b7266; color: #ff7b72; }
+  .manual-btn.short:hover:not(:disabled) { background: #ff7b7222; border-color: #ff7b72; }
+  .manual-btn.close-all { border-color: #d2992266; color: #d29922; margin-left: auto; }
+  .manual-btn.close-all:hover:not(:disabled) { background: #d2992222; border-color: #d29922; }
+  .ta-meta { font-size: 11px; color: #8b949e; }
+
+  /* Toast 浮层 (操作反馈) */
+  .toast-stack {
+    position: fixed; top: 16px; right: 16px; z-index: 9999;
+    display: flex; flex-direction: column; gap: 8px; max-width: 360px;
+  }
+  .toast {
+    padding: 10px 14px; border-radius: 6px; font-size: 13px;
+    background: #21262d; border: 1px solid #30363d; color: #e6edf3;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4); animation: toast-in .25s ease;
+  }
+  .toast.ok    { border-color: #3fb95066; background: #3fb95022; }
+  .toast.err   { border-color: #f8514966; background: #f8514922; }
+  .toast.warn  { border-color: #d2992266; background: #d2992222; }
+  .toast .toast-title { font-weight: 700; margin-bottom: 2px; }
+  .toast .toast-body  { color: #c9d1d9; font-size: 12px; line-height: 1.5; }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
   /* iOS 风格开关 */
   .switch { position: relative; display: inline-block; width: 44px; height: 24px; }
   .switch input { opacity: 0; width: 0; height: 0; }
@@ -221,6 +260,18 @@
     · <span id="autoTradePrice">价格源 --</span>
   </span>
 </div>
+
+<!-- 手动交易操作栏: 按 Regime 一键开仓 + 一键全平 -->
+<div class="trade-actions-bar">
+  <span class="ta-label">手动操作</span>
+  <button id="manualOpenLongBtn" class="manual-btn long" disabled>📈 开多单</button>
+  <button id="manualOpenShortBtn" class="manual-btn short" disabled>📉 开空单</button>
+  <span id="manualActionMeta" class="ta-meta">按 Regime tradePlan 自动绑定 TP1/TP2/TP3 + SL</span>
+  <button id="closeAllBtn" class="manual-btn close-all" disabled>🛑 全部止盈</button>
+</div>
+
+<!-- 操作反馈 Toast 浮层 -->
+<div id="toastStack" class="toast-stack"></div>
 
 <!-- 仓位状态 + 重置按钮 -->
 <div class="pos-panel">
@@ -367,8 +418,9 @@
       const conn = pf.connected ? '✅ 已连接' : '❌ 未连接';
       const last = pf.lastPrice ? ' · 最新价 ' + Number(pf.lastPrice).toFixed(2) : '';
       price.textContent = `价格源 ${conn}${last}`;
-      // 同步刷新仓位卡片
+      // 同步刷新仓位卡片 + 手动操作按钮可用态
       renderPositions(j.positions || {}, pf.lastPrice);
+      updateManualActions(j.positions || {}, autoTrade.enabled);
     } catch (e) {
       const stateEl = document.getElementById('autoTradeState');
       stateEl.textContent = '后端不可达';
@@ -458,6 +510,172 @@
     } catch (e) {
       alert('重置失败：' + e.message);
     }
+  }
+
+  // ============ 手动交易 (开多 / 开空 / 全平) ============
+
+  /**
+   * 浮层通知, 取代 alert.
+   * @param {'ok'|'err'|'warn'|''} level
+   * @param {string} title
+   * @param {string|string[]} [body]
+   * @param {number} [ttl=5000]
+   */
+  function showToast(level, title, body, ttl = 5000) {
+    const stack = document.getElementById('toastStack');
+    if (!stack) return;
+    const el = document.createElement('div');
+    el.className = 'toast ' + (level || '');
+    const bodyHtml = body
+      ? `<div class="toast-body">${
+          (Array.isArray(body) ? body : [body])
+            .map(line => String(line).replace(/</g, '&lt;'))
+            .join('<br>')
+        }</div>`
+      : '';
+    el.innerHTML = `<div class="toast-title">${String(title).replace(/</g, '&lt;')}</div>${bodyHtml}`;
+    stack.appendChild(el);
+    setTimeout(() => {
+      el.style.transition = 'opacity .3s';
+      el.style.opacity = '0';
+      setTimeout(() => el.remove(), 300);
+    }, ttl);
+  }
+
+  /** 沿用 reset 流程: localStorage 优先, 没有则 prompt, 失败再让用户手动输入. */
+  function getAdminToken() {
+    let token = localStorage.getItem('CONFIG_AUTH_TOKEN') || '';
+    if (!token) {
+      token = prompt('需要管理 token (X-Auth-Token), 请输入:') || '';
+      if (token) localStorage.setItem('CONFIG_AUTH_TOKEN', token);
+    }
+    return token;
+  }
+
+  /** 通用受保护调用: 自动 401 重试 + JSON 解析 + 错误提示 */
+  async function callAdminApi(path, body) {
+    const r = await fetch(path, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Auth-Token': localStorage.getItem('CONFIG_AUTH_TOKEN') || '',
+      },
+      body: JSON.stringify(body || {}),
+    });
+    if (r.status === 401) {
+      // token 失效, 清掉重新让用户输
+      localStorage.removeItem('CONFIG_AUTH_TOKEN');
+      const token = getAdminToken();
+      if (!token) throw new Error('已取消 (未提供 token)');
+      return callAdminApi(path, body);
+    }
+    let j = {};
+    try { j = await r.json(); } catch (_) {}
+    if (!r.ok || (j && j.ok === false)) {
+      const err = (j && (j.error || j.hint)) || ('HTTP ' + r.status);
+      const e = new Error(err);
+      e.body = j;
+      throw e;
+    }
+    return j;
+  }
+
+  async function manualOpen(direction) {
+    const dirZh = direction === 'long' ? '多单' : '空单';
+    const btn = document.getElementById(`manualOpen${cap(direction)}Btn`);
+    const otherBtn = document.getElementById(`manualOpen${cap(direction === 'long' ? 'short' : 'long')}Btn`);
+    if (!confirm(`确认手动开${dirZh}? 系统将按当前 Regime tradePlan 自动绑定 TP1/TP2/TP3 + SL.`)) return;
+    btn.disabled = true; otherBtn.disabled = true;
+    const oldText = btn.textContent;
+    btn.textContent = '下单中…';
+    try {
+      const j = await callAdminApi('/api/auto-trade/manual-open', { direction });
+      const p = j.position || {};
+      showToast('ok', `✅ 已开${dirZh} (${j.priceSource || '--'})`, [
+        `入场价: ${p.entryPrice ?? '--'} | 仓位 ${p.positionSize || '--'} / ${p.leverage || '--'}x`,
+        `TP1: ${p.tp1 != null ? Number(p.tp1).toFixed(2) : '--'} (50%) | TP2: ${p.tp2 != null ? Number(p.tp2).toFixed(2) : '--'} (30%) | TP3: ${p.tp3 != null ? Number(p.tp3).toFixed(2) : '--'} (20%)`,
+        `SL: ${p.currentStopLoss != null ? Number(p.currentStopLoss).toFixed(2) : '--'} (100%)`,
+      ]);
+    } catch (e) {
+      showToast('err', `❌ 开${dirZh}失败`, e.message, 8000);
+    } finally {
+      btn.textContent = oldText;
+      // 立刻拉一次状态, updateManualActions 会按真实仓位重新设置 disable
+      await fetchAutoTradeStatus();
+    }
+  }
+
+  async function closeAllPositions() {
+    if (!confirm('确认对所有持仓 (多 + 空) 执行全额市价平仓?\n这一步会立刻发出平仓 webhook 并解锁两个方向。')) return;
+    const btn = document.getElementById('closeAllBtn');
+    const oldText = btn.textContent;
+    btn.disabled = true; btn.textContent = '平仓中…';
+    try {
+      const j = await callAdminApi('/api/auto-trade/close-all-positions', {});
+      const lines = (j.results || [])
+        .filter(r => !r.skipped)
+        .map(r => `${r.direction.toUpperCase()}: ${r.ok ? '✅' : '❌ ' + (r.error || '')}` +
+                  (r.entryPrice != null ? ` (入场 ${Number(r.entryPrice).toFixed(2)})` : ''));
+      if (j.closed === 0) {
+        showToast('warn', '⚠️ 无活跃仓位可平', '当前 long/short 均未持仓');
+      } else {
+        showToast(j.ok ? 'ok' : 'warn',
+          j.ok ? `✅ 已全部平仓 (${j.closed} 个方向)` : `⚠️ 平仓部分失败`,
+          lines.length ? lines : '已发起平仓 webhook',
+          8000);
+      }
+    } catch (e) {
+      showToast('err', '❌ 一键全平失败', e.message, 8000);
+    } finally {
+      btn.textContent = oldText;
+      await fetchAutoTradeStatus();
+    }
+  }
+
+  /**
+   * 联动按钮可用状态:
+   *   - 自动下单关闭   → 三个按钮全 disable (理由: 关了就不应该下单)
+   *   - 同方向 active  → 该方向开仓按钮 disable + tooltip
+   *   - 双方向 inactive → 全平按钮 disable
+   */
+  function updateManualActions(positions, autoEnabled) {
+    const longBtn = document.getElementById('manualOpenLongBtn');
+    const shortBtn = document.getElementById('manualOpenShortBtn');
+    const closeAllBtn = document.getElementById('closeAllBtn');
+    const meta = document.getElementById('manualActionMeta');
+    if (!longBtn || !shortBtn || !closeAllBtn) return;
+
+    const longActive = !!(positions.long && positions.long.active);
+    const shortActive = !!(positions.short && positions.short.active);
+    const anyActive = longActive || shortActive;
+
+    if (!autoEnabled) {
+      longBtn.disabled = true;
+      shortBtn.disabled = true;
+      closeAllBtn.disabled = true;
+      longBtn.title = shortBtn.title = closeAllBtn.title = '已禁用: 请先开启「自动下单」总开关';
+      meta.textContent = '⚠️ 自动下单已关闭, 手动操作已禁用';
+      return;
+    }
+
+    longBtn.disabled = longActive;
+    longBtn.title = longActive
+      ? '已持有多头仓位, 同方向不可重复开 (重置后可再开)'
+      : '按当前 Regime tradePlan 开多, 自动绑定 TP1/TP2/TP3 + SL';
+
+    shortBtn.disabled = shortActive;
+    shortBtn.title = shortActive
+      ? '已持有空头仓位, 同方向不可重复开 (重置后可再开)'
+      : '按当前 Regime tradePlan 开空, 自动绑定 TP1/TP2/TP3 + SL';
+
+    closeAllBtn.disabled = !anyActive;
+    closeAllBtn.title = anyActive
+      ? `对全部活跃仓位 (${[longActive && '多', shortActive && '空'].filter(Boolean).join('+')}) 一键 100% 市价平仓`
+      : '当前无任何持仓';
+
+    meta.textContent = anyActive
+      ? `当前持仓: ${longActive ? '📈多' : ''}${longActive && shortActive ? ' + ' : ''}${shortActive ? '📉空' : ''} · 重复同方向开仓会被拒绝`
+      : '按 Regime tradePlan 自动绑定 TP1/TP2/TP3 + SL';
   }
 
   async function setAutoTrade(enabled) {
@@ -949,6 +1167,11 @@
   });
   document.getElementById('resetLongBtn').addEventListener('click', () => resetDirection('long'));
   document.getElementById('resetShortBtn').addEventListener('click', () => resetDirection('short'));
+
+  // 手动交易按钮
+  document.getElementById('manualOpenLongBtn').addEventListener('click', () => manualOpen('long'));
+  document.getElementById('manualOpenShortBtn').addEventListener('click', () => manualOpen('short'));
+  document.getElementById('closeAllBtn').addEventListener('click', () => closeAllPositions());
 
   // 启动顺序：先拉自动交易状态(决定文案), 再加载行情数据
   fetchAutoTradeStatus().then(load);

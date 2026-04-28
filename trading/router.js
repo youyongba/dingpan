@@ -325,6 +325,108 @@ router.get('/status', (req, res) => {
   });
 });
 
+// ============ POST /manual-open: 手动按 Regime 开仓 ============
+//
+// body: { direction: 'long' | 'short' }
+//
+// 复用 processSignal: 自动按 regime tradePlan 优先, 没 plan 时回退 template,
+// 经过 TP/SL 方向校验, 通过 forwardOpen 出站下单, 落 state.openPosition,
+// 推送飞书 + 控制台 notify. 所有现有防重复/冷却/通知逻辑全部继承.
+//
+// ⚠️ 总开关关闭时直接拒绝, 避免"以为关了不下单, 手动一按又下了"的语义混乱.
+router.post('/manual-open', requireAdmin, async (req, res) => {
+  const direction = req.body?.direction;
+  if (!['long', 'short'].includes(direction)) {
+    return res.status(400).json({ ok: false, error: 'direction must be long|short' });
+  }
+  const cfg = config.get();
+  if (!cfg.enabled) {
+    return res.status(409).json({
+      ok: false,
+      error: 'auto_trade_disabled',
+      hint: '请先开启「自动下单」总开关再手动开仓',
+    });
+  }
+  const sig = {
+    token: cfg.token,
+    action: direction === 'long' ? 'open_long' : 'open_short',
+    symbol: cfg.symbol,
+  };
+  const r = await processSignal(sig, { source: 'manual_ui' });
+  res.status(r.status).json(r.body);
+});
+
+// ============ POST /close-all-positions: 一键全平 ============
+//
+// 遍历 long/short 两个 slot, 对 active=true 的方向:
+//   1) 先 state.closeAndUnlock 写盘 (active=false), 后续 tick 立即不再 evaluate
+//   2) 再 exec.fireStopLoss(trigger='manual_close_all') 把 100% market 平仓 webhook 发出去
+//   3) notify 飞书 + 控制台
+//
+// 顺序与 riskEngine.fireSl 保持一致 (先写盘后发 webhook), 即便 webhook 失败也不会
+// 因 _inFlight 异常没释放而陷入僵尸状态. 该方向被解锁, 用户可重新接信号.
+async function manualCloseAllImpl({ source = 'manual_ui' } = {}) {
+  const positions = state.get();
+  const cfg = config.get();
+  const results = [];
+
+  for (const dir of ['long', 'short']) {
+    const before = positions[dir];
+    if (!before || !before.active) {
+      results.push({ direction: dir, skipped: true, reason: 'no_position' });
+      continue;
+    }
+    const snapshot = {
+      entryPrice: before.entryPrice,
+      positionSize: before.positionSize,
+      leverage: before.leverage,
+      currentStopLoss: before.currentStopLoss,
+    };
+
+    state.closeAndUnlock(dir, 'manual_close_all');
+    const r = await exec.fireStopLoss(dir, { trigger: 'manual_close_all' });
+
+    results.push({
+      direction: dir,
+      ok: !!r.res.ok,
+      error: r.res.error || null,
+      ...snapshot,
+    });
+
+    exec.notify({
+      type: 'sl',
+      title: `🛑 ${dir.toUpperCase()} 一键全平 (manual_close_all)`,
+      lines: [
+        `symbol: ${cfg.symbol}`,
+        `方向: ${dir}`,
+        `入场价: ${snapshot.entryPrice ?? '--'}`,
+        `当时止损价: ${snapshot.currentStopLoss ?? '--'}`,
+        `仓位/杠杆: ${snapshot.positionSize ?? '--'} / ${snapshot.leverage ?? '--'}x`,
+        `操作来源: ${source}`,
+        `平仓 webhook: ${r.res.ok ? '✅ 已发送' : '❌ ' + (r.res.error || r.res.skipped || '')}`,
+        ...exec.formatPayloadLines('manual_close_all', r.payload),
+      ],
+      isAlert: !r.res.ok,
+    });
+    exec.notify({
+      type: 'unlock',
+      title: `🔓 ${dir.toUpperCase()} 已自动解锁 (一键全平)`,
+      lines: [`方向 ${dir} 现可重新接收开仓信号`],
+    });
+
+    console.log(`[trade.manual] close-all dir=${dir} ok=${r.res.ok} entry=${snapshot.entryPrice}`);
+  }
+
+  const closed = results.filter(r => !r.skipped).length;
+  const allOk = results.every(r => r.skipped || r.ok);
+  return { ok: allOk, closed, results };
+}
+
+router.post('/close-all-positions', requireAdmin, async (req, res) => {
+  const r = await manualCloseAllImpl({ source: req.body?.source || 'manual_ui' });
+  res.json(r);
+});
+
 // ============ POST /toggle: 一键开关自动交易 ============
 // body: { enabled: true|false }
 // 设计上不强制 X-Auth-Token, 只切换 enabled 一个布尔; 改其它字段仍走 /config
@@ -356,3 +458,5 @@ router.post('/config', requireAdmin, (req, res) => {
 
 module.exports = router;
 module.exports.processSignal = processSignal;
+module.exports.manualCloseAllImpl = manualCloseAllImpl;
+module.exports.requireAdmin = requireAdmin;
