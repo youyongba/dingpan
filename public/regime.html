@@ -120,8 +120,12 @@
   .pos-badge {
     font-size: 11px; padding: 2px 8px; border-radius: 4px; margin-left: 8px;
   }
-  .pos-badge.locked { background: #d2992233; color: #d29922; }
-  .pos-badge.idle   { background: #6e768133; color: #8b949e; }
+  .pos-badge.locked  { background: #d2992233; color: #d29922; }
+  .pos-badge.idle    { background: #6e768133; color: #8b949e; }
+  .pos-badge.pending { background: #1f6feb33; color: #58a6ff; }
+  .pos-card.pending-armed {
+    box-shadow: 0 0 0 1px #1f6feb55, 0 0 12px #1f6feb22;
+  }
   .reset-btn {
     background: #30363d; color: #f85149; border: 1px solid #f8514955;
     padding: 4px 12px; font-size: 12px; border-radius: 6px; cursor: pointer;
@@ -129,6 +133,13 @@
   }
   .reset-btn:hover { background: #f8514922; }
   .reset-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .cancel-pending-btn {
+    background: #30363d; color: #58a6ff; border: 1px solid #1f6feb55;
+    padding: 4px 12px; font-size: 12px; border-radius: 6px; cursor: pointer;
+    transition: .15s; margin-left: 6px;
+  }
+  .cancel-pending-btn:hover { background: #1f6feb22; }
+  .cancel-pending-btn:disabled { opacity: 0.4; cursor: not-allowed; }
   .pos-body { font-size: 12px; color: #c9d1d9; line-height: 1.7; }
   .pos-body .row { display: flex; justify-content: space-between; }
   .pos-body .row .k { color: #8b949e; }
@@ -142,6 +153,24 @@
   }
   .pos-body .tp-cell.hit { border-color: #3fb950; color: #3fb950; }
   .pos-body .empty { color: #8b949e; font-style: italic; }
+  /* pending (限价待触发) 醒目横幅 */
+  .pending-banner {
+    margin: 4px 0 8px;
+    padding: 8px 10px;
+    border: 1px dashed #1f6feb88;
+    border-radius: 6px;
+    background: linear-gradient(90deg, #1f6feb22, transparent);
+    font-size: 12px;
+  }
+  .pending-banner .pb-title { color: #58a6ff; font-weight: 700; margin-bottom: 4px; }
+  .pending-banner .pb-row { display: flex; justify-content: space-between; }
+  .pending-banner .pb-row .k { color: #8b949e; }
+  .pending-banner .pb-row .v { font-family: 'SF Mono', Menlo, monospace; }
+  .pending-banner .pb-distance.up   { color: #3fb950; }
+  .pending-banner .pb-distance.down { color: #ff7b72; }
+  .pending-banner .pb-countdown { color: #d29922; font-weight: 600; }
+  .pending-banner .pb-countdown.expiring { color: #ff7b72; animation: pb-pulse 1s ease-in-out infinite; }
+  @keyframes pb-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
   /* 自动交易开关 */
   .auto-trade-bar {
@@ -614,17 +643,87 @@
   function renderPositions(positions, lastPrice) {
     ['long', 'short'].forEach(dir => {
       const p = positions[dir] || {};
+      const card = document.querySelector(`.pos-card.${dir}`);
       const badge = document.getElementById(`pos${cap(dir)}Badge`);
       const body = document.getElementById(`pos${cap(dir)}Body`);
       const btn = document.getElementById(`reset${cap(dir)}Btn`);
+
+      if (card) card.classList.remove('pending-armed');
+
+      // ===== 分支 1: pending (限价待触发) — 信号已锁定, entry 未触发 =====
+      if (!p.active && p.pending && p.pendingPlan) {
+        const plan = p.pendingPlan;
+        const isLong = dir === 'long';
+        const entry = Number(plan.entry);
+        // 当前价 vs 待触发 entry 的距离 (带方向感: long 等回踩, short 等反弹)
+        let distHtml = '';
+        if (Number.isFinite(lastPrice) && Number.isFinite(entry) && entry > 0) {
+          const diff = lastPrice - entry;
+          const pct = (diff / entry * 100);
+          // long 需要价格"下来"到 entry, 当前价高于 entry → 还要等 (down)
+          // short 需要价格"上去"到 entry, 当前价低于 entry → 还要等 (down)
+          const waiting = isLong ? lastPrice > entry : lastPrice < entry;
+          const klass = waiting ? 'down' : 'up';
+          const sign = pct >= 0 ? '+' : '';
+          distHtml = `<span class="pb-distance ${klass}">${sign}${pct.toFixed(3)}% (${diff >= 0 ? '+' : ''}${diff.toFixed(2)})</span>`;
+        }
+        // 倒计时
+        let cdHtml = '--';
+        if (p.pendingExpireAt) {
+          const remainMs = Number(p.pendingExpireAt) - Date.now();
+          if (remainMs <= 0) {
+            cdHtml = '<span class="pb-countdown expiring">已过期</span>';
+          } else {
+            const m = Math.floor(remainMs / 60000);
+            const s = Math.floor((remainMs % 60000) / 1000);
+            const cls = remainMs < 5 * 60 * 1000 ? ' expiring' : '';
+            cdHtml = `<span class="pb-countdown${cls}">${m}m ${s}s</span>`;
+          }
+        }
+        const sourceMap = {
+          regime_plan: '✅ regime plan (与 TG 一致)',
+          template_fallback: '⚠️ 模板回退',
+          signal_explicit: '📝 外部信号显式',
+        };
+        const srcLabel = sourceMap[plan.source] || (plan.source || '--');
+        if (card) card.classList.add('pending-armed');
+        badge.className = 'pos-badge pending';
+        badge.textContent = '⏳ 待触发';
+        body.innerHTML = `
+          <div class="pending-banner">
+            <div class="pb-title">📋 限价挂单已锁定 · 等待价格${isLong ? '回踩' : '反弹'}至 entry</div>
+            <div class="pb-row"><span class="k">待触发 entry</span><span class="v">${fmt(entry, 2)}</span></div>
+            <div class="pb-row"><span class="k">当前市价 → entry</span><span class="v">${fmt(lastPrice, 2)} → ${fmt(entry, 2)} &nbsp; ${distHtml}</span></div>
+            <div class="pb-row"><span class="k">⏳ 自动过期倒计时</span><span class="v">${cdHtml}</span></div>
+          </div>
+          <div class="row"><span class="k">价位来源</span><span class="v">${srcLabel}</span></div>
+          <div class="row"><span class="k">挂单时刻</span><span class="v">${p.pendingArmedAt ? new Date(p.pendingArmedAt).toLocaleString() : '--'}</span></div>
+          <div class="row"><span class="k">仓位 / 杠杆</span><span class="v">${plan.positionSize || '--'} / ${plan.leverage || '--'}x</span></div>
+          <div class="row"><span class="k">预设止损</span><span class="v" style="color:#ff7b72;">${fmt(plan.sl, 2)}</span></div>
+          <div class="tp-grid">
+            <div class="tp-cell">TP1 50%<br><span style="font-family:'SF Mono',Menlo,monospace;">${fmt(plan.tp1, 2)}</span></div>
+            <div class="tp-cell">TP2 30%<br><span style="font-family:'SF Mono',Menlo,monospace;">${fmt(plan.tp2, 2)}</span></div>
+            <div class="tp-cell">TP3 20%<br><span style="font-family:'SF Mono',Menlo,monospace;">${fmt(plan.tp3, 2)}</span></div>
+          </div>
+          <div style="margin-top:8px;text-align:right;">
+            <button class="cancel-pending-btn" onclick="cancelPending('${dir}')">❎ 取消挂单</button>
+          </div>
+        `;
+        btn.disabled = false;
+        btn.title = '当前为 pending 挂单, 重置会清空挂单';
+        return;
+      }
+
+      // ===== 分支 2: 空仓 =====
       if (!p.active) {
         badge.className = 'pos-badge idle';
         badge.textContent = '无持仓 · 未锁定';
         body.innerHTML = '<div class="empty">尚无开仓信号 (反方向状态独立, 不互相影响)</div>';
-        btn.disabled = false; // 仍允许点击, 后端是幂等的
+        btn.disabled = false;
         btn.title = '当前无持仓, 点击仅做状态归零';
         return;
       }
+      // ===== 分支 3: 已成交 active 仓位 =====
       badge.className = 'pos-badge ' + (p.locked ? 'locked' : 'idle');
       badge.textContent = p.locked ? '🔒 已锁定' : '已开仓';
       const tps = p.tpHit || {};
@@ -774,16 +873,70 @@
     try {
       const j = await callAdminApi('/api/auto-trade/manual-open', { direction });
       const p = j.position || {};
-      showToast('ok', `✅ 已开${dirZh} (${j.priceSource || '--'})`, [
-        `入场价: ${p.entryPrice ?? '--'} | 仓位 ${p.positionSize || '--'} / ${p.leverage || '--'}x`,
-        `TP1: ${p.tp1 != null ? Number(p.tp1).toFixed(2) : '--'} (50%) | TP2: ${p.tp2 != null ? Number(p.tp2).toFixed(2) : '--'} (30%) | TP3: ${p.tp3 != null ? Number(p.tp3).toFixed(2) : '--'} (20%)`,
-        `SL: ${p.currentStopLoss != null ? Number(p.currentStopLoss).toFixed(2) : '--'} (100%)`,
-      ]);
+      const mode = j.mode || (p.pending ? 'pending' : 'immediate');
+      if (mode === 'pending') {
+        // pending 模式: entry/SL/TP 都在 pendingPlan 里
+        const plan = p.pendingPlan || {};
+        const entry = plan.entry != null ? Number(plan.entry).toFixed(2) : '--';
+        const sl = plan.sl != null ? Number(plan.sl).toFixed(2) : '--';
+        const tp1 = plan.tp1 != null ? Number(plan.tp1).toFixed(2) : '--';
+        const tp2 = plan.tp2 != null ? Number(plan.tp2).toFixed(2) : '--';
+        const tp3 = plan.tp3 != null ? Number(plan.tp3).toFixed(2) : '--';
+        const expireMin = p.pendingExpireAt
+          ? Math.max(0, Math.round((Number(p.pendingExpireAt) - Date.now()) / 60000))
+          : '--';
+        showToast('ok', `📋 ${dirZh}挂单已锁定 (待价回踩 entry)`, [
+          `价位来源: ${j.priceSource || '--'}`,
+          `🚪 待触发 entry: ${entry} · 仓位 ${plan.positionSize || '--'} / ${plan.leverage || '--'}x`,
+          `TP1: ${tp1} (50%) | TP2: ${tp2} (30%) | TP3: ${tp3} (20%)`,
+          `SL: ${sl} (100%)`,
+          `⏳ ${expireMin}min 内未触达将自动取消; 命中 entry 后自动 fill 并发 webhook`,
+        ], 8000);
+      } else {
+        // immediate 模式 (旧行为, 已立即下单)
+        showToast('ok', `✅ 已开${dirZh} (${j.priceSource || '--'}) · 市价成交`, [
+          `入场价: ${p.entryPrice ?? '--'} | 仓位 ${p.positionSize || '--'} / ${p.leverage || '--'}x`,
+          `TP1: ${p.tp1 != null ? Number(p.tp1).toFixed(2) : '--'} (50%) | TP2: ${p.tp2 != null ? Number(p.tp2).toFixed(2) : '--'} (30%) | TP3: ${p.tp3 != null ? Number(p.tp3).toFixed(2) : '--'} (20%)`,
+          `SL: ${p.currentStopLoss != null ? Number(p.currentStopLoss).toFixed(2) : '--'} (100%)`,
+        ]);
+      }
     } catch (e) {
       showToast('err', `❌ 开${dirZh}失败`, e.message, 8000);
     } finally {
       btn.textContent = oldText;
       // 立刻拉一次状态, updateManualActions 会按真实仓位重新设置 disable
+      await fetchAutoTradeStatus();
+    }
+  }
+
+  /**
+   * 取消某方向的 pending 挂单 (无需 admin token, 因为 pending 等价于"未下单").
+   * 暴露到 window 是因为 renderPositions 用内联 onclick 调用.
+   */
+  window.cancelPending = async function cancelPending(direction) {
+    const dirZh = direction === 'long' ? '多单' : '空单';
+    if (!confirm(`确认取消${dirZh}挂单? 取消后该方向恢复可开仓状态.`)) return;
+    try {
+      const r = await fetch('/api/auto-trade/cancel-pending', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ direction, reason: 'manual_ui' }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || j.ok === false) {
+        const err = j.error || ('HTTP ' + r.status);
+        if (err === 'no_pending') {
+          showToast('warn', '⚠️ 该方向无挂单', '可能已被自动 fill 或之前已取消');
+        } else {
+          throw new Error(err);
+        }
+      } else {
+        showToast('ok', `🛑 ${dirZh}挂单已取消`,
+          j.prev?.pendingPlan?.entry ? `原 entry: ${Number(j.prev.pendingPlan.entry).toFixed(2)}` : '');
+      }
+    } catch (e) {
+      showToast('err', '❌ 取消挂单失败', e.message);
+    } finally {
       await fetchAutoTradeStatus();
     }
   }
@@ -830,6 +983,10 @@
 
     const longActive = !!(positions.long && positions.long.active);
     const shortActive = !!(positions.short && positions.short.active);
+    const longPending = !!(positions.long && positions.long.pending);
+    const shortPending = !!(positions.short && positions.short.pending);
+    const longBusy = longActive || longPending;
+    const shortBusy = shortActive || shortPending;
     const anyActive = longActive || shortActive;
 
     if (!autoEnabled) {
@@ -841,23 +998,33 @@
       return;
     }
 
-    longBtn.disabled = longActive;
+    longBtn.disabled = longBusy;
     longBtn.title = longActive
       ? '已持有多头仓位, 同方向不可重复开 (重置后可再开)'
-      : '按当前 Regime tradePlan 开多, 自动绑定 TP1/TP2/TP3 + SL';
+      : longPending
+        ? '多头已有 pending 挂单待触发, 同方向不可重复挂 (取消挂单后可再挂)'
+        : '按当前 Regime tradePlan 开多, 自动绑定 TP1/TP2/TP3 + SL';
 
-    shortBtn.disabled = shortActive;
+    shortBtn.disabled = shortBusy;
     shortBtn.title = shortActive
       ? '已持有空头仓位, 同方向不可重复开 (重置后可再开)'
-      : '按当前 Regime tradePlan 开空, 自动绑定 TP1/TP2/TP3 + SL';
+      : shortPending
+        ? '空头已有 pending 挂单待触发, 同方向不可重复挂 (取消挂单后可再挂)'
+        : '按当前 Regime tradePlan 开空, 自动绑定 TP1/TP2/TP3 + SL';
 
     closeAllBtn.disabled = !anyActive;
     closeAllBtn.title = anyActive
       ? `对全部活跃仓位 (${[longActive && '多', shortActive && '空'].filter(Boolean).join('+')}) 一键 100% 市价平仓`
       : '当前无任何持仓';
 
-    meta.textContent = anyActive
-      ? `当前持仓: ${longActive ? '📈多' : ''}${longActive && shortActive ? ' + ' : ''}${shortActive ? '📉空' : ''} · 重复同方向开仓会被拒绝`
+    const tags = [
+      longActive && '📈多(已开)',
+      longPending && '📈多(挂单)',
+      shortActive && '📉空(已开)',
+      shortPending && '📉空(挂单)',
+    ].filter(Boolean);
+    meta.textContent = tags.length
+      ? `当前: ${tags.join(' · ')} · 重复同方向开仓会被拒绝`
       : '按 Regime tradePlan 自动绑定 TP1/TP2/TP3 + SL';
   }
 
