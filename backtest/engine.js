@@ -26,6 +26,12 @@ const { httpAgent, httpsAgent } = require('../lib/httpAgents');
 const { computeMACD, computeRSI } = require('../indicators/macdRsi');
 const regimeMod = require('../regimeModule');
 
+if (!regimeMod || !regimeMod._internal) {
+  throw new Error(
+    '[backtest] regimeModule._internal 未导出. 请确认 regimeModule.js 末尾的 module.exports 在 router.use(\'/backtest\', ...) 之前.'
+  );
+}
+
 const {
   computeATR, computeADX, computeHV, computeROC, computeSlope,
   judgeRegime, enhanceRegime, buildTradePlan,

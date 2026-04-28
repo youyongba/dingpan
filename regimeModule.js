@@ -1100,14 +1100,6 @@ router.get('/page', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'regime.html'));
 });
 
-// === 策略回测 (与生产 PENDING 模式同算法, 1H K 线) ===
-//   /api/regime/backtest/run     POST 触发回测
-//   /api/regime/backtest/summary GET  最近一次摘要
-//   /api/regime/backtest/last    GET  最近一次完整结果 (含 trades + equityCurve)
-//   /api/regime/backtest/history GET  历史回测列表
-//   /api/regime/backtest/status  GET  是否在跑
-router.use('/backtest', require('./backtest/router'));
-
 /**
  * 对外暴露：读取最近一次成功生成的 tradePlan / regime
  * 供 trading 引擎在收到 open_long/open_short 信号时, 使用本系统计算出的精准价位
@@ -1122,6 +1114,8 @@ function getLatestPlan() {
   };
 }
 
+// ⚠️ module.exports 必须在 require('./backtest/router') 之前赋值 —
+// backtest/engine.js 解构 regimeMod._internal, 循环依赖时只有提前导出才有值.
 module.exports = {
   router,
   setNotifier,
@@ -1144,3 +1138,11 @@ module.exports = {
     INTERVAL,
   },
 };
+
+// === 策略回测 (与生产 PENDING 模式同算法, 1H K 线) ===
+//   /api/regime/backtest/run     POST 触发回测
+//   /api/regime/backtest/summary GET  最近一次摘要
+//   /api/regime/backtest/last    GET  最近一次完整结果 (含 trades + equityCurve)
+//   /api/regime/backtest/history GET  历史回测列表
+//   /api/regime/backtest/status  GET  是否在跑
+router.use('/backtest', require('./backtest/router'));
