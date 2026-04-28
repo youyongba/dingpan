@@ -5,6 +5,7 @@ const axios = require('axios');
 const moment = require('moment');
 const fs = require('fs');
 const path = require('path');
+const { httpAgent, httpsAgent } = require('./lib/httpAgents');
 const regimeMod = require('./regimeModule');
 
 // ================= 环境变量与常量 =================
@@ -151,7 +152,7 @@ async function getFeishuToken() {
             const res = await axios.post(
                 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal',
                 { app_id: FEISHU_APP_ID, app_secret: FEISHU_APP_SECRET },
-                { timeout: 10000 }
+                { timeout: 10000, httpAgent, httpsAgent }
             );
             if (res.data.code === 0) {
                 feishuToken = res.data.tenant_access_token;
@@ -191,7 +192,7 @@ async function feishuSendImpl(title, text, isAlert) {
         const resp = await axios.post(
             `https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=${FEISHU_RECEIVE_ID_TYPE}`,
             { receive_id: FEISHU_RECEIVE_ID, msg_type: msgType, content: contentStr },
-            { headers: { Authorization: `Bearer ${token}` }, timeout: 10000 }
+            { headers: { Authorization: `Bearer ${token}` }, timeout: 10000, httpAgent, httpsAgent }
         );
         if (resp.data && resp.data.code !== 0) {
             console.error('飞书接口业务错误:', resp.data);
@@ -250,7 +251,7 @@ async function feishuSendRichImpl(title, contentLines, retry = 2) {
             const resp = await axios.post(
                 `https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=${FEISHU_RECEIVE_ID_TYPE}`,
                 { receive_id: FEISHU_RECEIVE_ID, msg_type: 'post', content: contentStr },
-                { headers: { Authorization: `Bearer ${token}` }, timeout: 10000 }
+                { headers: { Authorization: `Bearer ${token}` }, timeout: 10000, httpAgent, httpsAgent }
             );
             if (resp.data && resp.data.code !== 0) {
                 console.error('飞书富文本业务错误:', resp.data);
@@ -329,7 +330,7 @@ async function fetchBinanceData() {
     try {
         const premiumRes = await axios.get(
             'https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT',
-            { timeout: BINANCE_TIMEOUT_MS }
+            { timeout: BINANCE_TIMEOUT_MS, httpAgent, httpsAgent }
         );
         const d = premiumRes.data || {};
         const price = parseFloat(d.markPrice);
@@ -354,7 +355,7 @@ async function fetchBinanceData() {
 
         const fundingRes = await axios.get(
             'https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=60',
-            { timeout: BINANCE_TIMEOUT_MS }
+            { timeout: BINANCE_TIMEOUT_MS, httpAgent, httpsAgent }
         );
         const fundingHistory = fundingRes.data;
 
@@ -632,3 +633,30 @@ app.listen(PORT, () => {
         [{ text: '🧭 模式：', bold: true }, { text: '纯盯盘（不自动下单）' }],
     ]);
 });
+
+// ================= Event-loop lag 探针 =================
+// 30s 一次, 持续 >200ms (默认) 即在日志告警, 让我们在 CPU 100% 之前
+// 第一时间发现 — 通常 lag 飙升是 GC 风暴 / 同步阻塞的最早信号.
+// 关闭: EVENT_LOOP_LAG_DISABLED=1
+if (process.env.EVENT_LOOP_LAG_DISABLED !== '1') {
+    try {
+        const { monitorEventLoopDelay } = require('perf_hooks');
+        const lagThresholdMs = parseInt(process.env.EVENT_LOOP_LAG_THRESHOLD_MS, 10) || 200;
+        const h = monitorEventLoopDelay({ resolution: 50 });
+        h.enable();
+        const t = setInterval(() => {
+            const meanMs = h.mean / 1e6;
+            const p99Ms = h.percentile(99) / 1e6;
+            const maxMs = h.max / 1e6;
+            if (meanMs > lagThresholdMs || p99Ms > lagThresholdMs * 3) {
+                console.warn(
+                    `[perf] ⚠️ event-loop lag mean=${meanMs.toFixed(1)}ms p99=${p99Ms.toFixed(1)}ms max=${maxMs.toFixed(1)}ms (阈值 ${lagThresholdMs}ms)`
+                );
+            }
+            h.reset();
+        }, 30_000);
+        if (typeof t.unref === 'function') t.unref();
+    } catch (e) {
+        console.warn('[perf] 无法启用 event-loop lag 探针:', e.message);
+    }
+}

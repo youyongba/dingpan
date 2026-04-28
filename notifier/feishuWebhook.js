@@ -24,6 +24,7 @@
 
 const axios = require('axios');
 const crypto = require('crypto');
+const { httpAgent, httpsAgent } = require('../lib/httpAgents');
 
 // ---------------------- 配置 ----------------------
 const CFG = {
@@ -85,6 +86,7 @@ async function doPost(payload, retry = 2) {
       const resp = await axios.post(CFG.url, payload, {
         timeout: CFG.timeoutMs,
         headers: { 'Content-Type': 'application/json' },
+        httpAgent, httpsAgent,
       });
       if (resp.data && (resp.data.StatusCode === 0 || resp.data.code === 0 || resp.data.msg === 'ok')) {
         return { ok: true };

@@ -15,6 +15,7 @@
 
 const axios = require('axios');
 const config = require('./config');
+const { httpAgent, httpsAgent } = require('../lib/httpAgents');
 
 let _tg = null, _feishu = null;
 function tg() { return _tg || (_tg = require('../notifier/telegram')); }
@@ -52,6 +53,7 @@ async function postWebhook(payload, label = 'auto-trade', opts = {}) {
       const resp = await axios.post(cfg.webhookUrl, payload, {
         timeout,
         headers: { 'Content-Type': 'application/json' },
+        httpAgent, httpsAgent,
       });
       console.log(`[trade.executor] ✅ ${label} 发送成功 status=${resp.status} (尝试 ${i + 1}/${retry + 1})`);
       return { ok: true, status: resp.status, data: resp.data, attempts: i + 1 };
@@ -212,8 +214,13 @@ function notify(ev) {
     }
   }
 
-  // 同时输出到日志, 调试期一目了然
-  console.log(`[trade.notify] ${ev.title}\n  ${(ev.lines || []).join('\n  ')}`);
+  // 同时输出到日志, 调试期一目了然.
+  // 设 LOG_LEVEL=warn|error 可关闭这条 INFO 级别打印 (notify payload 几十行,
+  // 频繁触发时同步写 stdout 会阻塞主循环, 紧急排查时可降级).
+  const lv = process.env.LOG_LEVEL;
+  if (lv !== 'warn' && lv !== 'error') {
+    console.log(`[trade.notify] ${ev.title}\n  ${(ev.lines || []).join('\n  ')}`);
+  }
 }
 
 function escapeHTML(s) {

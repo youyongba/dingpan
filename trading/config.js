@@ -42,10 +42,16 @@ const DEFAULT_CONFIG = {
     short: { sl: 1.5, tp1: 1.5, tp2: 3.0, tp3: 4.5 },
   },
   // 价格源
+  // 默认 markPrice@1s: 1 帧/秒, 与币安清算系统使用的标记价一致, CPU 友好.
+  // 想回 aggTrade 高频 tick: 在 .env 设 AUTO_TRADE_STREAM=btcusdt@aggTrade
+  // (此时强烈建议同时设 AUTO_TRADE_EVAL_THROTTLE_MS=200 给 onTick 加节流)
   priceFeed: {
-    stream: 'btcusdt@aggTrade',  // 实时成交价；可改为 btcusdt@markPrice@1s
+    stream: process.env.AUTO_TRADE_STREAM || 'btcusdt@markPrice@1s',
     reconnectMinMs: 1000,
     reconnectMaxMs: 30000,
+    // onTick 节流(ms): aggTrade 时建议 200; markPrice@1s 时设 0 即可
+    // 节流策略是"取最新价"模式 — 不丢 tick, lastPrice 一直更新, 到点跑一次 evaluate
+    evalThrottleMs: parseInt(process.env.AUTO_TRADE_EVAL_THROTTLE_MS, 10) || 0,
   },
   // 鉴权 token：来自外部 webhook 信号的 token 必须与之相符
   // 默认与 webhook URL 末段一致，也可单独修改

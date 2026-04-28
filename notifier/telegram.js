@@ -22,6 +22,7 @@
 'use strict';
 
 const axios = require('axios');
+const { httpAgent, httpsAgent } = require('../lib/httpAgents');
 
 // -------------------- 配置 --------------------
 const TG_CFG = {
@@ -97,6 +98,7 @@ async function sendMessage(text, opt = {}) {
     const resp = await axios.post(url, payload, {
       timeout: TG_CFG.timeoutMs,
       headers: { 'Content-Type': 'application/json' },
+      httpAgent, httpsAgent,
     });
     if (resp.data && resp.data.ok) return { ok: true };
     console.error('[telegram] 业务错误:', resp.data);

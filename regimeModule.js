@@ -13,6 +13,7 @@ const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
 
+const { httpAgent, httpsAgent } = require('./lib/httpAgents');
 const { computeMACD, computeRSI, detectMacdCross, classifyRSI } = require('./indicators/macdRsi');
 const { enhance: enhanceRegime, SUB_LABELS } = require('./regime/enhancedJudge');
 const webhook = require('./notifier/feishuWebhook');
@@ -478,6 +479,7 @@ async function fetchKlines() {
   const { data } = await axios.get(url, {
     params: { symbol: SYMBOL, interval: INTERVAL, limit: LIMIT },
     timeout: TIMEOUT,
+    httpAgent, httpsAgent,
   });
   return data.map(k => ({
     time: k[0],
@@ -485,7 +487,20 @@ async function fetchKlines() {
   }));
 }
 
+// 重入守卫: 防止上一轮 refresh 还没回(币安 fapi 慢响应), setInterval
+// 5min 又触发新一轮 → klines/indicators 在堆里堆积 → GC 风暴 → CPU 100%.
+// 这是排查时定位的 P1 元凶之一.
+let _isRefreshing = false;
+let _lastRefreshStartedAt = 0;
+
 async function refresh() {
+  if (_isRefreshing) {
+    const ageSec = Math.round((Date.now() - _lastRefreshStartedAt) / 1000);
+    console.warn(`[regime] 上一轮 refresh 还在跑 (${ageSec}s), 跳过本轮以防堆积`);
+    return;
+  }
+  _isRefreshing = true;
+  _lastRefreshStartedAt = Date.now();
   try {
     const klines = await fetchKlines();
     const h = klines.map(k => k.high);
@@ -542,6 +557,8 @@ async function refresh() {
     cache.error = err.message;
     console.error('[regime] refresh failed:', err.message);
     handleNotificationsOnFailure(err.message);
+  } finally {
+    _isRefreshing = false;
   }
 }
 

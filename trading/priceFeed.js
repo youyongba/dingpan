@@ -92,6 +92,9 @@ class PriceFeed extends EventEmitter {
   }
 
   _safeClose() {
+    // 先停 staleTimer: 避免连接已关闭但 staleTimer 仍 5s 一次自检 → 重复触发
+    // _safeClose + _scheduleReconnect 形成 CPU 风暴 (P2 元凶).
+    if (this.staleTimer) { clearInterval(this.staleTimer); this.staleTimer = null; }
     if (!this.ws) return;
     const ws = this.ws;
     this.ws = null;
@@ -176,7 +179,8 @@ class PriceFeed extends EventEmitter {
         );
         this.emit('error', new Error(reason));
         this._safeClose();
-        this._scheduleReconnect(0);
+        // 走指数退避(最少 reconnectMinMs), 避免代理/网络抖动时 5s/次的硬重连风暴
+        this._scheduleReconnect();
       }
     }, 5000);
   }

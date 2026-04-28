@@ -104,12 +104,36 @@ function start() {
   console.log('[trade.risk] 风控引擎已挂载');
 }
 
-function onTick({ price }) {
-  if (!Number.isFinite(price)) return;
+// onTick 节流: 高频 tick 流(如 aggTrade)下避免每帧都跑 evaluate.
+// 策略是"取最新价"——_pendingPrice 一直更新, 到节流间隔后跑一次 evaluate,
+// 既不丢 tick 也不会错过 TP/SL: TP/SL 容忍度本就远大于 200ms.
+let _lastEvalAt = 0;
+let _pendingPrice = null;
+let _pendingTimer = null;
+
+function _runEval(price) {
+  _lastEvalAt = Date.now();
+  _pendingTimer = null;
   ['long', 'short'].forEach(dir => {
     try { evaluate(dir, price); }
     catch (e) { console.error('[trade.risk] evaluate error:', e.message); }
   });
+}
+
+function onTick({ price }) {
+  if (!Number.isFinite(price)) return;
+
+  const throttle = config.get().priceFeed?.evalThrottleMs || 0;
+  if (throttle <= 0) return _runEval(price);
+
+  _pendingPrice = price;
+  const now = Date.now();
+  const since = now - _lastEvalAt;
+  if (since >= throttle) {
+    _runEval(_pendingPrice);
+  } else if (!_pendingTimer) {
+    _pendingTimer = setTimeout(() => _runEval(_pendingPrice), throttle - since);
+  }
 }
 
 function evaluate(direction, price) {
@@ -260,6 +284,9 @@ module.exports = {
     recentlyFired.short = 0;
     _inFlight.long = false;
     _inFlight.short = false;
+    if (_pendingTimer) { clearTimeout(_pendingTimer); _pendingTimer = null; }
+    _lastEvalAt = 0;
+    _pendingPrice = null;
   },
   __getInFlight: () => ({ ..._inFlight }),       // 仅测试用
 };
