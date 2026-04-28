@@ -233,6 +233,83 @@
     color: #ff7b72; background: #da363322; border: 1px solid #ff7b72;
     padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; display: none;
   }
+
+  /* ============ 策略回测面板 ============ */
+  .bt-panel {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    padding: 16px 18px; margin-bottom: 16px;
+  }
+  .bt-panel h2 {
+    margin: 0 0 10px; font-size: 16px; color: #58a6ff;
+  }
+  .bt-panel .desc { color: #8b949e; font-size: 12px; margin-bottom: 12px; }
+  .bt-form {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-bottom: 12px;
+  }
+  .bt-form label { font-size: 12px; color: #8b949e; display: flex; flex-direction: column; gap: 4px; }
+  .bt-form input {
+    background: #0e1116; border: 1px solid #30363d; color: #e6edf3;
+    border-radius: 6px; padding: 6px 10px; font-size: 13px; width: 110px;
+    font-family: 'SF Mono', Menlo, monospace;
+  }
+  .bt-form input:focus { outline: none; border-color: #58a6ff; }
+  .bt-form .checkbox-row {
+    flex-direction: row; align-items: center; gap: 6px; cursor: pointer;
+  }
+  #btRunBtn {
+    background: #1f6feb; color: white; border: 0;
+    padding: 7px 18px; border-radius: 6px; font-size: 13px; font-weight: 600;
+    cursor: pointer; transition: background 0.2s;
+  }
+  #btRunBtn:hover:not(:disabled) { background: #388bfd; }
+  #btRunBtn:disabled { background: #30363d; cursor: not-allowed; }
+  .bt-status {
+    font-size: 12px; padding: 4px 8px; border-radius: 4px;
+    background: #21262d; color: #8b949e;
+  }
+  .bt-status.running { background: #1f6feb33; color: #58a6ff; }
+  .bt-status.ok      { background: #3fb95033; color: #3fb950; }
+  .bt-status.err     { background: #da363333; color: #ff7b72; }
+
+  .bt-stat-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 8px; margin-bottom: 12px;
+  }
+  .bt-stat {
+    background: #0e1116; border: 1px solid #30363d; border-radius: 6px;
+    padding: 8px 10px;
+  }
+  .bt-stat .label { font-size: 11px; color: #8b949e; }
+  .bt-stat .val {
+    font-size: 18px; font-weight: 700; margin-top: 4px;
+    font-family: 'SF Mono', Menlo, monospace;
+  }
+  .bt-stat .sub { font-size: 11px; color: #8b949e; margin-top: 2px; }
+  .bt-stat .val.up   { color: #3fb950; }
+  .bt-stat .val.down { color: #ff7b72; }
+  .bt-stat .val.neutral { color: #c9d1d9; }
+  .bt-stat .val.warn { color: #d29922; }
+
+  .bt-equity-wrap { position: relative; height: 240px; margin-bottom: 12px; }
+  .bt-table-wrap {
+    max-height: 360px; overflow-y: auto; border: 1px solid #30363d;
+    border-radius: 6px; background: #0e1116;
+  }
+  .bt-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .bt-table th, .bt-table td {
+    text-align: right; padding: 6px 8px; border-bottom: 1px solid #21262d;
+    font-family: 'SF Mono', Menlo, monospace;
+  }
+  .bt-table th {
+    background: #161b22; color: #8b949e; font-weight: 500;
+    position: sticky; top: 0; z-index: 1;
+  }
+  .bt-table td.dir-long  { color: #3fb950; text-align: left; }
+  .bt-table td.dir-short { color: #ff7b72; text-align: left; }
+  .bt-table td.pnl-pos   { color: #3fb950; }
+  .bt-table td.pnl-neg   { color: #ff7b72; }
+  .bt-table td.reason    { text-align: left; color: #8b949e; font-size: 11px; }
+  .bt-empty { padding: 20px; text-align: center; color: #8b949e; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -369,6 +446,112 @@
   <div class="card">
     <h3>RSI (14) · 最近 50 根</h3>
     <div class="chart-wrap"><canvas id="chartRsi"></canvas></div>
+  </div>
+</div>
+
+<!-- ============ 策略回测面板 ============ -->
+<div class="bt-panel">
+  <h2>📊 策略回测 (Backtest)</h2>
+  <div class="desc">
+    用过去 N 天的真实 1H K 线 (币安 BTCUSDT 永续) 跑同一套 Regime + tradePlan 算法,
+    严格按 PENDING (限价) 模式模拟成交, 含费率与滑点. 结果可推送到飞书.
+  </div>
+  <div class="bt-form">
+    <label>回测天数
+      <input id="btDays" type="number" value="30" min="1" max="180" />
+    </label>
+    <label>初始资金 (USDT)
+      <input id="btCapital" type="number" value="1000" min="10" step="100" />
+    </label>
+    <label>杠杆
+      <input id="btLeverage" type="number" value="100" min="1" max="125" />
+    </label>
+    <label>单边费率
+      <input id="btFee" type="number" value="0.0004" min="0" step="0.0001" />
+    </label>
+    <label>滑点
+      <input id="btSlip" type="number" value="0.0003" min="0" step="0.0001" />
+    </label>
+    <label class="checkbox-row" title="完成后推送结果摘要到飞书">
+      <input id="btPushFeishu" type="checkbox" checked /> 推送到飞书
+    </label>
+    <button id="btRunBtn">▶ 开始回测</button>
+    <span id="btStatus" class="bt-status">就绪</span>
+  </div>
+
+  <div id="btResult" style="display:none;">
+    <div class="bt-stat-grid">
+      <div class="bt-stat">
+        <div class="label">最终资金</div>
+        <div class="val neutral" id="btFinalCap">--</div>
+        <div class="sub" id="btReturn">--</div>
+      </div>
+      <div class="bt-stat">
+        <div class="label">胜率</div>
+        <div class="val neutral" id="btWinRate">--</div>
+        <div class="sub" id="btWinDetail">--</div>
+      </div>
+      <div class="bt-stat">
+        <div class="label">盈亏比 (avgW/avgL)</div>
+        <div class="val neutral" id="btPayoff">--</div>
+        <div class="sub" id="btProfitFactor">--</div>
+      </div>
+      <div class="bt-stat">
+        <div class="label">最大回撤</div>
+        <div class="val warn" id="btMaxDD">--</div>
+        <div class="sub" id="btMaxDDAt">--</div>
+      </div>
+      <div class="bt-stat">
+        <div class="label">单笔期望</div>
+        <div class="val neutral" id="btExpect">--</div>
+        <div class="sub" id="btTotalTrades">--</div>
+      </div>
+      <div class="bt-stat">
+        <div class="label">多空表现</div>
+        <div class="val neutral" id="btDirSplit">--</div>
+        <div class="sub" id="btDirWinRate">--</div>
+      </div>
+      <div class="bt-stat">
+        <div class="label">平仓分布</div>
+        <div class="val neutral" id="btCloseDist">--</div>
+        <div class="sub">TP / SL / 保本</div>
+      </div>
+      <div class="bt-stat">
+        <div class="label">数据区间</div>
+        <div class="val neutral" id="btRange" style="font-size:12px;">--</div>
+        <div class="sub" id="btElapsed">--</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:12px;">
+      <h3>💼 资金曲线</h3>
+      <div class="bt-equity-wrap"><canvas id="btChartEquity"></canvas></div>
+    </div>
+
+    <div class="card">
+      <h3>📋 交易明细 (最近 50 笔)</h3>
+      <div class="bt-table-wrap">
+        <table class="bt-table">
+          <thead>
+            <tr>
+              <th style="text-align:left;">方向</th>
+              <th style="text-align:left;">入场时间</th>
+              <th>计划入场</th>
+              <th>实际入场</th>
+              <th>SL</th>
+              <th>退出价</th>
+              <th>退出原因</th>
+              <th>盈亏 (USDT)</th>
+              <th>盈亏 %</th>
+              <th>R</th>
+            </tr>
+          </thead>
+          <tbody id="btTradeBody">
+            <tr><td colspan="10" class="bt-empty">暂无回测结果</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1179,6 +1362,204 @@
   setInterval(load, 60 * 1000);
   // 自动交易状态每 5s 同步一次(展示 WS 连接 + 最新价 + 双端状态一致)
   setInterval(fetchAutoTradeStatus, 5 * 1000);
+
+  // ============ 策略回测面板 ============
+  function setBtStatus(text, klass) {
+    const el = document.getElementById('btStatus');
+    el.textContent = text;
+    el.className = 'bt-status' + (klass ? ' ' + klass : '');
+  }
+
+  function renderBtSummary(data) {
+    document.getElementById('btResult').style.display = 'block';
+    const s = data.summary;
+    const p = data.params;
+
+    const finalCap = document.getElementById('btFinalCap');
+    finalCap.textContent = s.finalCapital + ' U';
+    finalCap.className = 'val ' + (s.totalReturnPct >= 0 ? 'up' : 'down');
+
+    const ret = document.getElementById('btReturn');
+    const sign = s.totalReturnPct >= 0 ? '+' : '';
+    ret.textContent = `初始 ${s.initialCapital}U · 总收益 ${sign}${s.totalReturnPct}%`;
+
+    const wr = document.getElementById('btWinRate');
+    wr.textContent = s.winRatePct + '%';
+    wr.className = 'val ' + (s.winRatePct >= 50 ? 'up' : (s.winRatePct >= 35 ? 'neutral' : 'down'));
+    document.getElementById('btWinDetail').textContent = `盈 ${s.winningTrades} / 亏 ${s.losingTrades}`;
+
+    const pf = document.getElementById('btPayoff');
+    pf.textContent = String(s.payoffRatio);
+    pf.className = 'val ' + (s.payoffRatio !== 'inf' && s.payoffRatio >= 1.5 ? 'up'
+                            : s.payoffRatio !== 'inf' && s.payoffRatio < 1 ? 'down' : 'neutral');
+    document.getElementById('btProfitFactor').textContent = '利润因子 PF=' + s.profitFactor;
+
+    const dd = document.getElementById('btMaxDD');
+    dd.textContent = s.maxDrawdownPct + '%';
+    dd.className = 'val ' + (s.maxDrawdownPct < 15 ? 'neutral' : (s.maxDrawdownPct < 30 ? 'warn' : 'down'));
+    document.getElementById('btMaxDDAt').textContent = s.maxDrawdownAt
+      ? '于 ' + new Date(s.maxDrawdownAt).toLocaleString() : '--';
+
+    const ex = document.getElementById('btExpect');
+    ex.textContent = (s.expectancyPerTrade >= 0 ? '+' : '') + s.expectancyPerTrade + ' U';
+    ex.className = 'val ' + (s.expectancyPerTrade >= 0 ? 'up' : 'down');
+    document.getElementById('btTotalTrades').textContent = `共 ${s.totalTrades} 笔交易`;
+
+    document.getElementById('btDirSplit').textContent = `多 ${s.longTrades} / 空 ${s.shortTrades}`;
+    document.getElementById('btDirWinRate').textContent =
+      `多胜率 ${s.longWinRatePct}% · 空胜率 ${s.shortWinRatePct}%`;
+
+    document.getElementById('btCloseDist').textContent =
+      `${s.tpClosed} / ${s.slClosed} / ${s.slProtectionClosed}`;
+
+    const rangeFrom = data.range.from ? new Date(data.range.from).toLocaleDateString() : '--';
+    const rangeTo = data.range.to ? new Date(data.range.to).toLocaleDateString() : '--';
+    document.getElementById('btRange').textContent = `${rangeFrom} → ${rangeTo}`;
+    document.getElementById('btElapsed').textContent =
+      `${data.range.bars} 根 1H · 耗时 ${(data.elapsedMs / 1000).toFixed(1)}s`;
+  }
+
+  function renderBtEquityCurve(equityCurve, initialCapital) {
+    const ctx = document.getElementById('btChartEquity').getContext('2d');
+    if (charts.btEquity) charts.btEquity.destroy();
+    const labels = equityCurve.map(p => p.time);
+    const equity = equityCurve.map(p => p.equity);
+    const realized = equityCurve.map(p => p.capital);
+    charts.btEquity = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          {
+            label: '总权益 (含浮盈)',
+            data: equity,
+            borderColor: '#3fb950', backgroundColor: '#3fb95022',
+            fill: true, tension: 0.1, pointRadius: 0, borderWidth: 2,
+          },
+          {
+            label: '已实现资金',
+            data: realized,
+            borderColor: '#58a6ff', backgroundColor: 'transparent',
+            fill: false, tension: 0.1, pointRadius: 0, borderWidth: 1,
+            borderDash: [4, 4],
+          },
+        ],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          x: { type: 'time', time: { unit: 'day' }, grid: { color: '#21262d' } },
+          y: {
+            grid: { color: '#21262d' },
+            ticks: { callback: v => v + ' U' },
+          },
+        },
+        plugins: {
+          legend: { labels: { color: '#c9d1d9' } },
+          annotation: undefined,
+        },
+      },
+    });
+    // 画一条初始资金的水平参考线 (Chart.js 不强制依赖 annotation 插件, 这里用 dataset 模拟)
+    if (charts.btEquity.data && charts.btEquity.data.datasets) {
+      charts.btEquity.data.datasets.push({
+        label: '初始资金',
+        data: labels.map(() => initialCapital),
+        borderColor: '#8b949e', borderDash: [2, 4], fill: false,
+        pointRadius: 0, borderWidth: 1,
+      });
+      charts.btEquity.update();
+    }
+  }
+
+  function renderBtTrades(trades) {
+    const tbody = document.getElementById('btTradeBody');
+    if (!trades || !trades.length) {
+      tbody.innerHTML = '<tr><td colspan="10" class="bt-empty">无交易</td></tr>';
+      return;
+    }
+    const last50 = trades.slice(-50).reverse();
+    const reasonZh = {
+      tp_1: 'TP1 (50%)', tp_2: 'TP2 (30%)', tp_3: 'TP3 (20% / 全平)',
+      sl: '止损', sl_protection: '保本', final_close: '到期收盘',
+    };
+    tbody.innerHTML = last50.map(t => {
+      const dirClass = t.direction === 'long' ? 'dir-long' : 'dir-short';
+      const dirZh = t.direction === 'long' ? '📈 LONG' : '📉 SHORT';
+      const pnlClass = t.totalPnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+      const reason = reasonZh[t.closeReason] || t.closeReason || '--';
+      const entryDate = t.entryTime ? new Date(t.entryTime).toLocaleString().slice(5) : '--';
+      const sign = (n) => (n >= 0 ? '+' : '') + n;
+      return `<tr>
+        <td class="${dirClass}">${dirZh}</td>
+        <td style="text-align:left;font-size:11px;color:#8b949e;">${entryDate}</td>
+        <td>${t.plannedEntry ?? '--'}</td>
+        <td>${t.entryPrice ?? '--'}</td>
+        <td style="color:#ff7b72;">${t.initialSL ?? '--'}</td>
+        <td>${t.exitPrice ?? '--'}</td>
+        <td class="reason">${reason}</td>
+        <td class="${pnlClass}">${sign(t.totalPnl)}</td>
+        <td class="${pnlClass}">${sign(t.pnlPct)}%</td>
+        <td class="${pnlClass}">${t.rMultiple == null ? '--' : sign(t.rMultiple) + 'R'}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  async function runBacktest() {
+    const btn = document.getElementById('btRunBtn');
+    btn.disabled = true;
+    setBtStatus('🔄 拉历史数据 + 模拟中, 请稍候 (~3-10s)...', 'running');
+    const body = {
+      days: parseInt(document.getElementById('btDays').value, 10) || 30,
+      initialCapital: parseFloat(document.getElementById('btCapital').value) || 1000,
+      leverage: parseInt(document.getElementById('btLeverage').value, 10) || 100,
+      feeRate: parseFloat(document.getElementById('btFee').value),
+      slippage: parseFloat(document.getElementById('btSlip').value),
+      push: document.getElementById('btPushFeishu').checked,
+    };
+    try {
+      const r = await fetch('/api/regime/backtest/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const summaryResp = await r.json();
+      if (!r.ok || !summaryResp.ok) throw new Error(summaryResp.error || ('HTTP ' + r.status));
+
+      // 拉完整结果用于画曲线 + 表格
+      const detail = await fetch('/api/regime/backtest/last?max_trades=200&equity_step=2').then(x => x.json());
+      if (!detail.ok) throw new Error('获取结果失败');
+
+      renderBtSummary(detail);
+      renderBtEquityCurve(detail.equityCurve, detail.params.initialCapital);
+      renderBtTrades(detail.trades);
+
+      const okMsg = `✅ 回测完成 · 胜率 ${detail.summary.winRatePct}% · 收益 ${detail.summary.totalReturnPct >= 0 ? '+' : ''}${detail.summary.totalReturnPct}%`
+                  + (summaryResp.pushed ? ' · 已推飞书' : '');
+      setBtStatus(okMsg, 'ok');
+    } catch (e) {
+      console.error('[backtest]', e);
+      setBtStatus('❌ 失败: ' + (e.message || 'unknown'), 'err');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  document.getElementById('btRunBtn').addEventListener('click', runBacktest);
+
+  // 启动时尝试拉一下上一次结果, 让用户进页面就看到
+  fetch('/api/regime/backtest/last?max_trades=200&equity_step=2')
+    .then(r => r.json())
+    .then(d => {
+      if (d && d.ok) {
+        renderBtSummary(d);
+        renderBtEquityCurve(d.equityCurve, d.params.initialCapital);
+        renderBtTrades(d.trades);
+        setBtStatus('已加载上次回测', 'ok');
+      }
+    })
+    .catch(() => { /* 没历史回测就不展示 */ });
 })();
 </script>
 </body>

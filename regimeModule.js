@@ -1100,6 +1100,14 @@ router.get('/page', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'regime.html'));
 });
 
+// === 策略回测 (与生产 PENDING 模式同算法, 1H K 线) ===
+//   /api/regime/backtest/run     POST 触发回测
+//   /api/regime/backtest/summary GET  最近一次摘要
+//   /api/regime/backtest/last    GET  最近一次完整结果 (含 trades + equityCurve)
+//   /api/regime/backtest/history GET  历史回测列表
+//   /api/regime/backtest/status  GET  是否在跑
+router.use('/backtest', require('./backtest/router'));
+
 /**
  * 对外暴露：读取最近一次成功生成的 tradePlan / regime
  * 供 trading 引擎在收到 open_long/open_short 信号时, 使用本系统计算出的精准价位
@@ -1114,4 +1122,25 @@ function getLatestPlan() {
   };
 }
 
-module.exports = { router, setNotifier, setFundingProvider, getLatestPlan };
+module.exports = {
+  router,
+  setNotifier,
+  setFundingProvider,
+  getLatestPlan,
+  // 暴露纯函数给回测引擎复用 — 与生产环境用同一套指标/判定/计划逻辑,
+  // 保证回测结果与未来真实信号一致.
+  _internal: {
+    computeATR,
+    computeADX,
+    computeHV,
+    computeROC,
+    computeSlope,
+    judgeRegime,
+    buildTradePlan,
+    // 同时暴露 enhanceRegime 给回测使用 (已经从 ./regime/enhancedJudge require)
+    enhanceRegime,
+    // 暴露常量
+    SYMBOL,
+    INTERVAL,
+  },
+};
