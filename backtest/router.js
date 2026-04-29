@@ -83,8 +83,11 @@ function pushFeishuSummary(result) {
     [{ text: `🎯 TP 触发：${s.tpClosed} 笔` }],
     [{ text: `🛑 SL 触发：${s.slClosed} 笔` }],
     [{ text: `🛡️ 保本止损：${s.slProtectionClosed} 笔` }],
+    [{ text: '━━━━━ 反向信号取消 ━━━━━' }],
+    [{ text: `🔄 总取消挂单：${s.cancelTotal ?? 0} 次  (MACD ${s.cancelByMacdCross ?? 0} / RSI ${s.cancelByRsiZone ?? 0} / FVG ${s.cancelByFvg ?? 0})` }],
     [{ text: '━━━━━ 参数 ━━━━━' }],
     [{ text: `杠杆 ${p.leverage || p.defaultLeverage}x · 单边费率 ${(p.feeRate * 100).toFixed(3)}% · 滑点 ${(p.slippage * 100).toFixed(3)}%` }],
+    [{ text: `TP1 保本止损：${p.tp1Protection !== false ? '✅ 开启' : '❌ 关闭'} · 反向信号取消：${p.cancelOnReverseSignal !== false ? '✅ 开启' : '❌ 关闭'}` }],
   ];
 
   return webhook.sendRich(
@@ -107,6 +110,10 @@ router.post('/run', async (req, res) => {
   if (body.feeRate != null) userParams.feeRate = parseFloat(body.feeRate);
   if (body.slippage != null) userParams.slippage = parseFloat(body.slippage);
   if (body.pendingTtlBars != null) userParams.pendingTtlBars = parseInt(body.pendingTtlBars, 10);
+  // TP1 后是否启用保本止损 (默认沿用 engine.DEFAULT_PARAMS = true)
+  if (body.tp1Protection != null) userParams.tp1Protection = !!body.tp1Protection;
+  // 反向信号 (MACD 金/死叉 + RSI 超买/超卖 + FVG) 是否取消挂单
+  if (body.cancelOnReverseSignal != null) userParams.cancelOnReverseSignal = !!body.cancelOnReverseSignal;
   const wantPush = body.push !== false;     // 默认推飞书; 显式传 false 不推
 
   _running = true;

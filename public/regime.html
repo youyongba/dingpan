@@ -182,6 +182,7 @@
   .auto-trade-bar .at-state { font-size: 12px; padding: 2px 8px; border-radius: 4px; }
   .auto-trade-bar .at-state.on  { background: #3fb95033; color: #3fb950; }
   .auto-trade-bar .at-state.off { background: #d2992233; color: #d29922; }
+  .auto-trade-bar .at-divider { color: #30363d; font-size: 14px; user-select: none; }
   .auto-trade-bar .at-meta { font-size: 11px; color: #8b949e; margin-left: auto; }
 
   /* 手动交易操作栏 (开多 / 开空 / 全平) */
@@ -264,6 +265,9 @@
   }
 
   /* ============ 策略回测面板 ============ */
+  .m16 {
+    margin-top:16px;
+  }
   .bt-panel {
     background: #161b22; border: 1px solid #30363d; border-radius: 8px;
     padding: 16px 18px; margin-bottom: 16px;
@@ -361,8 +365,17 @@
     <span class="slider"></span>
   </label>
   <span id="autoTradeState" class="at-state off">读取中...</span>
+
+  <span class="at-divider">|</span>
+  <span class="at-label" title="TP1 触发后是否自动把 SL 上移到入场价 (保本)">TP1 保本</span>
+  <label class="switch" title="开启后 webhook payload 会携带 set_protection_sl 等 3 个字段">
+    <input type="checkbox" id="tp1ProtectionToggle" disabled>
+    <span class="slider"></span>
+  </label>
+  <span id="tp1ProtectionState" class="at-state off">--</span>
+
   <span class="at-meta">
-    开启后系统接收 webhook 信号将自动执行 TP/SL；关闭后仅展示建议价位
+    自动下单关闭后 TP1 保本设置不生效
     · <span id="autoTradePrice">价格源 --</span>
   </span>
 </div>
@@ -479,7 +492,7 @@
 </div>
 
 <!-- ============ 策略回测面板 ============ -->
-<div class="bt-panel">
+<div class="bt-panel m16">
   <h2>📊 策略回测 (Backtest)</h2>
   <div class="desc">
     用过去 N 天的真实 1H K 线 (币安 BTCUSDT 永续) 跑同一套 Regime + tradePlan 算法,
@@ -500,6 +513,12 @@
     </label>
     <label>滑点
       <input id="btSlip" type="number" value="0.0003" min="0" step="0.0001" />
+    </label>
+    <label class="checkbox-row" title="TP1 触发后是否把 SL 上移到 entry (保本). 关闭后剩余 50% 仓位按原 SL 跑">
+      <input id="btTp1Protection" type="checkbox" checked /> TP1 保本止损
+    </label>
+    <label class="checkbox-row" title="MACD 金/死叉 + RSI 超买/超卖出现时, 自动取消反向 pending 挂单">
+      <input id="btCancelOnReverse" type="checkbox" checked /> 反向信号取消挂单
     </label>
     <label class="checkbox-row" title="完成后推送结果摘要到飞书">
       <input id="btPushFeishu" type="checkbox" checked /> 推送到飞书
@@ -633,10 +652,45 @@
       // 同步刷新仓位卡片 + 手动操作按钮可用态
       renderPositions(j.positions || {}, pf.lastPrice);
       updateManualActions(j.positions || {}, autoTrade.enabled);
+      // TP1 保本止损开关
+      const tp1On = j.tp1Protection !== false;
+      const tp1Toggle = document.getElementById('tp1ProtectionToggle');
+      const tp1State = document.getElementById('tp1ProtectionState');
+      if (tp1Toggle && tp1State) {
+        tp1Toggle.checked = tp1On;
+        tp1Toggle.disabled = false;
+        tp1State.textContent = tp1On ? '已开启' : '已关闭';
+        tp1State.className = 'at-state ' + (tp1On ? 'on' : 'off');
+      }
     } catch (e) {
       const stateEl = document.getElementById('autoTradeState');
       stateEl.textContent = '后端不可达';
       stateEl.className = 'at-state off';
+    }
+  }
+
+  /** TP1 保本止损总开关 — 切换写入 cfg.tp1Protection. 走 admin token. */
+  async function setTp1Protection(enabled) {
+    const tp1Toggle = document.getElementById('tp1ProtectionToggle');
+    const tp1State = document.getElementById('tp1ProtectionState');
+    tp1Toggle.disabled = true;
+    tp1State.textContent = '切换中...';
+    try {
+      const j = await callAdminApi('/api/auto-trade/config', { tp1Protection: !!enabled });
+      const on = j.config?.tp1Protection !== false;
+      tp1Toggle.checked = on;
+      tp1State.textContent = on ? '已开启' : '已关闭';
+      tp1State.className = 'at-state ' + (on ? 'on' : 'off');
+      showToast('ok', on ? '🛡 TP1 保本止损已开启' : '⚠️ TP1 保本止损已关闭',
+        on
+          ? 'TP1 触发时 webhook 携带 set_protection_sl 字段, SL 自动上移到入场价'
+          : 'TP1 触发后 SL 不变, 仅 50% 平仓 (适合顺势放飞行情)', 5000);
+    } catch (e) {
+      showToast('err', '❌ TP1 保本切换失败', e.message, 6000);
+      // 失败时把 toggle 反弹回旧值
+      await fetchAutoTradeStatus();
+    } finally {
+      tp1Toggle.disabled = false;
     }
   }
 
@@ -1515,6 +1569,9 @@
   document.getElementById('autoTradeToggle').addEventListener('change', (e) => {
     setAutoTrade(e.target.checked);
   });
+  document.getElementById('tp1ProtectionToggle').addEventListener('change', (e) => {
+    setTp1Protection(e.target.checked);
+  });
   document.getElementById('resetLongBtn').addEventListener('click', () => resetDirection('long'));
   document.getElementById('resetShortBtn').addEventListener('click', () => resetDirection('short'));
 
@@ -1683,6 +1740,8 @@
       leverage: parseInt(document.getElementById('btLeverage').value, 10) || 100,
       feeRate: parseFloat(document.getElementById('btFee').value),
       slippage: parseFloat(document.getElementById('btSlip').value),
+      tp1Protection: document.getElementById('btTp1Protection').checked,
+      cancelOnReverseSignal: document.getElementById('btCancelOnReverse').checked,
       push: document.getElementById('btPushFeishu').checked,
     };
     try {

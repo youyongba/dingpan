@@ -22,6 +22,9 @@ const state = require('./state');
 const exec = require('./executor');
 const config = require('./config');
 const priceFeed = require('./priceFeed');
+// TG 渠道仅用于"实际开仓成交"通知 — 与 regime 喊单 (sendTradeSignal) 区分:
+// 喊单是建议价位, 这条是真的把 webhook 发出去之后的实际入场.
+const tg = require('../notifier/telegram');
 
 // ---------------- 防重复触发 ----------------
 //
@@ -189,7 +192,12 @@ async function fireTp(direction, level, triggerPrice) {
   _inFlight[direction] = true;
   recentlyFired[direction] = Date.now();
   try {
-    const setProtection = (level === 'tp_1');
+    // TP1 保本止损: 由 cfg.tp1Protection 决定 (默认 true).
+    //   关掉后 webhook payload 不携带 set_protection_sl/protection_sl_price/protection_sl_order_type
+    //   接收方就不会改 SL, 我们也不会把 currentStopLoss 改成 entry.
+    const cfg = config.get();
+    const tp1ProtectionOn = cfg.tp1Protection !== false;
+    const setProtection = (level === 'tp_1') && tp1ProtectionOn;
     const tpKey = level === 'tp_1' ? 'tp1' : level === 'tp_2' ? 'tp2' : 'tp3';
     const pBefore = state.getPosition(direction);
     const newSl = setProtection ? pBefore.entryPrice : undefined;
@@ -300,6 +308,23 @@ async function firePendingFill(direction, fillPrice) {
       ],
       isAlert: !r.res.ok,
     });
+
+    // 实际开仓 → 同步推送 TG (与 regime 喊单 sendTradeSignal 区分: 这条是真成交了)
+    tg.fireAndForget(tg.sendOpenFilled({
+      direction,
+      symbol: cfg.symbol,
+      mode: 'pending_fill',
+      entryPrice: filled.entryPrice,        // 与限价语义一致 = plan.entry
+      plannedEntry: plan.entry,
+      fillPrice,                             // 实际触达瞬间的 WS lastPrice
+      tp1: plan.tp1, tp2: plan.tp2, tp3: plan.tp3,
+      stopLoss: plan.sl,
+      positionSize: filled.positionSize,
+      leverage: filled.leverage,
+      tp1Protection: cfg.tp1Protection !== false,
+      priceSource: plan.source || 'regime_plan',
+      webhookOk: r.res.ok,
+    }));
   } catch (e) {
     console.error('[trade.risk] firePendingFill error:', e?.message || e);
   } finally {

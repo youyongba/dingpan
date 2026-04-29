@@ -184,6 +184,92 @@ async function sendTradeSignal(plan, regime, meta = {}) {
   return sendMessage(lines.join('\n'));
 }
 
+// -------------------- 业务专用：实际开仓成交通知 (TG 渠道) --------------------
+
+/**
+ * 推送【实际开仓】通知 — 与 sendTradeSignal (regime 喊单) 有显著区别:
+ *   - sendTradeSignal: regime 检测到 LONG/SHORT 切换时发出, 携带"建议价位", 此时尚未真的下单.
+ *   - sendOpenFilled : trading 引擎真正把开仓 webhook 发出去 (pending 触达 fill / immediate 市价开)
+ *                       后调用, 携带实际入场价 / TP / SL / 仓位 / 杠杆.
+ *
+ * 触发点:
+ *   - trading/riskEngine.firePendingFill   pending → active
+ *   - trading/router.processSignal         immediate 模式直接 forwardOpen 后
+ *
+ * @param {object} info
+ *   @param {'long'|'short'}  info.direction
+ *   @param {string}          info.symbol
+ *   @param {'pending_fill'|'immediate'} info.mode
+ *   @param {number}          info.entryPrice
+ *   @param {number}          [info.plannedEntry]   pending 模式下 plan 锁定的价位
+ *   @param {number}          [info.fillPrice]      pending 模式下实际触达的市价
+ *   @param {number}          info.tp1
+ *   @param {number}          info.tp2
+ *   @param {number}          info.tp3
+ *   @param {number}          info.stopLoss
+ *   @param {string|number}   info.positionSize
+ *   @param {number}          info.leverage
+ *   @param {boolean}         [info.tp1Protection]  TP1 后是否会自动保本
+ *   @param {string}          [info.priceSource]    'regime_plan' / 'template_fallback' / ...
+ *   @param {boolean}         [info.webhookOk]      forwardOpen 是否成功
+ */
+async function sendOpenFilled(info) {
+  if (!info || typeof info !== 'object') return { ok: false, skipped: 'no_info' };
+  const dir = info.direction;
+  if (dir !== 'long' && dir !== 'short') return { ok: false, skipped: 'bad_direction' };
+
+  const dirEmoji = dir === 'long' ? '🟢' : '🔴';
+  const dirZh = dir === 'long' ? '做多 (LONG)' : '做空 (SHORT)';
+  const modeZh = info.mode === 'pending_fill' ? '⚡ 限价触达成交' : '⚡ 市价立即成交';
+  const symbol = info.symbol || 'BTCUSDT';
+
+  // 滑点 (仅 pending_fill 才有意义)
+  let slipLine = null;
+  if (info.mode === 'pending_fill' && Number.isFinite(info.plannedEntry) && Number.isFinite(info.fillPrice)) {
+    const slipPct = ((info.fillPrice - info.plannedEntry) / info.plannedEntry * 100) * (dir === 'long' ? 1 : -1);
+    const sign = slipPct >= 0 ? '+' : '';
+    slipLine = `📐 滑点：<code>${escapeHTML(sign + slipPct.toFixed(3))}%</code>   (plan ${escapeHTML(fmt(info.plannedEntry))} → 实际 ${escapeHTML(fmt(info.fillPrice))})`;
+  }
+
+  // R 倍数距离 — 直观体现 R:R = 1:3
+  const risk = Math.abs(info.entryPrice - info.stopLoss);
+  const rrLine = risk > 0
+    ? `📏 R 距离：<code>${escapeHTML(fmt(risk))}</code> (${escapeHTML(((risk / info.entryPrice) * 100).toFixed(2))}%)`
+    : null;
+
+  const protLine = info.tp1Protection === false
+    ? '🛡 TP1 保本：<i>已关闭</i> (TP1 后 SL 不上移)'
+    : '🛡 TP1 保本：<b>已开启</b> (TP1 触发后 SL 上移到 entry)';
+
+  const webhookLine = info.webhookOk === false
+    ? '⚠️ <b>webhook 转发失败</b>，请人工去交易所确认仓位'
+    : info.webhookOk === true
+      ? '✅ webhook 已转发到下单端'
+      : null;
+
+  const lines = [
+    `${dirEmoji} <b>${escapeHTML(symbol)} 已开仓 · ${escapeHTML(dirZh)}</b>`,
+    `${escapeHTML(modeZh)}` + (info.priceSource ? `   <i>· 价位来源 ${escapeHTML(info.priceSource)}</i>` : ''),
+    '',
+    `🚪 实际入场：<code>${escapeHTML(fmt(info.entryPrice))}</code>`,
+    slipLine,
+    `🛡 止损价：<code>${escapeHTML(fmt(info.stopLoss))}</code>`,
+    rrLine,
+    '',
+    `🎯 TP1：<code>${escapeHTML(fmt(info.tp1))}</code>   (平 50%)`,
+    `🎯 TP2：<code>${escapeHTML(fmt(info.tp2))}</code>   (平 30%)`,
+    `🎯 TP3：<code>${escapeHTML(fmt(info.tp3))}</code>   (平 20%)`,
+    '',
+    `💼 仓位：<b>${escapeHTML(String(info.positionSize ?? '--'))}</b>   ⚙️ 杠杆：<b>${escapeHTML(String(info.leverage ?? '--'))}x</b>`,
+    protLine,
+    webhookLine,
+    '',
+    `⏰ ${escapeHTML(nowStr())}`,
+  ].filter(Boolean);
+
+  return sendMessage(lines.join('\n'));
+}
+
 // -------------------- 状态查询 / 自检 --------------------
 
 function getStatus() {
@@ -204,6 +290,7 @@ async function ping() {
 module.exports = {
   sendMessage,
   sendTradeSignal,
+  sendOpenFilled,
   fireAndForget,
   getStatus,
   ping,

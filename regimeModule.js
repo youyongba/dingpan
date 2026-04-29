@@ -728,6 +728,10 @@ function dispatchWebhookSignals(prevRegime, curRegime, tradePlan, klines) {
       buildWebhookMacdLines(curRegime, tradePlan, lastClose, isGolden),
       { eventKey: `macdCross_${sig.macdCross}` }
     );
+    // 自动取消反向挂单:
+    //   - MACD 金叉 (看多反转) → 取消空头 pending  (cancelPendingByReverseSignal('macd_cross', 'long', ...))
+    //   - MACD 死叉 (看空反转) → 取消多头 pending  (cancelPendingByReverseSignal('macd_cross', 'short', ...))
+    cancelReversePendingSafely('macd_cross', isGolden ? 'long' : 'short', isGolden ? 'GOLDEN' : 'DEATH');
   }
   if (sig.macdSide && sig.macdSide !== notifyState.lastMacdSide) {
     notifyState.lastMacdSide = sig.macdSide;
@@ -743,9 +747,34 @@ function dispatchWebhookSignals(prevRegime, curRegime, tradePlan, klines) {
         buildWebhookRsiLines(curRegime, tradePlan, lastClose, curZone),
         { eventKey: `rsiZone_${curZone}` }
       );
+      // 自动取消反向挂单:
+      //   - RSI 超买 (看空预警) → 取消多头 pending
+      //   - RSI 超卖 (看多预警) → 取消空头 pending
+      cancelReversePendingSafely('rsi_zone', curZone === 'OVERBOUGHT' ? 'short' : 'long', curZone);
     }
     notifyState.lastRsiZone = curZone;
     saveNotifyState();
+  }
+}
+
+/**
+ * 包装一层异常隔离 — 取消挂单失败 (trading/router 不可用 / state 落盘失败) 不能影响
+ * regime 主流程, 否则 dispatchWebhookSignals 会卡住, regime 状态持久化也跟着挂.
+ *
+ * @param {string} kind          'macd_cross' | 'rsi_zone'
+ * @param {'long'|'short'} dir   反向信号方向 (参见 cancelPendingByReverseSignal 注释)
+ * @param {string} label         具体信号 ('GOLDEN' / 'DEATH' / 'OVERBOUGHT' / 'OVERSOLD')
+ */
+function cancelReversePendingSafely(kind, dir, label) {
+  try {
+    const { cancelPendingByReverseSignal } = require('./trading/router');
+    if (typeof cancelPendingByReverseSignal !== 'function') return;
+    const r = cancelPendingByReverseSignal(kind, dir, { label });
+    if (r.cancelled) {
+      console.log(`[regime→trade] 🛑 反向信号 ${kind}=${label} 取消 ${r.cancelled} pending: ${r.reason}`);
+    }
+  } catch (e) {
+    console.error(`[regime→trade] cancelReversePendingSafely 异常 (${kind}/${dir}/${label}):`, e?.message || e);
   }
 }
 

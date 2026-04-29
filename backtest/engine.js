@@ -47,6 +47,17 @@ const DEFAULT_PARAMS = {
   slippage: 0.0003,         // 单边 0.03% 滑点
   pendingTtlBars: 6,        // 6 根 1H K 线 = 6 小时未触达自动取消
   warmupBars: 200,
+  // TP1 后是否启用保本止损 (与生产 cfg.tp1Protection 同语义)
+  // true: TP1 触发 → SL 上移到 entry; 后续若价格回踩 entry 则 sl_protection 触发, 收益 ≈ 0
+  // false: TP1 仅 50% 平仓, SL 不变, 让剩余 50% 仓位继续按原 SL 跑 — 利空时回撤更深, 但顺势行情盈利更大
+  tp1Protection: true,
+  // 反向信号取消挂单 (与生产 regimeModule.dispatchWebhookSignals + /fvg-signal 同语义)
+  //   - MACD 金叉    → 取消空头 pending
+  //   - MACD 死叉    → 取消多头 pending
+  //   - RSI 超买     → 取消多头 pending
+  //   - RSI 超卖     → 取消空头 pending
+  // 此开关只控制 backtest, 不影响生产配置.
+  cancelOnReverseSignal: true,
 };
 
 // ============ 历史 K 线拉取 ============
@@ -193,9 +204,11 @@ function processActiveBar(trade, bar, params) {
     const tp1Hit = isLong ? bar.high >= trade.tp1 : bar.low <= trade.tp1;
     if (tp1Hit) {
       partialClose(trade, 0.5, trade.tp1, bar, params, 'tp_1');
-      // 触发保本止损: SL → entry
-      trade.currentSL = trade.fillPrice;
-      trade.protectionArmed = true;
+      // 触发保本止损: 与生产 cfg.tp1Protection 同语义 — 仅在开启时才把 SL 上移到 entry.
+      if (params.tp1Protection !== false) {
+        trade.currentSL = trade.fillPrice;
+        trade.protectionArmed = true;
+      }
     }
   }
   // 3) TP2 (要求 TP1 已触发)
@@ -232,6 +245,14 @@ async function runBacktest(userParams = {}) {
   const equityCurve = [];
   const pending = { long: null, short: null };
   const active = { long: null, short: null };
+
+  // ---- 反向信号取消挂单的"边沿检测"状态 (与生产 regimeModule 状态机一致)
+  //   只在 zone/cross 状态发生切换的那一根 K 线触发取消,
+  //   避免 RSI 长期处于超买/超卖区时每根 K 线反复试图取消.
+  let prevRsiZone = null;       // 'OVERBOUGHT' | 'OVERSOLD' | 'NEUTRAL' | null
+  // MACD cross 由 enhanceRegime 已经做边沿检测 (signals.macdCross='GOLDEN'/'DEATH'/null), 直接用即可
+  // 取消计数器, 写到 summary 里供前端展示
+  const cancelStats = { byMacdCross: 0, byRsiZone: 0, byFvg: 0 };
 
   for (let i = params.warmupBars; i < klines.length; i++) {
     const bar = klines[i];
@@ -281,6 +302,31 @@ async function runBacktest(userParams = {}) {
     try { result = buildPlanForSlice(slice); }
     catch (e) { continue; }
     const plan = result.tradePlan;
+    const sig = result.regime?.signals || {};
+
+    // ---- 3.5) 反向信号取消挂单 (与生产 regimeModule.dispatchWebhookSignals 同语义).
+    //   - MACD 金叉 (signals.macdCross='GOLDEN', enhanceRegime 已边沿检测)  → 取消空头 pending
+    //   - MACD 死叉 (signals.macdCross='DEATH')                              → 取消多头 pending
+    //   - RSI 进入超买区 (zone 切换为 'OVERBOUGHT')                          → 取消多头 pending
+    //   - RSI 进入超卖区 (zone 切换为 'OVERSOLD')                             → 取消空头 pending
+    if (params.cancelOnReverseSignal !== false) {
+      if (sig.macdCross === 'GOLDEN' && pending.short) {
+        pending.short = null; cancelStats.byMacdCross += 1;
+      }
+      if (sig.macdCross === 'DEATH' && pending.long) {
+        pending.long = null; cancelStats.byMacdCross += 1;
+      }
+      const curZone = sig.rsiZone || null;
+      if (curZone !== prevRsiZone) {
+        if (curZone === 'OVERBOUGHT' && pending.long) {
+          pending.long = null; cancelStats.byRsiZone += 1;
+        }
+        if (curZone === 'OVERSOLD' && pending.short) {
+          pending.short = null; cancelStats.byRsiZone += 1;
+        }
+        prevRsiZone = curZone;
+      }
+    }
 
     // ---- 4) arm pending (防重复: 已 active 或 pending 同方向 → 跳)
     if (plan && plan.ok && plan.direction) {
@@ -330,6 +376,11 @@ async function runBacktest(userParams = {}) {
   }
 
   const summary = computeSummary(trades, params.initialCapital, capital, maxDrawdown, maxDrawdownAt, klines);
+  // 把反向信号取消的统计塞进 summary, 方便前端展示策略行为
+  summary.cancelByMacdCross = cancelStats.byMacdCross;
+  summary.cancelByRsiZone = cancelStats.byRsiZone;
+  summary.cancelByFvg = cancelStats.byFvg;
+  summary.cancelTotal = cancelStats.byMacdCross + cancelStats.byRsiZone + cancelStats.byFvg;
   return {
     finishedAt: Date.now(),
     elapsedMs: Date.now() - startedAt,

@@ -41,6 +41,12 @@ const DEFAULT_CONFIG = {
     long:  { sl: 1.5, tp1: 1.5, tp2: 3.0, tp3: 4.5 },  // 单位 % (正数, 方向自动反转)
     short: { sl: 1.5, tp1: 1.5, tp2: 3.0, tp3: 4.5 },
   },
+  // TP1 触发后是否自动启动保本止损 (把 SL 上移到 entry 价).
+  //   true  (默认): 触发 TP1 → webhook 同时携带 set_protection_sl=true 等字段, 接收方在交易所改 SL
+  //                + riskEngine 把 currentStopLoss 改成 entryPrice.
+  //   false      : 触发 TP1 仅 50% 平仓, 不改 SL, webhook 不携带 set_protection_sl 等三字段.
+  // 前端开关切换 / POST /api/auto-trade/config { tp1Protection: false }
+  tp1Protection: true,
   // 价格源
   // 默认 markPrice@1s: 1 帧/秒, 与币安清算系统使用的标记价一致, CPU 友好.
   // 想回 aggTrade 高频 tick: 在 .env 设 AUTO_TRADE_STREAM=btcusdt@aggTrade

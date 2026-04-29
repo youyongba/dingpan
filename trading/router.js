@@ -26,6 +26,8 @@ const config = require('./config');
 const state = require('./state');
 const priceFeed = require('./priceFeed');
 const exec = require('./executor');
+// TG 渠道用于实际开仓成交通知 (与 regime 喊单 sendTradeSignal 互不冲突)
+const tg = require('../notifier/telegram');
 
 const ADMIN_TOKEN = process.env.CONFIG_AUTH_TOKEN || '';
 
@@ -311,6 +313,23 @@ async function processSignal(sig, opts = {}) {
           ...exec.formatPayloadLines(action, r.payload),
         ].filter(Boolean),
       });
+
+      // 实际开仓 → 同步推送 TG (与 regime 喊单 sendTradeSignal 区分: 这条是真成交了)
+      tg.fireAndForget(tg.sendOpenFilled({
+        direction,
+        symbol: cfg.symbol,
+        mode: 'immediate',
+        entryPrice,
+        plannedEntry: planEntry || null,
+        fillPrice: entryPrice,         // immediate 模式 entry 就是市价
+        tp1, tp2, tp3,
+        stopLoss: sl,
+        positionSize,
+        leverage: pos.leverage,
+        tp1Protection: cfg.tp1Protection !== false,
+        priceSource: source,
+        webhookOk: r.res.ok,
+      }));
     });
 
     return { status: 200, body: { ok: true, action, mode: 'immediate', position: pos, priceSource: source } };
@@ -381,15 +400,94 @@ router.post('/reset', requireAdmin, (req, res) => {
 
 // ============ GET /status ============
 router.get('/status', (req, res) => {
+  const cfg = config.get();
   res.json({
     ok: true,
-    enabled: config.get().enabled,
-    symbol: config.get().symbol,
+    enabled: cfg.enabled,
+    symbol: cfg.symbol,
     pendingMode: PENDING_MODE,
     pendingTtlMin: PENDING_TTL_MS / 60000,
+    // 暴露给前端: TP1 保本止损是否开启 (用户可点击切换 → POST /config { tp1Protection })
+    tp1Protection: cfg.tp1Protection !== false,
     priceFeed: priceFeed.getStatus(),
     positions: state.get(),
   });
+});
+
+/**
+ * 反向信号取消挂单 — 公共内部函数, 供:
+ *   1) HTTP 入口 POST /api/auto-trade/fvg-signal
+ *   2) regimeModule.dispatchWebhookSignals 检测到 MACD 金/死叉 / RSI 超买/超卖时直接调用
+ *
+ * 信号方向语义 (反方向 = 警告信号, 取消同方向挂单):
+ *   - signalKind='fvg' / 'macd_cross' / 'rsi_zone' (仅作日志区分)
+ *   - signalDir='short'  → 取消 LONG  pending  (短期看空, 多头挂单失去依据)
+ *   - signalDir='long'   → 取消 SHORT pending  (短期看多, 空头挂单失去依据)
+ *
+ * @param {string} signalKind     'fvg' | 'macd_cross' | 'rsi_zone' | 自定义
+ *   仅作日志/通知归类用, 不影响行为
+ * @param {'long'|'short'} signalDir
+ * @param {object} [opts]
+ *   @param {string} opts.label   信号详情, 写入 cancelPending 的 reason 字段
+ * @returns {{cancelled:string|null, prev?:object, reason:string}}
+ */
+function cancelPendingByReverseSignal(signalKind, signalDir, opts = {}) {
+  if (signalDir !== 'long' && signalDir !== 'short') {
+    return { cancelled: null, reason: 'invalid_signal_dir' };
+  }
+  // 反方向 = 取消方向: signal=short → 取消 long; signal=long → 取消 short
+  const cancelDir = signalDir === 'short' ? 'long' : 'short';
+  const positions = state.get();
+  const p = positions[cancelDir];
+  if (!p || !p.pending) {
+    return { cancelled: null, reason: 'no_pending', direction: cancelDir };
+  }
+  const reasonTag = `reverse_signal:${signalKind}:${signalDir}` + (opts.label ? `:${opts.label}` : '');
+  const prev = state.cancelPending(cancelDir, reasonTag);
+  if (!prev) return { cancelled: null, reason: 'no_pending', direction: cancelDir };
+
+  const cfg = config.get();
+  const titleEmoji = signalKind === 'fvg' ? '📡'
+    : signalKind === 'macd_cross' ? '📊'
+    : signalKind === 'rsi_zone' ? '🌡️'
+    : '🛑';
+  exec.notify({
+    type: 'pending_cancelled',
+    title: `${titleEmoji} ${cancelDir.toUpperCase()} 挂单已自动取消 (反向信号: ${signalKind} ${signalDir})`,
+    lines: [
+      `symbol: ${cfg.symbol}`,
+      `取消方向: ${cancelDir}`,
+      `信号类型: ${signalKind}`,
+      `信号方向: ${signalDir}` + (opts.label ? ` (${opts.label})` : ''),
+      `原 entry: ${prev.pendingPlan?.entry}`,
+      `原 SL/TP1: ${prev.pendingPlan?.sl} / ${prev.pendingPlan?.tp1}`,
+      `arm 时间: ${prev.pendingArmedAt}`,
+      `逻辑: 反向信号出现, 同方向挂单失去依据, 自动撤销`,
+    ],
+  });
+  return { cancelled: cancelDir, prev, reason: reasonTag };
+}
+
+// ============ POST /fvg-signal: 接收 FVG 信号取消反向挂单 ============
+//   body: { fvg: 'long' | 'short' }
+//   - fvg: 'short'   → 取消 LONG  pending
+//   - fvg: 'long'    → 取消 SHORT pending
+//
+// 不需要 X-Auth-Token 鉴权 (与 /cancel-pending 一致, 因为只是撤单, 不会真下单).
+// 但需要 token 字段做最小防误调 (防外网随便 curl).
+router.post('/fvg-signal', (req, res) => {
+  const cfg = config.get();
+  const body = req.body || {};
+  // 与外部 webhook 信号一致, 用 cfg.token 做最小校验. 没 token 字段的请求直接 401.
+  if (!body.token || body.token !== cfg.token) {
+    return res.status(401).json({ ok: false, error: 'invalid_token' });
+  }
+  const fvg = body.fvg;
+  if (fvg !== 'long' && fvg !== 'short') {
+    return res.status(400).json({ ok: false, error: 'fvg must be long|short' });
+  }
+  const r = cancelPendingByReverseSignal('fvg', fvg, { label: body.label || null });
+  res.json({ ok: true, fvg, ...r });
 });
 
 // ============ POST /cancel-pending: 取消某方向的待触发挂单 ============
@@ -555,3 +653,6 @@ module.exports = router;
 module.exports.processSignal = processSignal;
 module.exports.manualCloseAllImpl = manualCloseAllImpl;
 module.exports.requireAdmin = requireAdmin;
+// 反向信号取消挂单 — regimeModule 在 dispatchWebhookSignals 里 in-process 调用
+// 避免绕 HTTP, 也与 fvg-signal 路由共享同一段逻辑/通知/日志格式.
+module.exports.cancelPendingByReverseSignal = cancelPendingByReverseSignal;
