@@ -59,12 +59,38 @@ class PriceFeed extends EventEmitter {
     this.staleTimer = null;
     this.reconnectTimer = null;
 
+    // ============ 实时 tick 速率统计 (滑动窗口 1s) ============
+    // riskEngine 听 'tick' 事件无节流, 用户需要看到"系统正在以多少 tps 监听价格", 这是
+    // 安全感的来源. 用滑动 1s 窗口的简单 ring 实现, O(1) 更新, getStatus 拿 length 即 tps.
+    this._tickRing = [];
+    this._tickRingMaxAgeMs = 1000;
+    // 默认订阅者数量上限: 风控 1 + SSE 1 + 备用 = 5; 给 50 留足空间避免 MaxListenersWarning
+    this.setMaxListeners(50);
+
     // 配置变更时重连
     config.subscribe(() => {
       console.log('[trade.priceFeed] 配置变更, 重启连接');
       this._safeClose();
       this._scheduleReconnect(0);
     });
+  }
+
+  _bumpTickRate(now) {
+    this._tickRing.push(now);
+    // 弹出 1s 之前的旧元素 (一般 1~2 个; aggTrade 高峰时 500+, 也只 O(N))
+    const cutoff = now - this._tickRingMaxAgeMs;
+    while (this._tickRing.length && this._tickRing[0] < cutoff) {
+      this._tickRing.shift();
+    }
+  }
+
+  /** 滑动 1s 窗口内的 tick 速率 (ticks/s); 用作前端"实时 ~XX tps 监控价格"展示 */
+  getTickRateTps() {
+    const cutoff = Date.now() - this._tickRingMaxAgeMs;
+    while (this._tickRing.length && this._tickRing[0] < cutoff) {
+      this._tickRing.shift();
+    }
+    return this._tickRing.length;
   }
 
   start() {
@@ -88,6 +114,8 @@ class PriceFeed extends EventEmitter {
       lastTickAgoMs: this.lastTickAt ? (Date.now() - this.lastTickAt) : null,
       reconnectAttempt: this.attempt,
       stream: config.get().priceFeed.stream,
+      // 滑动 1s 窗口的 tick 速率 (用于前端"实时 ~XX tps"指示, 让用户直观看到引擎在飞速监听)
+      tickRateTps: this.getTickRateTps(),
     };
   }
 
@@ -134,17 +162,20 @@ class PriceFeed extends EventEmitter {
       this._armStaleWatcher();
     });
 
-    // emit('tick') 节流: aggTrade 在 BTC 波动期一秒推 200-500 帧, 每帧都触发整条
-    // riskEngine 事件链 (evaluate × 多空双方向 + console.log) 会把 1 vCPU 顶满.
-    // 此处节流策略与 riskEngine.onTick 一致 — "取最新价"模式, lastPrice 实时更新,
-    // 到节流间隔后 emit 一次. 不丢风控: TP/SL 容忍度远 > 200ms.
-    let _emitLastAt = 0;
-    let _emitPendingTimer = null;
-    const _doEmit = () => {
-      _emitLastAt = Date.now();
-      _emitPendingTimer = null;
-      this.emit('tick', { price: this.lastPrice, ts: this.lastTickAt, raw: null });
-    };
+    // ⚠️ 关键安全设计: 这里**不做任何节流**, 每一帧 raw tick 都立即 emit('tick').
+    //
+    // 历史: 之前为 CPU 加了 200ms 节流 (取最新价模式), 但极端行情下:
+    //   T=0  : price=100   no trigger
+    //   T=50 : price=105   (TP1=104) -- 应触发, 但被节流合并, evaluate 没跑
+    //   T=150: price=99    -- 价格已回落
+    //   T=200: 节流 timer 到点, evaluate 看到 lastPrice=99 → 错过 TP1!
+    //
+    // 这是真实的丢触发风险. 现在改成"每帧立即 emit", 由各订阅方自行决定是否节流:
+    //   - riskEngine 完全不节流 (entry/TP/SL 必须毫秒级触发)
+    //   - SSE 广播仍节流 200ms (省带宽, UI 5fps 已够看)
+    //
+    // CPU 顾虑: evaluate() 仅几个数字比较 + state 内存读取, 即便 aggTrade 高峰 500tps
+    // 双方向 1000 evaluate/s 也跑不满 1% vCPU. _inFlight 防重复 webhook 触发.
     ws.on('message', (buf) => {
       let msg;
       try { msg = JSON.parse(buf.toString()); } catch { return; }
@@ -153,20 +184,11 @@ class PriceFeed extends EventEmitter {
       const priceStr = msg.p || msg.c || (msg.k && msg.k.c);
       const price = parseFloat(priceStr);
       if (!Number.isFinite(price)) return;
+      const now = Date.now();
       this.lastPrice = price;
-      this.lastTickAt = Date.now();
-
-      const throttle = (config.get().priceFeed && config.get().priceFeed.evalThrottleMs) || 0;
-      if (throttle <= 0) {
-        this.emit('tick', { price, ts: this.lastTickAt, raw: msg });
-        return;
-      }
-      const since = this.lastTickAt - _emitLastAt;
-      if (since >= throttle) {
-        _doEmit();
-      } else if (!_emitPendingTimer) {
-        _emitPendingTimer = setTimeout(_doEmit, throttle - since);
-      }
+      this.lastTickAt = now;
+      this._bumpTickRate(now);
+      this.emit('tick', { price, ts: now, raw: msg });
     });
 
     ws.on('ping', (data) => { try { ws.pong(data); } catch (_) {} });

@@ -152,6 +152,21 @@
     padding: 4px 6px; font-size: 11px; text-align: center;
   }
   .pos-body .tp-cell.hit { border-color: #3fb950; color: #3fb950; }
+  /* 距 TP/SL 实时百分比副标 — 由 SSE 200ms 推送驱动刷新, 让用户直观看到价格逼近触发点 */
+  .pos-body .tp-cell .dist {
+    display: block; margin-top: 2px; font-size: 10px; font-family: 'SF Mono', Menlo, monospace;
+    color: #8b949e;
+  }
+  .pos-body .tp-cell .dist.near    { color: #d29922; font-weight: 700; }   /* < 0.3% 警戒 */
+  .pos-body .tp-cell .dist.imminent{ color: #ff7b72; font-weight: 700; animation: dist-pulse 0.8s ease-in-out infinite; } /* < 0.1% 紧迫 */
+  .pos-body .tp-cell .dist.tp { color: #3fb950; }
+  .pos-body .tp-cell .dist.sl { color: #ff7b72; }
+  .pos-body .row .v .dist {
+    margin-left: 6px; font-size: 11px; color: #8b949e; font-family: 'SF Mono', Menlo, monospace;
+  }
+  .pos-body .row .v .dist.near    { color: #d29922; font-weight: 700; }
+  .pos-body .row .v .dist.imminent{ color: #ff7b72; font-weight: 700; animation: dist-pulse 0.8s ease-in-out infinite; }
+  @keyframes dist-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
   .pos-body .empty { color: #8b949e; font-style: italic; }
   /* pending (限价待触发) 醒目横幅 */
   .pending-banner {
@@ -168,9 +183,6 @@
   .pending-banner .pb-row .v { font-family: 'SF Mono', Menlo, monospace; }
   .pending-banner .pb-distance.up   { color: #3fb950; }
   .pending-banner .pb-distance.down { color: #ff7b72; }
-  .pending-banner .pb-countdown { color: #d29922; font-weight: 600; }
-  .pending-banner .pb-countdown.expiring { color: #ff7b72; animation: pb-pulse 1s ease-in-out infinite; }
-  @keyframes pb-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
   /* 自动交易开关 */
   .auto-trade-bar {
@@ -205,7 +217,19 @@
   .manual-btn.short:hover:not(:disabled) { background: #ff7b7222; border-color: #ff7b72; }
   .manual-btn.close-all { border-color: #d2992266; color: #d29922; margin-left: auto; }
   .manual-btn.close-all:hover:not(:disabled) { background: #d2992222; border-color: #d29922; }
+  /* 一键追单 (立即市价) — 高亮强调样式, 区别于 pending 挂单 */
+  .manual-btn.follow {
+    background: linear-gradient(180deg, #1f2933, #161b22);
+    box-shadow: inset 0 0 0 1px transparent;
+  }
+  .manual-btn.follow.long  { border-color: #3fb950aa; color: #3fb950; }
+  .manual-btn.follow.long:hover:not(:disabled)  { background: #3fb95033; box-shadow: inset 0 0 0 1px #3fb950; }
+  .manual-btn.follow.short { border-color: #ff7b72aa; color: #ff7b72; }
+  .manual-btn.follow.short:hover:not(:disabled) { background: #ff7b7233; box-shadow: inset 0 0 0 1px #ff7b72; }
   .ta-meta { font-size: 11px; color: #8b949e; }
+  .ta-divider {
+    width: 1px; height: 22px; background: #30363d; margin: 0 4px;
+  }
 
   /* Toast 浮层 (操作反馈) */
   .toast-stack {
@@ -380,12 +404,16 @@
   </span>
 </div>
 
-<!-- 手动交易操作栏: 按 Regime 一键开仓 + 一键全平 -->
+<!-- 手动交易操作栏: 挂单 + 一键追单 + 一键全平 -->
 <div class="trade-actions-bar">
-  <span class="ta-label">手动操作</span>
-  <button id="manualOpenLongBtn" class="manual-btn long" disabled>📈 开多单</button>
-  <button id="manualOpenShortBtn" class="manual-btn short" disabled>📉 开空单</button>
-  <span id="manualActionMeta" class="ta-meta">按 Regime tradePlan 自动绑定 TP1/TP2/TP3 + SL</span>
+  <span class="ta-label">手动开仓 (挂单)</span>
+  <button id="manualOpenLongBtn" class="manual-btn long" disabled>📈 挂多单</button>
+  <button id="manualOpenShortBtn" class="manual-btn short" disabled>📉 挂空单</button>
+  <span class="ta-divider"></span>
+  <span class="ta-label">手动追单 (立即)</span>
+  <button id="manualFollowLongBtn" class="manual-btn follow long" disabled>🚀 一键追多</button>
+  <button id="manualFollowShortBtn" class="manual-btn follow short" disabled>🚀 一键追空</button>
+  <span id="manualActionMeta" class="ta-meta">挂单优先 Regime, 否则 0.5%~1.2% / 10%仓; 追单一律 0.5%~1.2% / 10%仓</span>
   <button id="closeAllBtn" class="manual-btn close-all" disabled>🛑 全部止盈</button>
 </div>
 
@@ -632,6 +660,107 @@
       : '<div class="plan-disclaimer">⚠️ 自动交易未开启，本建议价位仅供参考</div>';
   }
 
+  // ============ 价格行渲染 (供 SSE 实时流 + /status 兜底轮询 共用) ============
+  function renderPriceLine(pf) {
+    const price = document.getElementById('autoTradePrice');
+    if (!price) return;
+    pf = pf || {};
+    const conn = pf.connected ? '✅ 已连接' : '❌ 未连接';
+    const last = (pf.lastPrice != null && Number.isFinite(Number(pf.lastPrice)))
+      ? ' · 最新价 ' + Number(pf.lastPrice).toFixed(2)
+      : '';
+    // SSE 存活时给一个细微的"实时" hint, 让用户知道这是 push 不是 5s 轮询
+    const liveHint = priceStream.alive ? ' · 实时' : '';
+    price.textContent = `价格源 ${conn}${last}${liveHint}`;
+  }
+
+  // ============ SSE 实时价格流客户端 ============
+  //
+  // 通过 EventSource 直连后端 /api/auto-trade/price-stream, 接收 priceFeed (Binance WS aggTrade) 的
+  // 实时 tick. 后端做了 200ms 节流 (≈ 5fps), 既保留实时观感也避免 BTC 剧烈波动期 DOM 风暴.
+  //
+  // 状态机:
+  //   priceStream.alive=true  → 当前 SSE 连接活跃, 价格行由 SSE 接管
+  //   priceStream.alive=false → SSE 断开/不支持, /status 轮询兜底
+  //
+  // 浏览器 EventSource 自带断线重连 (我们后端 retry: 3000), 所以只需关心 onmessage / onerror.
+  const priceStream = {
+    es: null,
+    alive: false,
+    lastPrice: null,     // 缓存供"仓位卡片当前盈亏"等需要 lastPrice 的地方读取
+    lastEventAt: 0,
+  };
+
+  // 最近一次 /status 拉到的 positions 快照. SSE 每帧只带价格、不带仓位结构, 但用户要看
+  // "活仓距 TP1/TP2/TP3/SL 的实时百分比", 所以用这个快照 + SSE lastPrice 重画距离.
+  // 仓位结构本身仍由 5s 的 /status 轮询刷新 (开新仓 / TP 触发后 tpHit 翻 true 等).
+  let lastPositionsSnapshot = null;
+
+  function startPriceStream() {
+    if (typeof window.EventSource !== 'function') {
+      console.warn('[price-stream] 浏览器不支持 EventSource, 退回 5s 轮询');
+      return;
+    }
+    if (priceStream.es) return;
+    try {
+      const es = new EventSource('/api/auto-trade/price-stream');
+      priceStream.es = es;
+
+      const handlePayload = (payload, opts = {}) => {
+        priceStream.alive = true;
+        priceStream.lastEventAt = Date.now();
+        if (payload && payload.lastPrice != null) {
+          priceStream.lastPrice = Number(payload.lastPrice);
+        }
+        renderPriceLine(payload);
+        // 关键: 价格一变就立刻重画仓位卡的"距 TP/SL %", 不等下一次 5s 轮询 — 这是
+        // 用户对"实时监控价位"的核心诉求. 后端 SSE 已节流 200ms ≈ 5fps,
+        // 直接 innerHTML 重画 2 张卡也不会卡顿.
+        if (lastPositionsSnapshot) {
+          renderPositions(lastPositionsSnapshot, priceStream.lastPrice);
+        }
+      };
+
+      // 三种事件类型的处理一致 (都把最新 priceFeed 状态画到价格行)
+      es.addEventListener('snapshot', (ev) => {
+        try { handlePayload(JSON.parse(ev.data)); } catch (_) {}
+      });
+      es.addEventListener('tick', (ev) => {
+        try { handlePayload(JSON.parse(ev.data)); } catch (_) {}
+      });
+      es.addEventListener('feed_open', (ev) => {
+        try { handlePayload(JSON.parse(ev.data)); } catch (_) {}
+      });
+      es.addEventListener('feed_close', (ev) => {
+        try {
+          const pf = JSON.parse(ev.data);
+          priceStream.alive = false;     // 底层 WS 断了, 价格行让位给"❌ 未连接"
+          renderPriceLine(pf);
+        } catch (_) {}
+      });
+      es.addEventListener('feed_error', (ev) => {
+        try {
+          const pf = JSON.parse(ev.data);
+          priceStream.alive = false;
+          renderPriceLine(pf);
+        } catch (_) {}
+      });
+
+      // SSE 通道层错误 (网络中断/服务重启): 浏览器会自动按 retry: 3000 重连, 这里仅标记 alive=false
+      // 让下一次 5s 轮询接管, 避免价格行卡死显示旧值
+      es.onerror = () => {
+        if (priceStream.alive) {
+          priceStream.alive = false;
+          const price = document.getElementById('autoTradePrice');
+          if (price) price.textContent = '价格源 ⚠️ 实时流断开, 重连中…';
+        }
+      };
+    } catch (e) {
+      console.warn('[price-stream] EventSource 启动失败:', e?.message || e);
+      priceStream.alive = false;
+    }
+  }
+
   async function fetchAutoTradeStatus() {
     try {
       const r = await fetch('/api/auto-trade/status');
@@ -640,18 +769,23 @@
       autoTrade.ready = true;
       const stateEl = document.getElementById('autoTradeState');
       const toggle = document.getElementById('autoTradeToggle');
-      const price = document.getElementById('autoTradePrice');
       stateEl.textContent = autoTrade.enabled ? '已开启' : '已关闭';
       stateEl.className = 'at-state ' + (autoTrade.enabled ? 'on' : 'off');
       toggle.checked = autoTrade.enabled;
       toggle.disabled = false;
       const pf = j.priceFeed || {};
-      const conn = pf.connected ? '✅ 已连接' : '❌ 未连接';
-      const last = pf.lastPrice ? ' · 最新价 ' + Number(pf.lastPrice).toFixed(2) : '';
-      price.textContent = `价格源 ${conn}${last}`;
+      // 仅在 SSE 流断开时由轮询覆盖价格行 — 否则把更新权交给 SSE, 避免 5s 一次的"卡顿"覆盖实时滚动
+      if (!priceStream.alive) {
+        renderPriceLine(pf);
+      }
       // 同步刷新仓位卡片 + 手动操作按钮可用态
-      renderPositions(j.positions || {}, pf.lastPrice);
-      updateManualActions(j.positions || {}, autoTrade.enabled);
+      // 注: 仓位卡片用的 lastPrice 取 SSE 最新价 (若可用), 否则回退到 /status 的快照
+      const lastPriceForCard = priceStream.alive && priceStream.lastPrice != null
+        ? priceStream.lastPrice
+        : pf.lastPrice;
+      lastPositionsSnapshot = j.positions || {};   // 缓存供 SSE tick 重画距离用
+      renderPositions(lastPositionsSnapshot, lastPriceForCard);
+      updateManualActions(lastPositionsSnapshot, autoTrade.enabled);
       // TP1 保本止损开关
       const tp1On = j.tp1Protection !== false;
       const tp1Toggle = document.getElementById('tp1ProtectionToggle');
@@ -721,19 +855,6 @@
           const sign = pct >= 0 ? '+' : '';
           distHtml = `<span class="pb-distance ${klass}">${sign}${pct.toFixed(3)}% (${diff >= 0 ? '+' : ''}${diff.toFixed(2)})</span>`;
         }
-        // 倒计时
-        let cdHtml = '--';
-        if (p.pendingExpireAt) {
-          const remainMs = Number(p.pendingExpireAt) - Date.now();
-          if (remainMs <= 0) {
-            cdHtml = '<span class="pb-countdown expiring">已过期</span>';
-          } else {
-            const m = Math.floor(remainMs / 60000);
-            const s = Math.floor((remainMs % 60000) / 1000);
-            const cls = remainMs < 5 * 60 * 1000 ? ' expiring' : '';
-            cdHtml = `<span class="pb-countdown${cls}">${m}m ${s}s</span>`;
-          }
-        }
         const sourceMap = {
           regime_plan: '✅ regime plan (与 TG 一致)',
           template_fallback: '⚠️ 模板回退',
@@ -748,7 +869,7 @@
             <div class="pb-title">📋 限价挂单已锁定 · 等待价格${isLong ? '回踩' : '反弹'}至 entry</div>
             <div class="pb-row"><span class="k">待触发 entry</span><span class="v">${fmt(entry, 2)}</span></div>
             <div class="pb-row"><span class="k">当前市价 → entry</span><span class="v">${fmt(lastPrice, 2)} → ${fmt(entry, 2)} &nbsp; ${distHtml}</span></div>
-            <div class="pb-row"><span class="k">⏳ 自动过期倒计时</span><span class="v">${cdHtml}</span></div>
+            <div class="pb-row"><span class="k">⏳ 状态</span><span class="v" style="color:#8b949e;font-size:11px;">不会自动过期, 等价格触达或反向信号</span></div>
           </div>
           <div class="row"><span class="k">价位来源</span><span class="v">${srcLabel}</span></div>
           <div class="row"><span class="k">挂单时刻</span><span class="v">${p.pendingArmedAt ? new Date(p.pendingArmedAt).toLocaleString() : '--'}</span></div>
@@ -781,13 +902,40 @@
       badge.className = 'pos-badge ' + (p.locked ? 'locked' : 'idle');
       badge.textContent = p.locked ? '🔒 已锁定' : '已开仓';
       const tps = p.tpHit || {};
+      const isLongActive = dir === 'long';
+      // 计算"价格还需要走多少 % 才能触发"
+      //   long  TP: target > price → (target - price) / price * 100, 正数表示还要涨
+      //   short TP: target < price → (price - target) / price * 100, 正数表示还要跌
+      //   long  SL: target < price → (price - target) / price * 100, 正数表示还要跌才止损
+      //   short SL: target > price → (target - price) / price * 100, 正数表示还要涨才止损
+      // 返回 null 代表 lastPrice/target 不可用. distRemain 总是 ≥0 时表示"未触发, 还差多少",
+      // 若 < 0 表示"已穿过触发线" (等待 evaluate 兜底), 显示绝对值并标 imminent.
+      const calcRemain = (target, isTp) => {
+        if (target == null || !Number.isFinite(Number(target)) || !Number.isFinite(Number(lastPrice)) || !lastPrice) return null;
+        const t = Number(target);
+        const p = Number(lastPrice);
+        if (isLongActive) return isTp ? ((t - p) / p) * 100 : ((p - t) / p) * 100;
+        return isTp ? ((p - t) / p) * 100 : ((t - p) / p) * 100;
+      };
+      const distSpan = (target, kind /* 'tp' | 'sl' */) => {
+        const r = calcRemain(target, kind === 'tp');
+        if (r == null) return '';
+        const abs = Math.abs(r);
+        let cls = kind;                          // tp/sl 基础颜色
+        if (abs < 0.1)      cls += ' imminent';  // < 0.1% 紧迫闪烁
+        else if (abs < 0.3) cls += ' near';      // < 0.3% 警戒黄
+        const sign = r < 0 ? '!' : '';           // r<0 = 已穿过触发线还没成交 (等 fire 兜底)
+        return `<span class="dist ${cls}" title="距触发还需价格${kind==='tp'?(isLongActive?'上涨':'下跌'):(isLongActive?'下跌':'上涨')} ${abs.toFixed(3)}%">${sign}${r >= 0 ? '距 ' : '过 '}${abs.toFixed(3)}%</span>`;
+      };
       const tpCell = (key, label, price) => {
         const hit = tps[key];
-        return `<div class="tp-cell ${hit ? 'hit' : ''}">${label} ${hit ? '✓' : ''}<br><span style="font-family: 'SF Mono', Menlo, monospace;">${price != null ? Number(price).toFixed(2) : '--'}</span></div>`;
+        const dist = hit ? '' : distSpan(price, 'tp');
+        return `<div class="tp-cell ${hit ? 'hit' : ''}">${label} ${hit ? '✓' : ''}<br><span style="font-family: 'SF Mono', Menlo, monospace;">${price != null ? Number(price).toFixed(2) : '--'}</span>${dist}</div>`;
       };
       const pnl = (p.entryPrice && lastPrice)
         ? (((lastPrice - p.entryPrice) / p.entryPrice * 100) * (dir === 'long' ? 1 : -1)).toFixed(2) + '%'
         : '--';
+      const slDistHtml = distSpan(p.currentStopLoss, 'sl');
       const sourceMap = {
         regime_plan: '<span style="color:#3fb950;">✅ regime plan (与 TG 一致)</span>',
         template_fallback: '<span style="color:#d29922;">⚠️ 模板回退</span>',
@@ -808,7 +956,7 @@
         ${p.planEntry ? `<div class="row"><span class="k">plan 理想入场</span><span class="v" style="color:#8b949e;">${fmt(p.planEntry, 2)}</span></div>` : ''}
         <div class="row"><span class="k">当前盈亏</span><span class="v">${pnl}</span></div>
         <div class="row"><span class="k">仓位 / 杠杆</span><span class="v">${p.positionSize || '--'} / ${p.leverage || '--'}x</span></div>
-        <div class="row"><span class="k">${p.protectionArmed ? '当前止损 (保本)' : '当前止损'}</span><span class="v" style="color:#ff7b72;">${fmt(p.currentStopLoss, 2)}</span></div>
+        <div class="row"><span class="k">${p.protectionArmed ? '当前止损 (保本)' : '当前止损'}</span><span class="v" style="color:#ff7b72;">${fmt(p.currentStopLoss, 2)}${slDistHtml}</span></div>
         <div class="tp-grid">
           ${tpCell('tp1', 'TP1 50%', p.tp1)}
           ${tpCell('tp2', 'TP2 30%', p.tp2)}
@@ -920,10 +1068,14 @@
     const dirZh = direction === 'long' ? '多单' : '空单';
     const btn = document.getElementById(`manualOpen${cap(direction)}Btn`);
     const otherBtn = document.getElementById(`manualOpen${cap(direction === 'long' ? 'short' : 'long')}Btn`);
-    if (!confirm(`确认手动开${dirZh}? 系统将按当前 Regime tradePlan 自动绑定 TP1/TP2/TP3 + SL.`)) return;
+    if (!confirm(
+      `确认手动挂${dirZh} (限价待触发)?\n` +
+      `· 优先使用 Regime tradePlan (entry/TP/SL/置信仓位)\n` +
+      `· 无 Regime plan 时回退: 0.5%~1.2% 阶梯, 10% 仓位`
+    )) return;
     btn.disabled = true; otherBtn.disabled = true;
     const oldText = btn.textContent;
-    btn.textContent = '下单中…';
+    btn.textContent = '挂单中…';
     try {
       const j = await callAdminApi('/api/auto-trade/manual-open', { direction });
       const p = j.position || {};
@@ -936,15 +1088,13 @@
         const tp1 = plan.tp1 != null ? Number(plan.tp1).toFixed(2) : '--';
         const tp2 = plan.tp2 != null ? Number(plan.tp2).toFixed(2) : '--';
         const tp3 = plan.tp3 != null ? Number(plan.tp3).toFixed(2) : '--';
-        const expireMin = p.pendingExpireAt
-          ? Math.max(0, Math.round((Number(p.pendingExpireAt) - Date.now()) / 60000))
-          : '--';
         showToast('ok', `📋 ${dirZh}挂单已锁定 (待价回踩 entry)`, [
           `价位来源: ${j.priceSource || '--'}`,
           `🚪 待触发 entry: ${entry} · 仓位 ${plan.positionSize || '--'} / ${plan.leverage || '--'}x`,
           `TP1: ${tp1} (50%) | TP2: ${tp2} (30%) | TP3: ${tp3} (20%)`,
           `SL: ${sl} (100%)`,
-          `⏳ ${expireMin}min 内未触达将自动取消; 命中 entry 后自动 fill 并发 webhook`,
+          `⏳ 不会自动过期, 等价格触达 entry 或反向信号; 命中 entry 后自动 fill 并发 webhook`,
+          `🛰 已推送: TG / 飞书 / 监控点位`,
         ], 8000);
       } else {
         // immediate 模式 (旧行为, 已立即下单)
@@ -959,6 +1109,46 @@
     } finally {
       btn.textContent = oldText;
       // 立刻拉一次状态, updateManualActions 会按真实仓位重新设置 disable
+      await fetchAutoTradeStatus();
+    }
+  }
+
+  /**
+   * 手动追单 (立即市价).
+   *   - 不参考 Regime tradePlan
+   *   - entry = WS 当前市价
+   *   - TP/SL 按 0.5%~1.2% 阶梯派生
+   *   - 仓位固定 10% (与后端 MANUAL_FALLBACK_POSITION_PCT 一致)
+   *   - 同步推送 TG + 飞书 + 监控点位 webhook
+   */
+  async function manualFollow(direction) {
+    const dirZh = direction === 'long' ? '多单' : '空单';
+    const btn = document.getElementById(`manualFollow${cap(direction)}Btn`);
+    const otherBtn = document.getElementById(`manualFollow${cap(direction === 'long' ? 'short' : 'long')}Btn`);
+    if (!confirm(
+      `确认一键追${dirZh} (立即市价)?\n` +
+      `· 不参考 Regime tradePlan\n` +
+      `· entry = 当前市价, TP/SL 按 0.5%~1.2% 阶梯派生\n` +
+      `· 仓位 10%`
+    )) return;
+    if (btn) btn.disabled = true;
+    if (otherBtn) otherBtn.disabled = true;
+    const oldText = btn ? btn.textContent : '';
+    if (btn) btn.textContent = '追单中…';
+    try {
+      const j = await callAdminApi('/api/auto-trade/manual-follow', { direction });
+      const p = j.position || {};
+      // 立即模式: entry/SL/TP 都在 active 仓位字段里, 与 immediate manualOpen 表现一致
+      showToast('ok', `🚀 已立即追${dirZh} (${j.priceSource || '--'}) · 市价成交`, [
+        `入场价: ${p.entryPrice ?? '--'} | 仓位 ${p.positionSize || '--'} / ${p.leverage || '--'}x`,
+        `TP1: ${p.tp1 != null ? Number(p.tp1).toFixed(2) : '--'} (50%) | TP2: ${p.tp2 != null ? Number(p.tp2).toFixed(2) : '--'} (30%) | TP3: ${p.tp3 != null ? Number(p.tp3).toFixed(2) : '--'} (20%)`,
+        `SL: ${p.currentStopLoss != null ? Number(p.currentStopLoss).toFixed(2) : '--'} (100%)`,
+        `🛰 已推送: TG / 飞书 / 监控点位`,
+      ], 8000);
+    } catch (e) {
+      showToast('err', `❌ 追${dirZh}失败`, e.message, 8000);
+    } finally {
+      if (btn) btn.textContent = oldText;
       await fetchAutoTradeStatus();
     }
   }
@@ -1024,13 +1214,18 @@
 
   /**
    * 联动按钮可用状态:
-   *   - 自动下单关闭   → 三个按钮全 disable (理由: 关了就不应该下单)
-   *   - 同方向 active  → 该方向开仓按钮 disable + tooltip
-   *   - 双方向 inactive → 全平按钮 disable
+   *   - 自动下单关闭     → 五个按钮全 disable (理由: 关了就不应该下单)
+   *   - 同方向 busy      → 该方向「挂单」「追单」按钮全 disable + tooltip
+   *   - 双方向 inactive  → 全平按钮 disable
+   *
+   * 「挂单」与「追单」的同方向 busy 判定一致 — 任意一种 (active 或 pending) 都禁掉两个按钮,
+   * 确保用户不能挂单后又立即追单造成同方向叠仓.
    */
   function updateManualActions(positions, autoEnabled) {
     const longBtn = document.getElementById('manualOpenLongBtn');
     const shortBtn = document.getElementById('manualOpenShortBtn');
+    const followLongBtn = document.getElementById('manualFollowLongBtn');
+    const followShortBtn = document.getElementById('manualFollowShortBtn');
     const closeAllBtn = document.getElementById('closeAllBtn');
     const meta = document.getElementById('manualActionMeta');
     if (!longBtn || !shortBtn || !closeAllBtn) return;
@@ -1044,27 +1239,43 @@
     const anyActive = longActive || shortActive;
 
     if (!autoEnabled) {
-      longBtn.disabled = true;
-      shortBtn.disabled = true;
-      closeAllBtn.disabled = true;
-      longBtn.title = shortBtn.title = closeAllBtn.title = '已禁用: 请先开启「自动下单」总开关';
+      [longBtn, shortBtn, followLongBtn, followShortBtn, closeAllBtn].forEach(b => {
+        if (b) { b.disabled = true; b.title = '已禁用: 请先开启「自动下单」总开关'; }
+      });
       meta.textContent = '⚠️ 自动下单已关闭, 手动操作已禁用';
       return;
     }
 
     longBtn.disabled = longBusy;
     longBtn.title = longActive
-      ? '已持有多头仓位, 同方向不可重复开 (重置后可再开)'
+      ? '已持有多头仓位, 同方向不可重复挂单 (重置后可再挂)'
       : longPending
         ? '多头已有 pending 挂单待触发, 同方向不可重复挂 (取消挂单后可再挂)'
-        : '按当前 Regime tradePlan 开多, 自动绑定 TP1/TP2/TP3 + SL';
+        : '挂多单 (限价): 优先 Regime tradePlan, 无 plan 则用 0.5%~1.2% / 10%仓回退方案';
 
     shortBtn.disabled = shortBusy;
     shortBtn.title = shortActive
-      ? '已持有空头仓位, 同方向不可重复开 (重置后可再开)'
+      ? '已持有空头仓位, 同方向不可重复挂单 (重置后可再挂)'
       : shortPending
         ? '空头已有 pending 挂单待触发, 同方向不可重复挂 (取消挂单后可再挂)'
-        : '按当前 Regime tradePlan 开空, 自动绑定 TP1/TP2/TP3 + SL';
+        : '挂空单 (限价): 优先 Regime tradePlan, 无 plan 则用 0.5%~1.2% / 10%仓回退方案';
+
+    if (followLongBtn) {
+      followLongBtn.disabled = longBusy;
+      followLongBtn.title = longActive
+        ? '已持有多头仓位, 同方向不可重复追单 (重置后可再追)'
+        : longPending
+          ? '多头已有 pending 挂单, 不可同方向追单 (会冲突, 取消挂单后可追)'
+          : '一键立即市价开多, 仓位 10%, TP/SL 按 0.5%~1.2% 阶梯派生 (不参考 Regime)';
+    }
+    if (followShortBtn) {
+      followShortBtn.disabled = shortBusy;
+      followShortBtn.title = shortActive
+        ? '已持有空头仓位, 同方向不可重复追单 (重置后可再追)'
+        : shortPending
+          ? '空头已有 pending 挂单, 不可同方向追单 (会冲突, 取消挂单后可追)'
+          : '一键立即市价开空, 仓位 10%, TP/SL 按 0.5%~1.2% 阶梯派生 (不参考 Regime)';
+    }
 
     closeAllBtn.disabled = !anyActive;
     closeAllBtn.title = anyActive
@@ -1078,8 +1289,8 @@
       shortPending && '📉空(挂单)',
     ].filter(Boolean);
     meta.textContent = tags.length
-      ? `当前: ${tags.join(' · ')} · 重复同方向开仓会被拒绝`
-      : '按 Regime tradePlan 自动绑定 TP1/TP2/TP3 + SL';
+      ? `当前: ${tags.join(' · ')} · 重复同方向开仓/追单会被拒绝`
+      : '挂单优先 Regime, 否则 0.5%~1.2% / 10%仓; 追单一律 0.5%~1.2% / 10%仓 (不参考 Regime)';
   }
 
   async function setAutoTrade(enabled) {
@@ -1578,14 +1789,21 @@
   // 手动交易按钮
   document.getElementById('manualOpenLongBtn').addEventListener('click', () => manualOpen('long'));
   document.getElementById('manualOpenShortBtn').addEventListener('click', () => manualOpen('short'));
+  // 一键追单 (立即市价, 不参考 Regime, 10% 仓位)
+  const followLongBtn = document.getElementById('manualFollowLongBtn');
+  const followShortBtn = document.getElementById('manualFollowShortBtn');
+  if (followLongBtn) followLongBtn.addEventListener('click', () => manualFollow('long'));
+  if (followShortBtn) followShortBtn.addEventListener('click', () => manualFollow('short'));
   document.getElementById('closeAllBtn').addEventListener('click', () => closeAllPositions());
 
   // 启动顺序：先拉自动交易状态(决定文案), 再加载行情数据
   fetchAutoTradeStatus().then(load);
   // 行情每 60s 自拉一次（后端每 5min 真正去 Binance）
   setInterval(load, 60 * 1000);
-  // 自动交易状态每 5s 同步一次(展示 WS 连接 + 最新价 + 双端状态一致)
+  // 自动交易状态每 5s 同步一次(仓位 + 双端开关同步; 价格行由 SSE 实时接管, 仅断流时回退)
   setInterval(fetchAutoTradeStatus, 5 * 1000);
+  // 实时价格流: priceFeed (Binance WS aggTrade) → SSE → 浏览器, 200ms 节流约 5fps
+  startPriceStream();
 
   // ============ 策略回测面板 ============
   function setBtStatus(text, klass) {

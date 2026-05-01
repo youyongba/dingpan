@@ -17,10 +17,13 @@ const axios = require('axios');
 const config = require('./config');
 const { httpAgent, httpsAgent } = require('../lib/httpAgents');
 
-let _tg = null, _feishu = null;
+let _tg = null, _feishu = null, _monitor = null;
 function tg() { return _tg || (_tg = require('../notifier/telegram')); }
 function feishu() {
   return _feishu || (_feishu = require('../notifier/feishuWebhook'));
+}
+function monitor() {
+  return _monitor || (_monitor = require('../notifier/monitorWebhook'));
 }
 
 // ---------------- 出站 webhook ----------------
@@ -253,6 +256,60 @@ function formatPayloadLines(label, payload) {
   return [`📤 webhook payload (${label}):`, ...body.split('\n')];
 }
 
+// ---------------- 交易点位监控系统推送 ----------------
+//
+// 与 forwardOpen / fireStopLoss 等"下单端 webhook"完全解耦的第二条通道,
+// 推送给可视化盯盘大屏 (符合用户需求里的"交易点位监控系统").
+//
+// 设计:
+//   - 任何调用都 fire-and-forget, 不阻塞主链路, 不影响主下单流程的成败
+//   - 每个开仓事件 (挂单 / 限价触达 / 立即市价 / TP1/2/3 / SL) 都推送完整 payload,
+//     comment 字段携带事件语义 (例如 "TP1 触发 · 平 50%"), 由监控端自行解释
+//   - 取消事件 (手动撤单 / 反向信号撤单 / pending 超时 / 一键全平) 推送精简 cancel payload
+//
+// 这两个助手放在 executor 而非 router/riskEngine, 是因为多个调用点都需要,
+// 集中在这里改 comment 风格也更统一.
+
+/**
+ * 推送一个"挂单/开仓/TP/SL"事件到监控系统.
+ * @param {object} info
+ *   @param {'long'|'short'|'LONG'|'SHORT'} info.direction
+ *   @param {number} info.entry
+ *   @param {number} info.tp1
+ *   @param {number} info.tp2
+ *   @param {number} info.tp3
+ *   @param {number} info.sl
+ *   @param {string} [info.comment]   事件语义备注
+ *   @param {string} [info.symbol]    缺省取 cfg.symbol
+ */
+function fireMonitorOpen(info) {
+  if (!info) return;
+  const cfg = config.get();
+  monitor().fireAndForget(monitor().sendOpen({
+    symbol: info.symbol || cfg.symbol,
+    side: info.direction,
+    entry: info.entry,
+    tp1: info.tp1, tp2: info.tp2, tp3: info.tp3,
+    sl: info.sl,
+    comment: info.comment || '',
+  }));
+}
+
+/**
+ * 推送一个"取消挂单/全平监控"事件到监控系统.
+ * @param {object} info
+ *   @param {'long'|'short'|'LONG'|'SHORT'} info.direction
+ *   @param {string} [info.symbol]
+ */
+function fireMonitorCancel(info) {
+  if (!info) return;
+  const cfg = config.get();
+  monitor().fireAndForget(monitor().sendCancel({
+    symbol: info.symbol || cfg.symbol,
+    side: info.direction,
+  }));
+}
+
 module.exports = {
   postWebhook,
   fireTakeProfit,
@@ -260,6 +317,9 @@ module.exports = {
   forwardOpen,
   notify,
   formatPayloadLines,
+  // 监控点位通道 (与下单端 webhook 解耦)
+  fireMonitorOpen,
+  fireMonitorCancel,
   __setTestClock,
   __resetForwardCooldown,
 };

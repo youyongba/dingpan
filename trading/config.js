@@ -48,15 +48,16 @@ const DEFAULT_CONFIG = {
   // 前端开关切换 / POST /api/auto-trade/config { tp1Protection: false }
   tp1Protection: true,
   // 价格源
-  // 默认 markPrice@1s: 1 帧/秒, 与币安清算系统使用的标记价一致, CPU 友好.
-  // 想回 aggTrade 高频 tick: 在 .env 设 AUTO_TRADE_STREAM=btcusdt@aggTrade
-  // (此时强烈建议同时设 AUTO_TRADE_EVAL_THROTTLE_MS=200 给 onTick 加节流)
+  // 默认 aggTrade: 每笔成交都推 (高峰可达 500+ tps), 毫秒级触发 entry/TP/SL,
+  // 优先保障"交易安全 - 必须在到价的瞬间触发"这一核心需求.
+  // 想用低频标记价 (1帧/秒): 在 .env 设 AUTO_TRADE_STREAM=btcusdt@markPrice@1s
+  //   ⚠️ 此时极端瞬时插针可能在 1 秒空窗内回落, 错过 TP/SL 触发, 不推荐
+  // 风控路径 (riskEngine.evaluate) 已**完全去节流**, 旧 AUTO_TRADE_EVAL_THROTTLE_MS 不再生效.
   priceFeed: {
-    stream: process.env.AUTO_TRADE_STREAM || 'btcusdt@markPrice@1s',
+    stream: process.env.AUTO_TRADE_STREAM || 'btcusdt@aggTrade',
     reconnectMinMs: 1000,
     reconnectMaxMs: 30000,
-    // onTick 节流(ms): aggTrade 时建议 200; markPrice@1s 时设 0 即可
-    // 节流策略是"取最新价"模式 — 不丢 tick, lastPrice 一直更新, 到点跑一次 evaluate
+    // ⚠️ 已废弃 (保留字段仅为兼容旧 disk config 不报错). riskEngine 不再节流, 每帧立即 evaluate.
     evalThrottleMs: parseInt(process.env.AUTO_TRADE_EVAL_THROTTLE_MS, 10) || 0,
   },
   // 鉴权 token：来自外部 webhook 信号的 token 必须与之相符

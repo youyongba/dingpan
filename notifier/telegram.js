@@ -23,6 +23,7 @@
 
 const axios = require('axios');
 const { httpAgent, httpsAgent } = require('../lib/httpAgents');
+const { cnTime } = require('../lib/timeFmt');
 
 // -------------------- 配置 --------------------
 const TG_CFG = {
@@ -64,10 +65,11 @@ function fmt(n, d = 2) {
   return Number(n).toFixed(d);
 }
 
-/** 当前时间字符串（本地时区，便于阅读） */
-function nowStr() {
-  return new Date().toLocaleString('zh-CN', { hour12: false });
-}
+/**
+ * 时间字符串：强制东八区 (Asia/Shanghai), 不随服务器本地时区飘.
+ * 实现统一收敛在 lib/timeFmt.js, 详见那里的注释.
+ */
+const nowStr = cnTime;
 
 // -------------------- 通用发送 --------------------
 
@@ -270,6 +272,85 @@ async function sendOpenFilled(info) {
   return sendMessage(lines.join('\n'));
 }
 
+// -------------------- 业务专用：限价挂单已锁定 (尚未成交) --------------------
+
+/**
+ * 推送【限价挂单已锁定】通知 — 与 sendOpenFilled 区分:
+ *   - sendOpenFilled : 真正下单成交后 (immediate market fill / pending fill).
+ *   - sendOpenArmed  : 把开仓计划 (entry/SL/TP) 落入 pending 状态, 还未成交.
+ *
+ * 触发点 (新增):
+ *   - trading/router.processSignal pending 分支, 由"手动开仓"或"手动追单"触发时
+ *
+ * @param {object} info
+ *   @param {'long'|'short'} info.direction
+ *   @param {string}         [info.symbol]
+ *   @param {number}         info.entry          待触发限价
+ *   @param {number}         [info.currentPrice] 当下市价 (用于显示距离)
+ *   @param {number}         info.tp1
+ *   @param {number}         info.tp2
+ *   @param {number}         info.tp3
+ *   @param {number}         info.stopLoss
+ *   @param {string|number}  info.positionSize
+ *   @param {number}         [info.leverage]
+ *   @param {string}         [info.priceSource]  'regime_plan'|'manual_fallback'|'signal_explicit'
+ *   @param {string}         [info.callerSource] 'manual_ui'|'manual_follow'|'regime'|...
+ */
+async function sendOpenArmed(info) {
+  if (!info || typeof info !== 'object') return { ok: false, skipped: 'no_info' };
+  const dir = info.direction;
+  if (dir !== 'long' && dir !== 'short') return { ok: false, skipped: 'bad_direction' };
+
+  const dirEmoji = dir === 'long' ? '🟢' : '🔴';
+  const dirZh = dir === 'long' ? '做多 (LONG)' : '做空 (SHORT)';
+  const symbol = info.symbol || 'BTCUSDT';
+
+  let distLine = null;
+  if (Number.isFinite(info.currentPrice) && Number.isFinite(info.entry) && info.entry > 0) {
+    const diff = info.currentPrice - info.entry;
+    const pct = (diff / info.entry) * 100;
+    const sign = pct >= 0 ? '+' : '';
+    const waiting = dir === 'long' ? info.currentPrice > info.entry : info.currentPrice < info.entry;
+    distLine = `📐 距 entry：<code>${escapeHTML(sign + pct.toFixed(3))}%</code>   (${escapeHTML(waiting ? '等待回踩/反弹' : '⚡ 已穿透, 下一 tick 立即 fill')})`;
+  }
+
+  const sourceMap = {
+    regime_plan: '✅ regime tradePlan (与 TG 喊单一致)',
+    manual_fallback: '🛠 手动回退方案 (0.5%~1.2% / 10%)',
+    signal_explicit: '📝 外部信号显式',
+    template_fallback: '⚠️ 模板回退',
+  };
+  const srcLabel = sourceMap[info.priceSource] || (info.priceSource || '--');
+  const callerMap = {
+    manual_ui: '🖱 手动开仓 (挂单)',
+    manual_follow: '⚡ 手动追单',
+    regime: '🤖 自动 regime',
+  };
+  const callerLabel = callerMap[info.callerSource] || (info.callerSource || '--');
+
+  const lines = [
+    `${dirEmoji} <b>${escapeHTML(symbol)} 限价挂单已锁定 · ${escapeHTML(dirZh)}</b>`,
+    `${escapeHTML(callerLabel)}   <i>· 价位来源 ${escapeHTML(srcLabel)}</i>`,
+    '',
+    `🚪 待触发 entry：<code>${escapeHTML(fmt(info.entry))}</code>`,
+    Number.isFinite(info.currentPrice) ? `💰 当前市价：<code>${escapeHTML(fmt(info.currentPrice))}</code>` : null,
+    distLine,
+    `🛡 止损价：<code>${escapeHTML(fmt(info.stopLoss))}</code>`,
+    '',
+    `🎯 TP1：<code>${escapeHTML(fmt(info.tp1))}</code>   (平 50%)`,
+    `🎯 TP2：<code>${escapeHTML(fmt(info.tp2))}</code>   (平 30%)`,
+    `🎯 TP3：<code>${escapeHTML(fmt(info.tp3))}</code>   (平 20%)`,
+    '',
+    `💼 仓位：<b>${escapeHTML(String(info.positionSize ?? '--'))}</b>` +
+      (info.leverage != null ? `   ⚙️ 杠杆：<b>${escapeHTML(String(info.leverage))}x</b>` : ''),
+    '⏳ 不会自动过期, 等价格触达 entry 或反向信号',
+    '',
+    `⏰ ${escapeHTML(nowStr())}`,
+  ].filter(Boolean);
+
+  return sendMessage(lines.join('\n'));
+}
+
 // -------------------- 状态查询 / 自检 --------------------
 
 function getStatus() {
@@ -291,6 +372,7 @@ module.exports = {
   sendMessage,
   sendTradeSignal,
   sendOpenFilled,
+  sendOpenArmed,
   fireAndForget,
   getStatus,
   ping,

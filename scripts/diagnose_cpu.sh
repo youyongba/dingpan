@@ -149,7 +149,7 @@ echo ""
 echo "── [9/9] 当前 auto-trade 状态 ──"
 if command -v curl >/dev/null 2>&1; then
   curl -sf "http://127.0.0.1:${PORT}/api/auto-trade/status" 2>/dev/null \
-    | (command -v jq >/dev/null && jq '{enabled, pendingMode, pendingTtlMin, priceFeed, "long": .positions.long | {active, pending, locked, entryPrice, pendingPlan}, "short": .positions.short | {active, pending, locked, entryPrice, pendingPlan}}' \
+    | (command -v jq >/dev/null && jq '{enabled, pendingMode, priceFeed, "long": .positions.long | {active, pending, locked, entryPrice, pendingPlan}, "short": .positions.short | {active, pending, locked, entryPrice, pendingPlan}}' \
        || cat) \
     || echo "  (服务无响应或 jq 缺失)"
 fi

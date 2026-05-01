@@ -25,6 +25,7 @@ const priceFeed = require('./priceFeed');
 // TG 渠道仅用于"实际开仓成交"通知 — 与 regime 喊单 (sendTradeSignal) 区分:
 // 喊单是建议价位, 这条是真的把 webhook 发出去之后的实际入场.
 const tg = require('../notifier/telegram');
+const { cnTime } = require('../lib/timeFmt');
 
 // ---------------- 防重复触发 ----------------
 //
@@ -76,6 +77,18 @@ function buildWsErrorHint(err) {
 }
 
 function start() {
+  // 启动时一次性提示: 当前是"零节流安全模式", 旧 evalThrottleMs 已失效
+  const cfg = config.get();
+  const stream = cfg.priceFeed?.stream || '';
+  const legacyThrottle = cfg.priceFeed?.evalThrottleMs || 0;
+  console.log(
+    `[trade.risk] 🛡 安全模式启动: stream=${stream}, 风控路径**零节流**(每帧 evaluate)` +
+    (legacyThrottle > 0 ? ` · ⚠️ 检测到旧 AUTO_TRADE_EVAL_THROTTLE_MS=${legacyThrottle} 已失效, 风控不再节流` : '') +
+    (stream === 'btcusdt@markPrice@1s'
+      ? ' · ⚠️ 当前价格流为 markPrice@1s (1帧/秒), 想毫秒级触发请改 .env: AUTO_TRADE_STREAM=btcusdt@aggTrade'
+      : '')
+  );
+
   priceFeed.on('tick', onTick);
   priceFeed.on('open', () => {
     wsHasBeenConnected = true;
@@ -107,39 +120,50 @@ function start() {
   console.log('[trade.risk] 风控引擎已挂载');
 }
 
-// onTick 节流: 高频 tick 流(如 aggTrade)下避免每帧都跑 evaluate.
-// 策略是"取最新价"——_pendingPrice 一直更新, 到节流间隔后跑一次 evaluate,
-// 既不丢 tick 也不会错过 TP/SL: TP/SL 容忍度本就远大于 200ms.
-let _lastEvalAt = 0;
-let _pendingPrice = null;
-let _pendingTimer = null;
+// ⚠️ 安全核心: onTick 不做任何节流. 每一帧 priceFeed tick 都立即 evaluate.
+//
+// 历史上为 CPU 顾虑加过 evalThrottleMs (200ms 取最新价), 但这会丢极端行情:
+// 200ms 内价格 spike 经过 TP/SL 又回落, 节流后 evaluate 看到的是回落后的价格 → 错过触发.
+//
+// 现在彻底拿掉节流, 每帧立即 evaluate. evaluate() 是纯内存 + 浮点比较, 即便
+// aggTrade 500tps × 双方向 = 1000 次/秒 仍然跑不满 1% vCPU. webhook 重复触发由
+// _inFlight + 状态前置写盘 (markTpHit / closeAndUnlock) 兜底, 不会重复下单.
+//
+// evalThrottleMs 配置项保留但已失效, 仅为兼容旧 .env 不报错; 启动时会日志告警.
+let _evalCount = 0;                  // 累计 evaluate 调用次数, 仅用作健康检查
+let _lastFireLatencyMs = null;       // 最近一次 tick→fire 触发延迟 (毫秒), 用于 UI 展示
+let _maxFireLatencyMs = 0;            // 进程内最大延迟, 帮助发现偶发卡顿
 
-function _runEval(price) {
-  _lastEvalAt = Date.now();
-  _pendingTimer = null;
+function _recordFireLatency(tickTs) {
+  if (!Number.isFinite(tickTs) || tickTs <= 0) return;
+  const lat = Date.now() - tickTs;
+  _lastFireLatencyMs = lat;
+  if (lat > _maxFireLatencyMs) _maxFireLatencyMs = lat;
+}
+
+function getRiskTelemetry() {
+  return {
+    evalCount: _evalCount,
+    lastFireLatencyMs: _lastFireLatencyMs,
+    maxFireLatencyMs: _maxFireLatencyMs,
+  };
+}
+
+function _runEval(price, ts) {
+  _evalCount++;
   ['long', 'short'].forEach(dir => {
-    try { evaluate(dir, price); }
+    try { evaluate(dir, price, ts); }
     catch (e) { console.error('[trade.risk] evaluate error:', e.message); }
   });
 }
 
-function onTick({ price }) {
+function onTick({ price, ts }) {
   if (!Number.isFinite(price)) return;
-
-  const throttle = config.get().priceFeed?.evalThrottleMs || 0;
-  if (throttle <= 0) return _runEval(price);
-
-  _pendingPrice = price;
-  const now = Date.now();
-  const since = now - _lastEvalAt;
-  if (since >= throttle) {
-    _runEval(_pendingPrice);
-  } else if (!_pendingTimer) {
-    _pendingTimer = setTimeout(() => _runEval(_pendingPrice), throttle - since);
-  }
+  // 每一帧都立即评估, 零延迟. ts 透传给 evaluate, 由 fireTp/fireSl 计算 tick→fire 延迟.
+  _runEval(price, ts || Date.now());
 }
 
-function evaluate(direction, price) {
+function evaluate(direction, price, tickTs) {
   if (_inFlight[direction]) return;          // 闸 A: webhook 还没发完, 直接拒绝再入
   const p = state.getPosition(direction);
   if (!p) return;
@@ -155,42 +179,44 @@ function evaluate(direction, price) {
       const slHit = isLong ? below(price, p.currentStopLoss) : above(price, p.currentStopLoss);
       if (slHit) {
         const trigger = p.protectionArmed ? 'sl_protection' : 'sl';
-        return fireSl(direction, price, trigger);
+        return fireSl(direction, price, trigger, tickTs);
       }
     }
     if (!p.tpHit.tp3 && p.tp3 != null && p.tpHit.tp2) {
       const hit = isLong ? above(price, p.tp3) : below(price, p.tp3);
-      if (hit) return fireTp(direction, 'tp_3', price);
+      if (hit) return fireTp(direction, 'tp_3', price, tickTs);
     }
     if (!p.tpHit.tp2 && p.tp2 != null && p.tpHit.tp1) {
       const hit = isLong ? above(price, p.tp2) : below(price, p.tp2);
-      if (hit) return fireTp(direction, 'tp_2', price);
+      if (hit) return fireTp(direction, 'tp_2', price, tickTs);
     }
     if (!p.tpHit.tp1 && p.tp1 != null) {
       const hit = isLong ? above(price, p.tp1) : below(price, p.tp1);
-      if (hit) return fireTp(direction, 'tp_1', price);
+      if (hit) return fireTp(direction, 'tp_1', price, tickTs);
     }
     return;
   }
 
   // ============ 处理 pending (限价待触发) 计划 ============
+  // 注意: pending **不再有 TTL 自动过期**. 只有以下三种途径才会清掉:
+  //   a) 价格触达 entry → firePendingFill 转 active
+  //   b) 反向信号 → cancelPendingByReverseSignal
+  //   c) 用户手动 POST /cancel-pending
   if (p.pending && p.pendingPlan) {
-    // 超时 expire
-    if (p.pendingExpireAt && Date.now() > p.pendingExpireAt) {
-      return firePendingExpired(direction);
-    }
     // entry 触达: 多头价格回踩到 entry 以下, 空头反弹到 entry 以上
     const entry = p.pendingPlan.entry;
     if (entry == null || !Number.isFinite(entry)) return;
     const hit = isLong ? price <= entry : price >= entry;
-    if (hit) return firePendingFill(direction, price);
+    if (hit) return firePendingFill(direction, price, tickTs);
   }
 }
 
-async function fireTp(direction, level, triggerPrice) {
+async function fireTp(direction, level, triggerPrice, tickTs) {
   if (_inFlight[direction]) return;                    // 双保险: evaluate 已拦, 再兜一道
   _inFlight[direction] = true;
   recentlyFired[direction] = Date.now();
+  // 触发延迟遥测: 从 tick 到达到此处真正进入 fire 链路的耗时, 衡量"实时性"是否达标
+  _recordFireLatency(tickTs);
   try {
     // TP1 保本止损: 由 cfg.tp1Protection 决定 (默认 true).
     //   关掉后 webhook payload 不携带 set_protection_sl/protection_sl_price/protection_sl_order_type
@@ -200,12 +226,22 @@ async function fireTp(direction, level, triggerPrice) {
     const setProtection = (level === 'tp_1') && tp1ProtectionOn;
     const tpKey = level === 'tp_1' ? 'tp1' : level === 'tp_2' ? 'tp2' : 'tp3';
     const pBefore = state.getPosition(direction);
+    if (!pBefore || !pBefore.active) {
+      // 防御: 仓位已被外部 close (manual_close_all / external SL), 此次 fire 应直接放弃
+      console.log(`[trade.risk] fireTp 取消: ${direction} 仓位已不在 active 状态`);
+      return;
+    }
     const newSl = setProtection ? pBefore.entryPrice : undefined;
 
-    // ⚠️ 关键: 先写 disk (tpHit.tpN=true) 再发 webhook.
-    // 即便后续 webhook 失败, 这个 TP 也已经标记 "已触发", 后续 tick 不会再 fireTp 同 level.
-    // 比起 "重复平仓 N 次但每次都成功", 用户更愿意 "可能漏发 1 次平仓 (飞书会告警去人工补)".
-    state.markTpHit(direction, tpKey, { newStopLoss: newSl, armProtection: setProtection });
+    // ⚠️ 关键: 先写 disk (tpHit.tpN=true) 再发 webhook. state.markTpHit 已是幂等的:
+    //   - 仓位非 active   → null
+    //   - 该 level 已触发 → null  (last-line-of-defense, 防 _inFlight/cooldown 都漏的极端 race)
+    // null 时直接退出, 不发 webhook / 不发通知 / 不推监控, 保证"绝对一次"语义.
+    const marked = state.markTpHit(direction, tpKey, { newStopLoss: newSl, armProtection: setProtection });
+    if (!marked) {
+      console.warn(`[trade.risk] ⚠️ ${direction} ${level} markTpHit 返回 null (已触发或非 active), 拒绝重复 fire`);
+      return;
+    }
 
     const { res, payload } = await exec.fireTakeProfit(direction, level, { setProtectionSl: setProtection });
 
@@ -237,13 +273,27 @@ async function fireTp(direction, level, triggerPrice) {
       });
     }
 
+    // 推送「交易点位监控系统」: TP 触发 = 完整 payload, comment 标识级别
+    // 注意 newSl 是触发后的当前止损 (TP1 保本时 = entry; 否则保持原样)
+    const slForMonitor = setProtection ? pBefore.entryPrice : pBefore.currentStopLoss;
+    exec.fireMonitorOpen({
+      direction,
+      entry: pBefore.entryPrice,
+      tp1: pBefore.tp1, tp2: pBefore.tp2, tp3: pBefore.tp3,
+      sl: slForMonitor,
+      comment: `${level.toUpperCase()} 触发 · auto · 平${closePct}` + (setProtection ? ' · 保本止损已上移' : ''),
+    });
+
     if (level === 'tp_3') {
-      state.closeAndUnlock(direction, 'tp_3');
-      exec.notify({
-        type: 'unlock',
-        title: `🔓 ${direction.toUpperCase()} 已自动解锁 (TP3 全部止盈)`,
-        lines: [`方向 ${direction} 现可重新接收开仓信号`],
-      });
+      // closeAndUnlock 已是幂等的, 第二次调用返回 null. 此处必然第一次, 走通知.
+      const closed = state.closeAndUnlock(direction, 'tp_3');
+      if (closed) {
+        exec.notify({
+          type: 'unlock',
+          title: `🔓 ${direction.toUpperCase()} 已自动解锁 (TP3 全部止盈)`,
+          lines: [`方向 ${direction} 现可重新接收开仓信号`],
+        });
+      }
     }
   } finally {
     _inFlight[direction] = false;
@@ -260,10 +310,11 @@ async function fireTp(direction, level, triggerPrice) {
  * @param {'long'|'short'} direction
  * @param {number} fillPrice  当前 tick 的市价
  */
-async function firePendingFill(direction, fillPrice) {
+async function firePendingFill(direction, fillPrice, tickTs) {
   if (_inFlight[direction]) return;
   _inFlight[direction] = true;
   recentlyFired[direction] = Date.now();
+  _recordFireLatency(tickTs);
   try {
     const before = state.getPosition(direction);
     if (!before || !before.pending || !before.pendingPlan) return;
@@ -271,8 +322,14 @@ async function firePendingFill(direction, fillPrice) {
     const cfg = config.get();
 
     // 先写盘: pending → active. plan.entry 作为 entryPrice (限价语义),
-    // fillPrice 仅供审计 (滑点 = fillPrice - plan.entry)
+    // fillPrice 仅供审计 (滑点 = fillPrice - plan.entry).
+    // markPendingFilled 内部检查 prev.pending, 已 fill 或已 cancel 时返回 null —
+    // 此时直接退出, 不重复推 forwardOpen webhook, 防止"同一 entry 限价被填 N 次".
     const filled = state.markPendingFilled(direction, fillPrice);
+    if (!filled) {
+      console.warn(`[trade.risk] ⚠️ ${direction} markPendingFilled 返回 null (已 fill / 已取消), 拒绝重复 forwardOpen`);
+      return;
+    }
 
     // 再推 forwardOpen webhook (与 immediate 模式同一接口, 接收方无感)
     const sig = {
@@ -297,7 +354,7 @@ async function firePendingFill(direction, fillPrice) {
       title: `${isLong ? '🟢' : '🔴'} ${direction.toUpperCase()} 限价触达 → 已下单`,
       lines: [
         `symbol: ${cfg.symbol}`,
-        `arm 时间: ${before.pendingArmedAt}`,
+        `arm 时间: ${cnTime(before.pendingArmedAt)}`,
         `计划 entry: ${Number(plan.entry).toFixed(2)}`,
         `实际触发价: ${Number(fillPrice).toFixed(2)} (滑点 ${slipPct ?? '--'}%)`,
         `仓位: ${filled.positionSize} / 杠杆: ${filled.leverage}x`,
@@ -307,6 +364,15 @@ async function firePendingFill(direction, fillPrice) {
         ...exec.formatPayloadLines(direction === 'long' ? 'open_long' : 'open_short', r.payload),
       ],
       isAlert: !r.res.ok,
+    });
+
+    // 推送「交易点位监控系统」: 限价挂单触达成交 = 完整 payload
+    exec.fireMonitorOpen({
+      direction,
+      entry: plan.entry,
+      tp1: plan.tp1, tp2: plan.tp2, tp3: plan.tp3,
+      sl: plan.sl,
+      comment: `限价触达成交 · auto · fill ${Number(fillPrice).toFixed(2)} · 滑点 ${slipPct ?? '--'}%`,
     });
 
     // 实际开仓 → 同步推送 TG (与 regime 喊单 sendTradeSignal 区分: 这条是真成交了)
@@ -332,48 +398,30 @@ async function firePendingFill(direction, fillPrice) {
   }
 }
 
-/**
- * pending 计划超时未触达, 自动取消 — 不发 webhook, 仅清状态 + 通知.
- */
-function firePendingExpired(direction) {
+async function fireSl(direction, triggerPrice, triggerTag = 'sl', tickTs) {
   if (_inFlight[direction]) return;
   _inFlight[direction] = true;
   recentlyFired[direction] = Date.now();
+  _recordFireLatency(tickTs);
   try {
-    const prev = state.cancelPending(direction, 'ttl_expired');
-    if (!prev) return;
-    exec.notify({
-      type: 'pending_expired',
-      title: `⏳ ${direction.toUpperCase()} pending 计划超时未触达, 已自动取消`,
-      lines: [
-        `symbol: ${config.get().symbol}`,
-        `arm 时间: ${prev.pendingArmedAt}`,
-        `过期时间: ${new Date(prev.pendingExpireAt).toLocaleString()}`,
-        `原 entry: ${prev.pendingPlan?.entry}`,
-        `原 SL/TP1: ${prev.pendingPlan?.sl} / ${prev.pendingPlan?.tp1}`,
-        `方向 ${direction} 已解锁, 可接收新信号`,
-      ],
-    });
-  } finally {
-    _inFlight[direction] = false;
-  }
-}
-
-async function fireSl(direction, triggerPrice, triggerTag = 'sl') {
-  if (_inFlight[direction]) return;
-  _inFlight[direction] = true;
-  recentlyFired[direction] = Date.now();
-  try {
-    // 先快照 entryPrice / currentStopLoss 用于通知 (closeAndUnlock 后 state 会清空)
+    // 先快照 entryPrice / currentStopLoss / TP 等位 (closeAndUnlock 后 state 会清空)
     const pBefore = state.getPosition(direction);
     const snapshot = {
       entryPrice: pBefore?.entryPrice,
       currentStopLoss: pBefore?.currentStopLoss,
+      tp1: pBefore?.tp1,
+      tp2: pBefore?.tp2,
+      tp3: pBefore?.tp3,
     };
 
     // ⚠️ 关键: 先写 disk (active=false, locked=false) 再发 webhook.
-    // 之后 evaluate 看到 active=false 立即 return, 即便 _inFlight 异常没释放也兜得住.
-    state.closeAndUnlock(direction, triggerTag);
+    // closeAndUnlock 已是幂等的, 仓位非 active 时返回 null —
+    // 用于挡住"内部 fireSl 与外部 stop_loss action 同时进入"的极端 race, 仅一方真正发 SL webhook.
+    const closed = state.closeAndUnlock(direction, triggerTag);
+    if (!closed) {
+      console.warn(`[trade.risk] ⚠️ ${direction} closeAndUnlock 返回 null (已 closed), 拒绝重复 SL fire`);
+      return;
+    }
 
     const { res, payload } = await exec.fireStopLoss(direction, { trigger: triggerTag });
 
@@ -400,6 +448,19 @@ async function fireSl(direction, triggerPrice, triggerTag = 'sl') {
       title: `🔓 ${direction.toUpperCase()} 已自动解锁 (止损/保本止损)`,
       lines: [`方向 ${direction} 现可重新接收开仓信号`],
     });
+
+    // 推送「交易点位监控系统」: SL 触发 = 完整 payload, comment 标识
+    if (Number.isFinite(snapshot.entryPrice)) {
+      exec.fireMonitorOpen({
+        direction,
+        entry: snapshot.entryPrice,
+        tp1: snapshot.tp1,
+        tp2: snapshot.tp2,
+        tp3: snapshot.tp3,
+        sl: snapshot.currentStopLoss,
+        comment: `${triggerTag === 'sl_protection' ? '保本止损' : '止损'} 触发 · auto · 100% 全平`,
+      });
+    }
   } finally {
     _inFlight[direction] = false;
   }
@@ -408,14 +469,18 @@ async function fireSl(direction, triggerPrice, triggerTag = 'sl') {
 module.exports = {
   start,
   evaluate,
+  // ============ 实时性遥测 ============
+  // tick → fire 触发延迟 (ms): 用户能看到"风控真正以多快的速度响应价格触发"
+  // evalCount: 累计 evaluate 调用次数, 用于健康检查 (与 priceFeed.tickRateTps 对照)
+  getRiskTelemetry,
   _reset: () => {
     recentlyFired.long = 0;
     recentlyFired.short = 0;
     _inFlight.long = false;
     _inFlight.short = false;
-    if (_pendingTimer) { clearTimeout(_pendingTimer); _pendingTimer = null; }
-    _lastEvalAt = 0;
-    _pendingPrice = null;
+    _lastFireLatencyMs = null;
+    _maxFireLatencyMs = 0;
+    _evalCount = 0;
   },
   __getInFlight: () => ({ ..._inFlight }),       // 仅测试用
 };

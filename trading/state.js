@@ -49,7 +49,7 @@ const EMPTY_POSITION = () => ({
   pending: false,
   pendingPlan: null,     // {entry, sl, tp1, tp2, tp3, positionSize, leverage, source, ...}
   pendingArmedAt: null,  // ISO string
-  pendingExpireAt: null, // 毫秒时间戳; 超时自动 cancel
+  pendingExpireAt: null, // ⚠️ 已废弃: pending 不再自动过期, 字段保留仅为兼容旧 disk state
   fillPrice: null,       // 实际触发 fill 时的市价 (与 entryPrice 区分, 仅供 audit)
 });
 
@@ -130,22 +130,26 @@ function openPosition(direction, payload) {
  * 登记一笔 pending (限价待触发) 计划.
  * 价格触达 plan.entry 之前, webhook 不会发, 只有内存 + 落盘记录.
  *
+ * ⚠️ 历史: 之前会自动 30min TTL 过期, 现已**完全移除** — pending 不会自己取消,
+ *    只有以下三种方式才会清除 pending:
+ *      a) 价格触达 plan.entry → fill 成功后转 active
+ *      b) 反向信号 (FVG / 反向开仓) → cancelPendingByReverseSignal
+ *      c) 用户手动调用 POST /cancel-pending
+ *    pendingExpireAt 字段保留为 null, 仅用于兼容老 disk state, 不再起作用.
+ *
  * @param {'long'|'short'} direction
  * @param {object} plan      {entry, sl, tp1, tp2, tp3, positionSize, leverage, source, raw, ...}
- * @param {object} [opts]
- * @param {number} [opts.ttlMs]   pending 超时毫秒数 (默认 30min)
+ * @param {object} [opts]   保留参数对象供以后扩展, 当前所有字段已忽略
  */
 function armPending(direction, plan, opts = {}) {
   if (!state) load();
-  const ttlMs = opts.ttlMs || 30 * 60 * 1000;
-  const now = Date.now();
   const next = {
     ...EMPTY_POSITION(),
     direction,
     pending: true,
     pendingPlan: plan,
-    pendingArmedAt: new Date(now).toISOString(),
-    pendingExpireAt: now + ttlMs,
+    pendingArmedAt: new Date().toISOString(),
+    pendingExpireAt: null,
     raw: plan?.raw || null,
   };
   state[direction] = next;
@@ -208,11 +212,24 @@ function markPendingFilled(direction, fillPrice) {
   return next;
 }
 
-/** 标记某 TP 已触发；可同时改写 currentStopLoss (保本) */
+/**
+ * 标记某 TP 已触发；可同时改写 currentStopLoss (保本).
+ *
+ * ⚠️ 幂等保护 (核心安全语义):
+ *   - 仓位非 active     → 返回 null (没有开仓, 不可能 TP)
+ *   - 该 level 已触发过 → 返回 null (防重复 fire 的 last-line-of-defense)
+ *   - 写盘成功         → 返回更新后的 position
+ *
+ * 调用方 (riskEngine.fireTp / router 外部 take_profit) 必须检查返回值,
+ * null 时直接放弃 fire, 不发 webhook / 不发通知 / 不推监控. 这样即便上游
+ * (_inFlight / cooldown / external race) 有缝, state 层兜住"绝对一次".
+ */
 function markTpHit(direction, level, opts = {}) {
   const p = getPosition(direction);
   if (!p) return null;
+  if (!p.active) return null;
   p.tpHit = p.tpHit || { tp1: false, tp2: false, tp3: false };
+  if (p.tpHit[level]) return null;
   p.tpHit[level] = true;
   if (opts.newStopLoss != null) p.currentStopLoss = opts.newStopLoss;
   if (opts.armProtection) p.protectionArmed = true;
@@ -220,11 +237,21 @@ function markTpHit(direction, level, opts = {}) {
   return p;
 }
 
-/** 触发止损或 TP3 → 关闭 + 解锁 */
+/**
+ * 触发止损或 TP3 → 关闭 + 解锁.
+ *
+ * ⚠️ 幂等保护:
+ *   - 仓位非 active → 返回 null (已经 closed, 拒绝再次 close-and-unlock)
+ *   - 写盘成功     → 返回 closed 快照
+ *
+ * 调用方必须检查返回值, null 时跳过 webhook / 通知 / 监控推送.
+ * 这样防住"重复止损"在多入口场景下被 fire 第二次.
+ */
 function closeAndUnlock(direction, reason) {
   if (!state) load();
-  const closed = { ...state[direction], active: false, locked: false, closedAt: new Date().toISOString(), closeReason: reason };
-  // 重置为干净的空仓位
+  const prev = state[direction];
+  if (!prev || !prev.active) return null;
+  const closed = { ...prev, active: false, locked: false, closedAt: new Date().toISOString(), closeReason: reason };
   state[direction] = { ...EMPTY_POSITION() };
   save();
   return closed;
