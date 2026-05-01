@@ -1992,9 +1992,15 @@
 
   document.getElementById('btRunBtn').addEventListener('click', runBacktest);
 
-  // 启动时尝试拉一下上一次结果, 让用户进页面就看到
-  fetch('/api/regime/backtest/last?max_trades=200&equity_step=2')
+  // 启动时尝试拉一下上一次结果, 让用户进页面就看到.
+  // ⚠️ 先 GET /status 看 hasLast, 没结果就直接 skip — 否则浏览器 Console 会留一条红色 404 网络日志,
+  //    虽然代码层 .catch 已经吞掉, 但用户/排查时还是会被吓到 (用户报过这个 404).
+  fetch('/api/regime/backtest/status')
     .then(r => r.json())
+    .then(s => {
+      if (!s || !s.hasLast) return null;     // 进程刚启动 / 从未跑过回测 — 直接退出
+      return fetch('/api/regime/backtest/last?max_trades=200&equity_step=2').then(r => r.json());
+    })
     .then(d => {
       if (d && d.ok) {
         renderBtSummary(d);
@@ -2003,7 +2009,7 @@
         setBtStatus('已加载上次回测', 'ok');
       }
     })
-    .catch(() => { /* 没历史回测就不展示 */ });
+    .catch(() => { /* 静默: 任何步骤失败都不影响页面其他功能 */ });
 })();
 </script>
 </body>

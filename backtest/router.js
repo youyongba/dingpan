@@ -26,10 +26,43 @@ const router = express.Router();
 
 const HISTORY_FILE = process.env.BACKTEST_HISTORY_PATH
   || path.join(__dirname, '..', 'data', 'backtest_history.json');
+// 完整 last result (含 trades + equityCurve) 落盘文件 — 用于进程重启后恢复,
+// 避免每次重启用户进页面就 GET /last → 404. 文件几百 KB ~ 几 MB, 写一次读一次, 影响可控.
+const LAST_RESULT_FILE = process.env.BACKTEST_LAST_RESULT_PATH
+  || path.join(__dirname, '..', 'data', 'backtest_last_result.json');
 const HISTORY_MAX = 50;
 
 let _running = false;
 let _lastResult = null;
+
+// 启动时尝试从磁盘加载上次完整结果, 让用户进页面就能看到 (即便服务刚重启)
+function loadLastResult() {
+  try {
+    if (!fs.existsSync(LAST_RESULT_FILE)) return null;
+    const raw = fs.readFileSync(LAST_RESULT_FILE, 'utf8');
+    const r = JSON.parse(raw);
+    // 最低限度结构校验, 防止旧版本 schema 进来污染
+    if (r && r.summary && Array.isArray(r.trades) && Array.isArray(r.equityCurve)) {
+      console.log(`[backtest] ✅ 已恢复上次回测结果: ${r.finishedAt}, ${r.trades.length} 笔交易`);
+      return r;
+    }
+    console.warn('[backtest] last_result.json schema 不匹配, 忽略');
+    return null;
+  } catch (e) {
+    console.error('[backtest] 加载上次结果失败, 忽略:', e.message);
+    return null;
+  }
+}
+function saveLastResult(result) {
+  try {
+    const dir = path.dirname(LAST_RESULT_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(LAST_RESULT_FILE, JSON.stringify(result));
+  } catch (e) {
+    console.error('[backtest] 保存 last_result 失败 (内存版仍可用):', e.message);
+  }
+}
+_lastResult = loadLastResult();
 
 // ---------------- 历史持久化 ----------------
 function loadHistory() {
@@ -121,6 +154,8 @@ router.post('/run', async (req, res) => {
   try {
     const result = await engine.runBacktest(userParams);
     _lastResult = result;
+    // 完整结果落盘 — 进程重启后能直接恢复, 不再 404
+    saveLastResult(result);
 
     // 落盘 (只存摘要 + 参数, trades/equity 太大不进 history)
     const hist = loadHistory();
