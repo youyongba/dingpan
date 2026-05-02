@@ -77,6 +77,7 @@ regimeMod.setFundingProvider(() => ({
     stableDirection: state.stableDirection,
     predictedFundingRate: state.predictedFundingRate,
     lastSettledFundingRate: state.lastSettledFundingRate,
+    rateDailyWithPredict: state.rateDailyWithPredict,
     currentPrice: state.currentPrice,
     fmtPct: fmtPctMaybe,
 }));
