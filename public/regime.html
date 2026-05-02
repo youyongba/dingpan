@@ -482,6 +482,12 @@
   </div>
 </div>
 
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+  <div style="font-size: 14px; font-weight: 600; color: #c9d1d9;">📊 当前指标最新值</div>
+  <button onclick="copyLatestData()" id="copyRegimeDataBtn" style="width: auto; margin: 0; padding: 6px 12px; background: linear-gradient(135deg, #475569, #334155); color: #e2e8f0; font-size: 12px; border: none; border-radius: 6px; display: flex; align-items: center; gap: 6px; cursor: pointer; transition: background 0.2s; box-shadow: 0 2px 8px rgba(0,0,0,0.2);">
+    📋 <span>一键复制</span>
+  </button>
+</div>
 <div class="latest" id="latest"></div>
 
 <div class="grid">
@@ -1998,7 +2004,7 @@
   fetch('/api/regime/backtest/status')
     .then(r => r.json())
     .then(s => {
-      if (!s || !s.hasLast) return null;     // 进程刚启动 / 从未跑过回测 — 直接退出
+      if (!s || !s.hasLast) return null;     // 进程刚启动 / 从未跑过回测 —直接退出
       return fetch('/api/regime/backtest/last?max_trades=200&equity_step=2').then(r => r.json());
     })
     .then(d => {
@@ -2011,6 +2017,52 @@
     })
     .catch(() => { /* 静默: 任何步骤失败都不影响页面其他功能 */ });
 })();
+
+// 一键复制 Regime 页面最新指标数据
+async function copyLatestData() {
+  const btn = document.getElementById('copyRegimeDataBtn');
+  if (!btn) return;
+
+  try {
+    const items = document.querySelectorAll('#latest .item');
+    if (!items || items.length === 0) {
+      alert('暂无数据可复制');
+      return;
+    }
+
+    let text = '📊 当前指标最新值:\n';
+    items.forEach(item => {
+      const label = item.querySelector('.label')?.innerText || '';
+      const value = item.querySelector('.value')?.innerText || '';
+      if (label && value) {
+        text += `${label}: ${value}\n`;
+      }
+    });
+
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const textArea = document.createElement("textarea");
+      textArea.value = text;
+      textArea.style.position = "fixed";
+      textArea.style.left = "-999999px";
+      document.body.appendChild(textArea);
+      textArea.select();
+      document.execCommand("copy");
+      textArea.remove();
+    }
+
+    const oldBg = btn.style.background;
+    btn.innerHTML = '✅ <span>已复制</span>';
+    btn.style.background = 'linear-gradient(135deg, #10b981, #059669)';
+    setTimeout(() => {
+      btn.innerHTML = '📋 <span>一键复制</span>';
+      btn.style.background = oldBg;
+    }, 2000);
+  } catch (e) {
+    alert('复制失败: ' + e.message);
+  }
+}
 </script>
 </body>
 </html>
