@@ -293,10 +293,10 @@ async function copyCurrentData() {
         }
 
         const oldBg = btn.style.background;
-        btn.innerHTML = '✅ 已复制';
-        btn.style.background = '#10b981';
+        btn.innerHTML = '✅ <span>已复制</span>';
+        btn.style.background = 'linear-gradient(135deg, #10b981, #059669)';
         setTimeout(() => {
-            btn.innerHTML = '📋 一键复制';
+            btn.innerHTML = '📋 <span>一键复制</span>';
             btn.style.background = oldBg;
         }, 2000);
     } catch (e) {
