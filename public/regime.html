@@ -1428,15 +1428,15 @@
     longBtn.title = longActive
       ? '已持有多头仓位, 同方向不可重复挂单 (重置后可再挂)'
       : longPending
-        ? '多头已有 pending 挂单待触发, 同方向不可重复挂 (取消挂单后可再挂)'
-        : '挂多单 (限价): 优先 Regime tradePlan, 无 plan 则用 0.5%~1.2% / 10%仓回退方案';
+          ? '多头已有 pending 挂单待触发, 同方向不可重复挂 (取消挂单后可再挂)'
+          : '挂多单 (限价): 优先 AI 交易计划, 无 plan 则用 0.5%~1.2% / 10%仓回退方案';
 
     shortBtn.disabled = shortBusy;
     shortBtn.title = shortActive
       ? '已持有空头仓位, 同方向不可重复挂单 (重置后可再挂)'
       : shortPending
         ? '空头已有 pending 挂单待触发, 同方向不可重复挂 (取消挂单后可再挂)'
-        : '挂空单 (限价): 优先 Regime tradePlan, 无 plan 则用 0.5%~1.2% / 10%仓回退方案';
+        : '挂空单 (限价): 优先 AI 交易计划, 无 plan 则用 0.5%~1.2% / 10%仓回退方案';
 
     if (followLongBtn) {
       followLongBtn.disabled = longBusy;
@@ -1468,7 +1468,7 @@
     ].filter(Boolean);
     meta.textContent = tags.length
       ? `当前: ${tags.join(' · ')} · 重复同方向开仓/追单会被拒绝`
-      : '挂单优先 Regime, 否则 0.5%~1.2% / 10%仓; 追单一律 0.5%~1.2% / 10%仓 (不参考 Regime)';
+      : '挂单优先 AI 交易计划, 否则 0.5%~1.2% / 10%仓; 追单一律 0.5%~1.2% / 10%仓 (不参考 AI/Regime)';
   }
 
   async function setAutoTrade(enabled) {
