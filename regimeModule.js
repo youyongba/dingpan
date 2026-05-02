@@ -659,6 +659,9 @@ function buildSnapshotRichLines(regime, klines, indicators, tradePlan, fundingDa
       { text: `   (情绪: ${dirLabel})` }]);
     lines.push([{ text: '💵 瞬时预测：', bold: true }, { text: fp.fmtPct ? fp.fmtPct(fp.predictedFundingRate) : fmtPct(fp.predictedFundingRate) }]);
     lines.push([{ text: '💵 上期已结算：', bold: true }, { text: fp.fmtPct ? fp.fmtPct(fp.lastSettledFundingRate) : fmtPct(fp.lastSettledFundingRate) }]);
+    if (fp.rateDailyWithPredict !== undefined) {
+      lines.push([{ text: '📅 今日累计含预测：', bold: true }, { text: fp.fmtPct ? fp.fmtPct(fp.rateDailyWithPredict) : fmtPct(fp.rateDailyWithPredict) }]);
+    }
   }
 
   // 交易计划参数
