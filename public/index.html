@@ -16,7 +16,12 @@
 
     <div class="grid single">
         <div class="card">
-            <h3>📊 当前计算数据</h3>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <h3 style="margin: 0;">📊 当前计算数据</h3>
+                <button onclick="copyCurrentData()" id="copyDataBtn" style="background: #334155; color: #e2e8f0; border: none; padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; transition: background 0.2s;">
+                    📋 一键复制
+                </button>
+            </div>
             <div class="data-grid">
                 <div class="data-box highlight">
                     <div class="data-label">最新实时价格</div>

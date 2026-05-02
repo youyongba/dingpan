@@ -250,3 +250,56 @@ document.getElementById('authToken').value = getSavedToken();
 
 setInterval(fetchStatus, 5000);
 fetchStatus();
+
+// 一键复制当前计算数据
+async function copyCurrentData() {
+    const btn = document.getElementById('copyDataBtn');
+    if (!btn) return;
+
+    try {
+        const getVal = (id) => {
+            const el = document.getElementById(id);
+            if (!el) return '--';
+            return el.innerText.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim() || '--';
+        };
+
+        const lines = [
+            `📊 当前计算数据:`,
+            `最新实时价格: ${getVal('currentPrice')}`,
+            `🎯 近 1H 瞬时费率情绪: ${getVal('rate1hDirection')} (${getVal('rate1hDetail')})`,
+            `瞬时预测费率: ${getVal('currentRate')}`,
+            `上期已结算费率: ${getVal('lastSettledRate')}`,
+            `1小时预测均值: ${getVal('rate1h')}`,
+            `今日已结算累计: ${getVal('rateDailySettled')}`,
+            `1H 级别 MACD: ${getVal('macdValue')}`,
+            `1H 级别 RSI(14): ${getVal('rsiValue')}`
+        ];
+
+        const text = lines.join('\n');
+        
+        if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(text);
+        } else {
+            // fallback for non-https environment if needed
+            const textArea = document.createElement("textarea");
+            textArea.value = text;
+            textArea.style.position = "fixed";
+            textArea.style.left = "-999999px";
+            textArea.style.top = "-999999px";
+            document.body.appendChild(textArea);
+            textArea.select();
+            document.execCommand("copy");
+            textArea.remove();
+        }
+
+        const oldBg = btn.style.background;
+        btn.innerHTML = '✅ 已复制';
+        btn.style.background = '#10b981';
+        setTimeout(() => {
+            btn.innerHTML = '📋 一键复制';
+            btn.style.background = oldBg;
+        }, 2000);
+    } catch (e) {
+        alert('复制失败: ' + e.message);
+    }
+}
