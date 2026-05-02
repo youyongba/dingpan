@@ -880,13 +880,33 @@ async function fetchLatestAiPlan() {
     
     const aiDir = String(parsed.action).toLowerCase().includes('short') ? 'short' : 'long';
     
+    // 安全处理仓位格式，确保返回类似 '10%' 的字符串，严防爆仓
+    let posSize = parsed.position_size;
+    if (typeof posSize === 'number') {
+      // 如果 AI 返回 0.1，我们认为是 10%。如果 AI 返回 10，我们也认为是 10%。
+      // 避免出现把 10 乘以 100 变成 1000% 的灾难性错误
+      if (posSize <= 1) {
+        posSize = (posSize * 100) + '%';
+      } else {
+        posSize = posSize + '%';
+      }
+    } else if (typeof posSize === 'string') {
+      // 确保它以 % 结尾，如果 AI 返回 "10" 字符串，变成 "10%"
+      if (!posSize.endsWith('%')) {
+        posSize = posSize + '%';
+      }
+    } else {
+      // 兜底默认值
+      posSize = '10%';
+    }
+
     return {
       planEntry: Number(parsed.entry),
       tp1: Number(parsed.tp1),
       tp2: Number(parsed.tp2),
       tp3: Number(parsed.tp3),
       sl: Number(parsed.stop_loss),
-      positionSize: parsed.position_size,
+      positionSize: posSize,
       aiDirection: aiDir,
       source: 'ai_plan'
     };
