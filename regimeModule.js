@@ -19,6 +19,7 @@ const { enhance: enhanceRegime, SUB_LABELS } = require('./regime/enhancedJudge')
 const webhook = require('./notifier/feishuWebhook');
 const tg = require('./notifier/telegram'); // ← 新增：Telegram VIP 群推送（独立通道）
 const tradeConfig = require('./trading/config'); // 自动交易开关（用于动态文案）
+const aiAnalysisRouter = require('./regime/aiAnalysisRouter'); // ← 新增：DeepSeek AI 分析子模块
 
 // 根据当前自动交易开关返回提示文案
 function autoTradeNote() {
@@ -1175,3 +1176,16 @@ module.exports = {
 //   /api/regime/backtest/history GET  历史回测列表
 //   /api/regime/backtest/status  GET  是否在跑
 router.use('/backtest', require('./backtest/router'));
+
+// === DeepSeek AI 行情分析 (https://aitrade.24os.cn, base URL 可在 .env 覆盖) ===
+//   /api/regime/ai-analysis/config              GET   查看配置 / 启用状态
+//   /api/regime/ai-analysis/signals             GET   列表 (支持 symbol / limit / offset)
+//   /api/regime/ai-analysis/signals/:id         GET   详情 + AI 报告
+//   /api/regime/ai-analysis/signals             POST  手动提交一条信号
+//   /api/regime/ai-analysis/signals[/:id]       PATCH 增量补充
+//   /api/regime/ai-analysis/build-from-regime   POST  用当前 regime + funding 自动组装并提交
+router.use('/ai-analysis', aiAnalysisRouter.createRouter({
+  getCache: () => cache,
+  getFunding: () => safeFunding(),
+  symbol: SYMBOL,
+}));

@@ -367,6 +367,126 @@
   .bt-table td.pnl-neg   { color: #ff7b72; }
   .bt-table td.reason    { text-align: left; color: #8b949e; font-size: 11px; }
   .bt-empty { padding: 20px; text-align: center; color: #8b949e; font-size: 13px; }
+
+  /* ============ AI 行情分析面板 (aitrade.24os.cn) ============ */
+  .ai-panel {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    padding: 16px 18px; margin-bottom: 16px;
+  }
+  .ai-panel h2 {
+    margin: 0 0 4px; font-size: 16px; color: #d2a8ff;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .ai-panel h2 .ai-badge {
+    font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 4px;
+    background: #d2a8ff22; color: #d2a8ff;
+  }
+  .ai-panel .ai-desc { color: #8b949e; font-size: 12px; margin-bottom: 12px; }
+  .ai-toolbar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    margin-bottom: 12px;
+  }
+  .ai-toolbar button {
+    background: #21262d; color: #e6edf3; border: 1px solid #30363d;
+    padding: 6px 12px; font-size: 12px; border-radius: 6px; cursor: pointer;
+    transition: .15s;
+  }
+  .ai-toolbar button:hover:not(:disabled) { background: #30363d; }
+  .ai-toolbar button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .ai-toolbar button.primary {
+    background: linear-gradient(135deg, #8957e5, #6e44b9);
+    border-color: #8957e555; color: #fff;
+  }
+  .ai-toolbar button.primary:hover:not(:disabled) {
+    background: linear-gradient(135deg, #9668ec, #7e54c5);
+  }
+  .ai-toolbar .ai-status {
+    font-size: 11px; padding: 3px 8px; border-radius: 4px;
+    background: #21262d; color: #8b949e; margin-left: 4px;
+  }
+  .ai-toolbar .ai-status.ok { background: #3fb95033; color: #3fb950; }
+  .ai-toolbar .ai-status.err { background: #f8514933; color: #f85149; }
+  .ai-toolbar .ai-status.warn { background: #d2992233; color: #d29922; }
+  .ai-toolbar .ai-meta { font-size: 11px; color: #8b949e; margin-left: auto; }
+
+  .ai-table-wrap {
+    max-height: 360px; overflow-y: auto;
+    border: 1px solid #30363d; border-radius: 6px; background: #0e1116;
+  }
+  .ai-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .ai-table th, .ai-table td {
+    padding: 8px 10px; border-bottom: 1px solid #21262d; text-align: left;
+    font-family: 'SF Mono', Menlo, monospace;
+  }
+  .ai-table th {
+    background: #161b22; color: #8b949e; font-weight: 500;
+    position: sticky; top: 0; z-index: 1; font-size: 11px; text-transform: uppercase;
+  }
+  .ai-table tr.ai-row:hover { background: #1f2937aa; cursor: pointer; }
+  .ai-table tr.ai-row.active { background: #1f2937; }
+  .ai-table td.dir-long  { color: #3fb950; font-weight: 600; }
+  .ai-table td.dir-short { color: #ff7b72; font-weight: 600; }
+  .ai-table td.dir-neutral { color: #8b949e; }
+  .ai-table td.num { text-align: right; }
+  .ai-table td.ai-summary { font-family: -apple-system, BlinkMacSystemFont, sans-serif; color: #c9d1d9; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ai-table .ai-empty { padding: 20px; text-align: center; color: #8b949e; }
+
+  /* 详情抽屉 */
+  .ai-detail {
+    margin-top: 12px;
+    background: #0e1116; border: 1px solid #30363d; border-radius: 6px;
+    padding: 14px 16px; display: none;
+  }
+  .ai-detail.open { display: block; }
+  .ai-detail .ai-detail-head {
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    flex-wrap: wrap; margin-bottom: 10px;
+  }
+  .ai-detail .ai-detail-title {
+    font-size: 14px; font-weight: 700; color: #e6edf3;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .ai-detail .ai-detail-title .pill {
+    font-size: 11px; padding: 2px 8px; border-radius: 4px; font-weight: 500;
+  }
+  .ai-detail .ai-detail-title .pill.long { background: #3fb95033; color: #3fb950; }
+  .ai-detail .ai-detail-title .pill.short { background: #ff7b7233; color: #ff7b72; }
+  .ai-detail .ai-detail-title .pill.neutral { background: #6e768133; color: #8b949e; }
+  .ai-detail .ai-detail-title .pill.id { background: #21262d; color: #8b949e; font-family: 'SF Mono', Menlo, monospace; }
+  .ai-detail .close-detail {
+    background: transparent; border: 1px solid #30363d; color: #8b949e;
+    padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;
+  }
+  .ai-detail .close-detail:hover { color: #e6edf3; background: #21262d; }
+  .ai-detail .ai-detail-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 8px; margin-bottom: 12px;
+  }
+  .ai-detail .ai-detail-grid .cell {
+    background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+    padding: 8px 10px;
+  }
+  .ai-detail .ai-detail-grid .cell .label { font-size: 10px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.3px; }
+  .ai-detail .ai-detail-grid .cell .val { font-size: 14px; font-weight: 600; margin-top: 2px; font-family: 'SF Mono', Menlo, monospace; color: #c9d1d9; }
+  .ai-detail .ai-detail-grid .cell.plan-entry .val { color: #58a6ff; }
+  .ai-detail .ai-detail-grid .cell.plan-sl    .val { color: #ff7b72; }
+  .ai-detail .ai-detail-grid .cell.plan-tp    .val { color: #3fb950; }
+  .ai-detail .ai-report-block {
+    background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+    padding: 10px 12px; margin-bottom: 8px;
+  }
+  .ai-detail .ai-report-block h4 {
+    margin: 0 0 8px; font-size: 13px; color: #d2a8ff;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .ai-detail .ai-report-block h4 .ai-report-ts { font-size: 11px; color: #8b949e; font-weight: 400; }
+  .ai-detail .ai-report-block pre {
+    margin: 0; padding: 10px 12px; background: #0e1116;
+    border: 1px solid #21262d; border-radius: 4px; color: #c9d1d9;
+    font-family: 'SF Mono', Menlo, monospace; font-size: 12px;
+    white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow: auto;
+  }
+  .ai-detail .ai-report-block.plan pre { color: #e6edf3; }
 </style>
 </head>
 <body>
@@ -522,6 +642,58 @@
   <div class="card">
     <h3>RSI (14) · 最近 50 根</h3>
     <div class="chart-wrap"><canvas id="chartRsi"></canvas></div>
+  </div>
+</div>
+
+<!-- ============ DeepSeek AI 行情分析面板 (aitrade.24os.cn) ============ -->
+<div class="ai-panel m16">
+  <h2>🧠 DeepSeek AI 行情分析 <span class="ai-badge" id="aiBadge">aitrade.24os.cn</span></h2>
+  <div class="ai-desc">
+    把本系统当前 Regime + 指标 + 资金费率快照提交到 DeepSeek AI 分析服务 (独立通道, 不影响本地 Regime 判定).
+    direction 仅作参考, 服务端 AI 会完全自主给出动作建议.
+  </div>
+  <div class="ai-toolbar">
+    <button id="aiSubmitBtn" class="primary">🚀 基于当前 Regime 生成 AI 分析</button>
+    <button id="aiRefreshBtn">🔄 刷新列表</button>
+    <label style="font-size:12px;color:#8b949e;">
+      过滤交易对
+      <input id="aiSymbolFilter" type="text" placeholder="BTCUSDT (留空=全部)"
+             style="background:#0e1116;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:4px 8px;font-size:12px;font-family:'SF Mono',monospace;width:140px;margin-left:4px;" />
+    </label>
+    <label style="font-size:12px;color:#8b949e;">
+      数量
+      <input id="aiLimit" type="number" min="1" max="100" value="10"
+             style="background:#0e1116;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:4px 8px;font-size:12px;font-family:'SF Mono',monospace;width:70px;margin-left:4px;" />
+    </label>
+    <span id="aiStatus" class="ai-status">就绪</span>
+    <span class="ai-meta" id="aiMeta">未加载</span>
+  </div>
+  <div class="ai-table-wrap">
+    <table class="ai-table">
+      <thead>
+        <tr>
+          <th>时间</th>
+          <th>ID</th>
+          <th>交易对</th>
+          <th>方向</th>
+          <th class="num">最新价</th>
+          <th class="num">风险</th>
+          <th>AI 摘要</th>
+        </tr>
+      </thead>
+      <tbody id="aiSignalBody">
+        <tr><td colspan="7" class="ai-empty">暂无信号, 点击上方按钮触发分析</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div id="aiDetail" class="ai-detail">
+    <div class="ai-detail-head">
+      <div class="ai-detail-title" id="aiDetailTitle">--</div>
+      <button class="close-detail" id="aiCloseDetail">关闭</button>
+    </div>
+    <div class="ai-detail-grid" id="aiDetailGrid"></div>
+    <div id="aiDetailReports"></div>
   </div>
 </div>
 
@@ -2064,5 +2236,307 @@ async function copyLatestData() {
   }
 }
 </script>
+
+<!-- ============ AI 分析面板独立脚本 (与上面脚本隔离, IIFE 作用域) ============ -->
+<script>
+(function () {
+  'use strict';
+
+  const API_BASE = '/api/regime/ai-analysis';
+  const POLL_MS = 60_000;
+
+  const el = {
+    status: document.getElementById('aiStatus'),
+    meta: document.getElementById('aiMeta'),
+    submitBtn: document.getElementById('aiSubmitBtn'),
+    refreshBtn: document.getElementById('aiRefreshBtn'),
+    symbolFilter: document.getElementById('aiSymbolFilter'),
+    limit: document.getElementById('aiLimit'),
+    body: document.getElementById('aiSignalBody'),
+    detail: document.getElementById('aiDetail'),
+    detailTitle: document.getElementById('aiDetailTitle'),
+    detailGrid: document.getElementById('aiDetailGrid'),
+    detailReports: document.getElementById('aiDetailReports'),
+    closeDetail: document.getElementById('aiCloseDetail'),
+    badge: document.getElementById('aiBadge'),
+  };
+
+  let currentDetailId = null;
+  let lastList = [];
+
+  function setStatus(text, level) {
+    if (!el.status) return;
+    el.status.textContent = text;
+    el.status.classList.remove('ok', 'err', 'warn');
+    if (level) el.status.classList.add(level);
+  }
+
+  function fmtTs(v) {
+    if (!v) return '--';
+    try {
+      const d = new Date(v);
+      if (isNaN(d.getTime())) return String(v);
+      return d.toLocaleString();
+    } catch (_) { return String(v); }
+  }
+
+  function fmtNum(v, digits) {
+    if (v === null || v === undefined || v === '') return '--';
+    const n = Number(v);
+    if (!Number.isFinite(n)) return String(v);
+    return digits != null ? n.toFixed(digits) : n.toString();
+  }
+
+  function toDirClass(dir) {
+    const d = String(dir || '').toUpperCase();
+    if (d === 'LONG') return 'long';
+    if (d === 'SHORT') return 'short';
+    return 'neutral';
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  // 尝试从 AI report 文本里抽出第一个 ```json ... ``` 里的 JSON
+  function extractAiJson(reportText) {
+    if (typeof reportText !== 'string') return null;
+    const m = reportText.match(/```json\s*([\s\S]*?)```/i);
+    const raw = m ? m[1] : reportText;
+    try { return JSON.parse(raw); }
+    catch (_) { return null; }
+  }
+
+  async function apiGet(path) {
+    const r = await fetch(API_BASE + path);
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { const err = new Error(j.error || j.message || ('HTTP ' + r.status)); err.payload = j; throw err; }
+    return j;
+  }
+  async function apiPost(path, body) {
+    const r = await fetch(API_BASE + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { const err = new Error(j.error || j.message || ('HTTP ' + r.status)); err.payload = j; throw err; }
+    return j;
+  }
+
+  async function loadConfig() {
+    try {
+      const cfg = await apiGet('/config');
+      if (cfg && cfg.baseUrl && el.badge) el.badge.textContent = cfg.baseUrl.replace(/^https?:\/\//, '');
+      if (cfg && cfg.enabled === false) {
+        setStatus('已在 .env 关闭', 'warn');
+        el.submitBtn.disabled = true;
+      }
+    } catch (_) { /* 静默 */ }
+  }
+
+  function normalizeList(resp) {
+    if (!resp) return [];
+    if (Array.isArray(resp)) return resp;
+    if (Array.isArray(resp.signals)) return resp.signals;
+    if (Array.isArray(resp.data)) return resp.data;
+    if (Array.isArray(resp.items)) return resp.items;
+    if (Array.isArray(resp.list)) return resp.list;
+    return [];
+  }
+
+  function renderList(signals) {
+    lastList = signals || [];
+    if (!signals || signals.length === 0) {
+      el.body.innerHTML = '<tr><td colspan="7" class="ai-empty">暂无信号, 点击上方按钮触发分析</td></tr>';
+      return;
+    }
+    el.body.innerHTML = signals.map(s => {
+      const dir = String(s.direction || '').toUpperCase();
+      const dirClass = 'dir-' + toDirClass(dir);
+      const riskStr = s.risk_score != null ? `${s.risk_score}/5` : '--';
+      const summaryRaw = s.report_summary || s.summary || (s.reports && s.reports[0] && s.reports[0].content) || '';
+      const summary = String(summaryRaw || '').replace(/```json[\s\S]*?```/g, '').trim().slice(0, 120) || '分析中...';
+      const active = currentDetailId != null && String(currentDetailId) === String(s.id) ? ' active' : '';
+      return `
+        <tr class="ai-row${active}" data-id="${escapeHtml(s.id)}">
+          <td>${escapeHtml(fmtTs(s.created_at))}</td>
+          <td>${escapeHtml(s.id)}</td>
+          <td>${escapeHtml(s.symbol || '--')}</td>
+          <td class="${dirClass}">${escapeHtml(dir || 'NEUTRAL')}</td>
+          <td class="num">${escapeHtml(fmtNum(s.last_price != null ? s.last_price : s.close, 2))}</td>
+          <td class="num">${escapeHtml(riskStr)}</td>
+          <td class="ai-summary" title="${escapeHtml(summaryRaw)}">${escapeHtml(summary)}</td>
+        </tr>
+      `;
+    }).join('');
+    el.body.querySelectorAll('tr.ai-row').forEach(tr => {
+      tr.addEventListener('click', () => openDetail(tr.getAttribute('data-id')));
+    });
+  }
+
+  async function refreshList() {
+    setStatus('加载中...', '');
+    try {
+      const sym = (el.symbolFilter.value || '').trim();
+      const limit = Math.max(1, Math.min(100, parseInt(el.limit.value, 10) || 10));
+      const qs = new URLSearchParams();
+      qs.set('limit', limit);
+      if (sym) qs.set('symbol', sym);
+      const resp = await apiGet('/signals?' + qs.toString());
+      const list = normalizeList(resp);
+      renderList(list);
+      el.meta.textContent = `共 ${list.length} 条 · ${new Date().toLocaleTimeString()}`;
+      setStatus('已刷新', 'ok');
+    } catch (e) {
+      setStatus('加载失败', 'err');
+      el.body.innerHTML = `<tr><td colspan="7" class="ai-empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+    }
+  }
+
+  async function submitFromRegime() {
+    el.submitBtn.disabled = true;
+    setStatus('提交中...', '');
+    try {
+      const resp = await apiPost('/build-from-regime', {});
+      const upstream = (resp && resp.upstream) || resp || {};
+      const newId = upstream.id || upstream.signal?.id;
+      setStatus(newId != null ? `已提交 #${newId}` : '已提交', 'ok');
+      await refreshList();
+      if (newId != null) openDetail(newId);
+    } catch (e) {
+      setStatus('提交失败', 'err');
+      alert('提交失败: ' + e.message);
+    } finally {
+      el.submitBtn.disabled = false;
+    }
+  }
+
+  function renderDetail(detail) {
+    if (!detail) {
+      el.detail.classList.remove('open');
+      currentDetailId = null;
+      return;
+    }
+    currentDetailId = detail.id;
+    const dir = String(detail.direction || '').toUpperCase();
+    const pillClass = toDirClass(dir);
+    el.detailTitle.innerHTML = `
+      <span>📊 信号详情</span>
+      <span class="pill id">#${escapeHtml(detail.id)}</span>
+      <span class="pill ${pillClass}">${escapeHtml(dir || 'NEUTRAL')}</span>
+      <span class="pill id">${escapeHtml(detail.symbol || '--')}</span>
+      <span class="pill id">${escapeHtml(fmtTs(detail.created_at))}</span>
+    `;
+
+    // 指标快照
+    const cells = [
+      ['入场', fmtNum(detail.entry_price, 2), 'plan-entry'],
+      ['止损', fmtNum(detail.stop_loss, 2), 'plan-sl'],
+      ['最新价', fmtNum(detail.last_price != null ? detail.last_price : detail.close, 2), ''],
+      ['ATR(14)', fmtNum(detail.atr14, 2), ''],
+      ['ADX', fmtNum(detail.adx, 2), ''],
+      ['+DI / -DI', `${fmtNum(detail.plus_di, 1)} / ${fmtNum(detail.minus_di, 1)}`, ''],
+      ['MACD', fmtNum(detail.macd, 2), ''],
+      ['Signal / Hist', `${fmtNum(detail.macd_signal, 2)} / ${fmtNum(detail.macd_hist, 2)}`, ''],
+      ['RSI(14)', fmtNum(detail.rsi14, 2), ''],
+      ['HV%', fmtNum(detail.hv_percent, 2), ''],
+      ['ROC%', fmtNum(detail.roc_percent, 2), ''],
+      ['Slope($/h)', fmtNum(detail.slope_dollar_per_hour, 2), ''],
+      ['多/空评分', `${fmtNum(detail.long_score)} / ${fmtNum(detail.short_score)}`, ''],
+      ['风险评分', detail.risk_score != null ? `${detail.risk_score}/5` : '--', ''],
+      ['资金费率(瞬时)', detail.funding_rate_instant != null ? (Number(detail.funding_rate_instant) * 100).toFixed(4) + '%' : '--', ''],
+      ['1H均值', detail.funding_rate_1h_avg != null ? (Number(detail.funding_rate_1h_avg) * 100).toFixed(4) + '%' : '--', ''],
+      ['情绪', detail.sentiment || '--', ''],
+    ];
+    el.detailGrid.innerHTML = cells.map(([label, val, cls]) => `
+      <div class="cell ${cls}">
+        <div class="label">${escapeHtml(label)}</div>
+        <div class="val">${escapeHtml(val)}</div>
+      </div>
+    `).join('');
+
+    // AI 报告列表
+    const reports = Array.isArray(detail.reports) ? detail.reports : [];
+    if (reports.length === 0) {
+      el.detailReports.innerHTML = `
+        <div class="ai-report-block">
+          <h4>🤖 AI 分析报告</h4>
+          <pre>AI 分析正在进行中或暂无报告, 请稍后刷新</pre>
+        </div>
+      `;
+    } else {
+      el.detailReports.innerHTML = reports.map((r, idx) => {
+        const parsed = extractAiJson(r.content);
+        let planBlock = '';
+        if (parsed) {
+          const rows = [
+            ['action', parsed.action],
+            ['symbol', parsed.symbol],
+            ['position_size', parsed.position_size],
+            ['entry', parsed.entry],
+            ['stop_loss', parsed.stop_loss],
+            ['tp1', parsed.tp1],
+            ['tp2', parsed.tp2],
+            ['tp3', parsed.tp3],
+          ].filter(([, v]) => v !== undefined && v !== null);
+          if (rows.length) {
+            planBlock = `
+              <div class="ai-report-block plan">
+                <h4>🎯 AI 交易计划 (结构化) <span class="ai-report-ts">report #${escapeHtml(r.id)}</span></h4>
+                <pre>${escapeHtml(JSON.stringify(parsed, null, 2))}</pre>
+              </div>
+            `;
+          }
+        }
+        return `
+          ${planBlock}
+          <div class="ai-report-block">
+            <h4>📝 原始分析 (报告 ${idx + 1} / ${reports.length}) <span class="ai-report-ts">${escapeHtml(fmtTs(r.created_at))}</span></h4>
+            <pre>${escapeHtml(r.content || '')}</pre>
+          </div>
+        `;
+      }).join('');
+    }
+    el.detail.classList.add('open');
+    // 更新列表高亮
+    el.body.querySelectorAll('tr.ai-row').forEach(tr => {
+      tr.classList.toggle('active', tr.getAttribute('data-id') === String(detail.id));
+    });
+  }
+
+  async function openDetail(id) {
+    if (id == null || id === '') return;
+    setStatus('加载详情...', '');
+    try {
+      const detail = await apiGet('/signals/' + encodeURIComponent(id));
+      renderDetail(detail);
+      setStatus('详情已加载', 'ok');
+    } catch (e) {
+      setStatus('详情加载失败', 'err');
+      alert('详情加载失败: ' + e.message);
+    }
+  }
+
+  el.submitBtn.addEventListener('click', submitFromRegime);
+  el.refreshBtn.addEventListener('click', refreshList);
+  el.closeDetail.addEventListener('click', () => {
+    el.detail.classList.remove('open');
+    currentDetailId = null;
+    el.body.querySelectorAll('tr.ai-row.active').forEach(tr => tr.classList.remove('active'));
+  });
+  el.symbolFilter.addEventListener('change', refreshList);
+  el.limit.addEventListener('change', refreshList);
+
+  loadConfig().then(refreshList);
+  // 轻度轮询，捕获 AI 后端异步生成的报告
+  setInterval(() => {
+    if (!document.hidden) refreshList();
+  }, POLL_MS);
+})();
+</script>
+
 </body>
 </html>
