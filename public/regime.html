@@ -2493,9 +2493,11 @@ async function copyLatestData() {
         }
         return `
           ${planBlock}
-          <div class="ai-report-block">
-            <h4><a href="https://aitrade.24os.cn/?id=${escapeHtml(detail.id)}" target="_blank" style="color: inherit; text-decoration: underline;">📝 原始分析 (报告 ${idx + 1} / ${reports.length})</a> <span class="ai-report-ts">${escapeHtml(fmtTs(r.created_at))}</span></h4>
-            <pre>${escapeHtml(r.content || '')}</pre>
+          <div class="ai-report-block" style="padding-bottom: 10px; border-bottom: 1px solid rgba(71,85,105,0.2);">
+            <h4><a href="https://aitrade.24os.cn/?id=${escapeHtml(detail.id)}" target="_blank" style="color: #58a6ff; text-decoration: none; display: flex; align-items: center; gap: 6px;">
+              📝 查看原始分析报告 (报告 ${idx + 1} / ${reports.length}) 
+              <span style="font-size: 12px;">↗</span>
+            </a> <span class="ai-report-ts">${escapeHtml(fmtTs(r.created_at))}</span></h4>
           </div>
         `;
       }).join('');
