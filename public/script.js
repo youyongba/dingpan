@@ -158,6 +158,40 @@ async function fetchStatus() {
             `近1H均值: ${avg} (采样 ${data.rate1hSamples || 0} 点) | 当下瞬时: ${now}`;
     }
 
+    // 获取并渲染 MACD 和 RSI
+    try {
+        const resRegime = await fetch('/api/regime/snapshot?tail=1');
+        if (resRegime.ok) {
+            const regimeData = await resRegime.json();
+            if (regimeData.latest) {
+                const l = regimeData.latest;
+                const macdStr = l.macd != null ? l.macd.toFixed(3) : '--';
+                const signalStr = l.signal != null ? l.signal.toFixed(3) : '--';
+                const histStr = l.hist != null ? l.hist.toFixed(3) : '--';
+                const rsiStr = l.rsi != null ? l.rsi.toFixed(2) : '--';
+
+                let histColor = '#94a3b8';
+                if (l.hist > 0) histColor = '#10b981';
+                else if (l.hist < 0) histColor = '#ef4444';
+
+                let rsiColor = '#94a3b8';
+                if (l.rsi >= 70) rsiColor = '#ef4444';
+                else if (l.rsi <= 30) rsiColor = '#10b981';
+
+                const macdEl = document.getElementById('macdValue');
+                if (macdEl) {
+                    macdEl.innerHTML = `${macdStr} <br><span style="font-size:12px;color:#94a3b8;">DEA ${signalStr} | <span style="color:${histColor}">HIST ${histStr}</span></span>`;
+                }
+                const rsiEl = document.getElementById('rsiValue');
+                if (rsiEl) {
+                    rsiEl.innerHTML = `<span style="color:${rsiColor}">${rsiStr}</span>`;
+                }
+            }
+        }
+    } catch (e) {
+        console.warn('获取 regime 数据失败:', e);
+    }
+
     renderChartIfChanged('chart8h', data.historyData, '8H资金费率', 'mmdd');
     renderChartIfChanged('chart1h', data.realTimeHistory, '瞬时预测费率', 'hhmm');
     renderChartIfChanged('chart1hAvg', data.rate1hHistory, '近1H均值', 'hhmm');
