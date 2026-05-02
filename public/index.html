@@ -16,11 +16,16 @@
 
     <div class="grid single">
         <div class="card">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 10px; flex-wrap: wrap;">
                 <h3 style="margin: 0; border: none; padding: 0;">📊 当前计算数据</h3>
-                <button onclick="copyCurrentData()" id="copyDataBtn" style="width: auto; margin: 0; padding: 8px 16px; background: linear-gradient(135deg, #475569, #334155); font-size: 13px; border-radius: 8px; display: flex; align-items: center; gap: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
-                    📋 <span>一键复制</span>
-                </button>
+                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button onclick="copyCurrentData()" id="copyDataBtn" style="width: auto; margin: 0; padding: 8px 16px; background: linear-gradient(135deg, #475569, #334155); font-size: 13px; border-radius: 8px; display: flex; align-items: center; gap: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
+                        📋 <span>一键复制</span>
+                    </button>
+                    <button onclick="sendToAI()" id="aiFeedBtn" style="width: auto; margin: 0; padding: 8px 16px; background: linear-gradient(135deg, #8b5cf6, #6d28d9); color: #fff; font-size: 13px; border-radius: 8px; display: flex; align-items: center; gap: 6px; box-shadow: 0 4px 12px rgba(139,92,246,0.3); border: none; cursor: pointer;">
+                        🧠 <span>喂给 AI 分析</span>
+                    </button>
+                </div>
             </div>
             <div class="data-grid">
                 <div class="data-box highlight">
@@ -58,6 +63,26 @@
                     <div class="data-label">1H 级别 RSI(14)</div>
                     <div class="data-value" id="rsiValue" style="font-size: 18px;">--</div>
                 </div>
+            </div>
+
+            <!-- AI 分析结果区（由 sendToAI() 填充；初始隐藏） -->
+            <div id="aiResultBox" style="margin-top: 18px; padding: 14px 16px; border-radius: 10px; background: linear-gradient(135deg, rgba(139,92,246,0.08), rgba(59,130,246,0.05)); border: 1px solid rgba(139,92,246,0.25); display: none;">
+                <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px;">
+                    <div style="font-size: 14px; font-weight: 600; color: #c4b5fd; display: flex; align-items: center; gap: 6px;">
+                        🧠 DeepSeek AI 分析结果
+                        <span id="aiResultId" style="font-family: 'SF Mono', Menlo, monospace; font-size: 11px; color: #94a3b8; font-weight: 400;"></span>
+                    </div>
+                    <div style="display: flex; gap: 6px; align-items: center;">
+                        <span id="aiResultStatus" style="font-size: 11px; padding: 3px 8px; border-radius: 4px; background: rgba(100,116,139,0.2); color: #94a3b8;">就绪</span>
+                        <button onclick="refreshAIResult()" id="aiRefreshBtn" style="width: auto; margin: 0; padding: 4px 10px; background: rgba(100,116,139,0.25); color: #e2e8f0; font-size: 11px; border-radius: 4px; border: none; cursor: pointer;">🔄 刷新</button>
+                        <a href="regime.html" style="padding: 4px 10px; background: rgba(139,92,246,0.25); color: #c4b5fd; text-decoration: none; border-radius: 4px; font-size: 11px;">在 Regime 面板查看全部 ⇾</a>
+                    </div>
+                </div>
+                <div id="aiResultGrid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin-bottom: 10px;"></div>
+                <details>
+                    <summary style="cursor: pointer; color: #94a3b8; font-size: 12px;">📄 查看原始 AI 报告</summary>
+                    <pre id="aiResultRaw" style="margin: 8px 0 0; padding: 10px 12px; background: rgba(15,23,42,0.6); border: 1px solid rgba(71,85,105,0.3); border-radius: 6px; color: #cbd5e1; font-family: 'SF Mono', Menlo, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow: auto;"></pre>
+                </details>
             </div>
 
             <div style="margin-top: 20px; display: flex; gap: 12px; align-items: center;">
