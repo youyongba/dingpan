@@ -126,6 +126,11 @@ async function fetchStatus() {
     document.getElementById('lastSettledRate').textContent = fmtPct(data.lastSettledFundingRate);
     document.getElementById('rate1h').textContent = fmtPct(data.rate1hAvg);
     document.getElementById('rateDailySettled').textContent = fmtPct(data.rateDailySettledSum);
+    
+    const rateDailyWithPredictEl = document.getElementById('rateDailyWithPredict');
+    if (rateDailyWithPredictEl) {
+        rateDailyWithPredictEl.textContent = fmtPct(data.rateDailyWithPredict);
+    }
 
     // 近 1H 瞬时费率情绪面板
     const rate1hEl = document.getElementById('rate1hDirection');
@@ -271,6 +276,7 @@ async function copyCurrentData() {
             `上期已结算费率: ${getVal('lastSettledRate')}`,
             `1小时预测均值: ${getVal('rate1h')}`,
             `今日已结算累计: ${getVal('rateDailySettled')}`,
+            `今日累计含预测(funding_today_cumulative): ${getVal('rateDailyWithPredict')}`,
             `1H 级别 MACD: ${getVal('macdValue')}`,
             `1H 级别 RSI(14): ${getVal('rsiValue')}`
         ];
