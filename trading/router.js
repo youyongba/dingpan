@@ -853,15 +853,51 @@ router.post('/cancel-pending', (req, res) => {
 // body: { direction: 'long' | 'short' }
 //
 // 用户硬性要求:
-//   1) 有 regime tradePlan → 用 plan (entry/SL/TP/置信度仓位 全部锁定)
-//   2) 无 regime tradePlan → 用「手动回退方案」: entry=当前市价, 每段 0.5%~1.2%,
+//   1) 有 AI tradePlan → 用 plan (entry/SL/TP/仓位/方向 全部锁定)
+//   2) 无 AI tradePlan → 用「手动回退方案」: entry=当前市价, 每段 0.5%~1.2%,
 //      仓位 MANUAL_FALLBACK_POSITION_PCT% (默认 10%)
 //
 // 整体走 pending 限价模式 (与 regime auto 同一通道), 价格触达 entry 才发 forwardOpen.
 //
 // ⚠️ 总开关关闭时直接拒绝, 避免"以为关了不下单, 手动一按又下了"的语义混乱.
+
+async function fetchLatestAiPlan() {
+  try {
+    const ai = require('../regime/aiAnalysis');
+    const listRes = await ai.listSignals({ limit: 1 });
+    if (!listRes.data || !Array.isArray(listRes.data.items) || !listRes.data.items.length) return null;
+    
+    const latestId = listRes.data.items[0].id;
+    const detailRes = await ai.getSignalDetail(latestId);
+    if (!detailRes.data || !Array.isArray(detailRes.data.reports) || !detailRes.data.reports.length) return null;
+    
+    const reportText = detailRes.data.reports[0].content;
+    const m = reportText.match(/```json\s*([\s\S]*?)```/i);
+    const raw = m ? m[1] : reportText;
+    const parsed = JSON.parse(raw);
+    
+    if (!parsed || !parsed.action || parsed.entry == null) return null;
+    
+    const aiDir = String(parsed.action).toLowerCase().includes('short') ? 'short' : 'long';
+    
+    return {
+      planEntry: Number(parsed.entry),
+      tp1: Number(parsed.tp1),
+      tp2: Number(parsed.tp2),
+      tp3: Number(parsed.tp3),
+      sl: Number(parsed.stop_loss),
+      positionSize: parsed.position_size,
+      aiDirection: aiDir,
+      source: 'ai_plan'
+    };
+  } catch (e) {
+    console.error('[trade.manual] 获取 AI 交易计划失败:', e.message);
+    return null;
+  }
+}
+
 router.post('/manual-open', requireAdmin, async (req, res) => {
-  const direction = req.body?.direction;
+  let direction = req.body?.direction;
   if (!['long', 'short'].includes(direction)) {
     return res.status(400).json({ ok: false, error: 'direction must be long|short' });
   }
@@ -874,15 +910,20 @@ router.post('/manual-open', requireAdmin, async (req, res) => {
     });
   }
 
+  // 优先尝试最新的 AI 交易计划; 不可用时用手动回退方案 (0.5%~1.2% / 10% 仓位)
+  const aiPlan = await fetchLatestAiPlan();
+  
+  if (aiPlan) {
+    direction = aiPlan.aiDirection;
+  }
+
   const sig = {
     token: cfg.token,
     action: direction === 'long' ? 'open_long' : 'open_short',
     symbol: cfg.symbol,
   };
 
-  // 优先尝试 regime tradePlan; 不可用时用手动回退方案 (0.5%~1.2% / 10% 仓位)
-  const planLv = planLevelsFromRegime(direction);
-  if (!planLv) {
+  if (!aiPlan) {
     const marketPrice = priceFeed.getStatus().lastPrice;
     if (!Number.isFinite(marketPrice)) {
       return res.status(503).json({
@@ -906,9 +947,15 @@ router.post('/manual-open', requireAdmin, async (req, res) => {
     sig.tp1 = lv.tp1; sig.tp2 = lv.tp2; sig.tp3 = lv.tp3;
     sig.position_size = `${MANUAL_FALLBACK_POSITION_PCT}%`;
     sig._priceSource = 'manual_fallback';
+  } else {
+    sig.entry = aiPlan.planEntry;
+    sig.stop_loss = aiPlan.sl;
+    sig.tp1 = aiPlan.tp1; sig.tp2 = aiPlan.tp2; sig.tp3 = aiPlan.tp3;
+    sig.position_size = aiPlan.positionSize;
+    sig._priceSource = aiPlan.source;
   }
 
-  const r = await processSignal(sig, { source: 'manual_ui' });
+  const r = await processSignal(sig, { source: 'manual_ui', skipRegimePlan: true });
   res.status(r.status).json(r.body);
 });
 
