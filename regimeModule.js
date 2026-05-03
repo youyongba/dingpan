@@ -411,7 +411,7 @@ function buildTradePlan(ind, regime, klines) {
   const tp3 = entry + dirSign * 3 * risk;
 
   // 仓位建议
-  const positionPct = ({ high: 30, medium: 20, low: 10 })[confidence];
+  const positionPct = ({ high: 5, medium: 4, low: 3 })[confidence];
 
   // 数值精度
   const round2 = (n) => Math.round(n * 100) / 100;
@@ -1139,10 +1139,18 @@ router.get('/page', (req, res) => {
  * @returns {{tradePlan, regime, latest, updatedAt}}
  */
 function getLatestPlan() {
+  let latest = null;
+  if (cache.indicators && cache.indicators.atr) {
+    const lastIdx = cache.indicators.atr.length - 1;
+    latest = {
+      atr: cache.indicators.atr[lastIdx],
+      adx: cache.indicators.adx[lastIdx]
+    };
+  }
   return {
     tradePlan: cache.tradePlan,
     regime: cache.regime,
-    latest: cache.indicators ? cache.indicators[cache.indicators.length - 1] : null,
+    latest,
     updatedAt: cache.updatedAt,
   };
 }

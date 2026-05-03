@@ -88,40 +88,42 @@ if (MANUAL_FALLBACK_PCT < MANUAL_FALLBACK_PCT_MIN || MANUAL_FALLBACK_PCT > MANUA
  * @returns {{tp1, tp2, tp3, sl, pct}}
  * @throws Error 当 pct 非法 / entryPrice 非法时
  */
-function computeManualFallbackLevels(direction, entryPrice, pct) {
-  const p = pct == null ? MANUAL_FALLBACK_PCT : pct;
-  if (!Number.isFinite(p) || p < MANUAL_FALLBACK_PCT_MIN || p > MANUAL_FALLBACK_PCT_MAX) {
-    throw new Error(
-      `MANUAL_FALLBACK_PCT 必须在 ${MANUAL_FALLBACK_PCT_MIN}~${MANUAL_FALLBACK_PCT_MAX} 之间, 当前=${p}`
-    );
+function computeManualFallbackLevels(direction, entryPrice, isPending = false) {
+  let getLatestPlan;
+  try {
+    getLatestPlan = require('../regimeModule').getLatestPlan;
+  } catch (e) {}
+  const planInfo = getLatestPlan ? getLatestPlan() : null;
+  const atr = planInfo?.latest?.atr;
+
+  if (!atr || atr <= 0) {
+    throw new Error('当前无有效的 ATR 数据，无法计算动态止盈止损');
   }
-  if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
-    throw new Error(`invalid_entry_price: ${entryPrice}`);
-  }
+
   const sign = direction === 'long' ? 1 : -1;
-  const factor = p / 100;
-  // 几何级数: TP_n = entry * (1 + sign*p)^n  (long), 空头镜像
-  const tp1 = entryPrice * (1 + sign * factor);
-  const tp2 = tp1 * (1 + sign * factor);
-  const tp3 = tp2 * (1 + sign * factor);
-  const sl = entryPrice * (1 - sign * factor);
-  // 数值精度: 与 regimeModule 保持一致, 保留 2 位小数 (USDT 永续合约通常 0.1 价位即可)
+  // 如果是挂单 (isPending=true)，入场价回踩 0.5 ATR；否则直接用市价
+  const entry = isPending
+    ? (direction === 'long' ? entryPrice - 0.5 * atr : entryPrice + 0.5 * atr)
+    : entryPrice;
+
+  const risk = 1.5 * atr;
+  const tp1 = entry + sign * 1 * risk;
+  const tp2 = entry + sign * 2 * risk;
+  const tp3 = entry + sign * 3 * risk;
+  const sl = direction === 'long' ? entry - risk : entry + risk;
+
   const round2 = (n) => Math.round(n * 100) / 100;
   return {
+    entry: round2(entry),
     tp1: round2(tp1),
     tp2: round2(tp2),
     tp3: round2(tp3),
     sl: round2(sl),
-    pct: p,
   };
 }
 
 /**
- * 校验一组 entry/TP/SL 是否满足"每段距离都在 0.5%~1.2%"的硬性约束.
- *
- * 使用场景:
- *   - 手动追单 / 手动开仓回退方案下单前 (双保险, 即便 .env 被改动也兜得住)
- *   - 也可让前端校验自定义价位
+ * 校验一组 entry/TP/SL 是否合法 (方向与大小关系)
  *
  * @returns {{ok:boolean, reason?:string, segments?:Array<{name,pct}>}}
  */
@@ -139,25 +141,8 @@ function validateManualLevels(direction, entry, tp1, tp2, tp3, sl) {
     if (!(tp1 < entry && tp2 < tp1 && tp3 < tp2)) return { ok: false, reason: 'tp_wrong_order' };
     if (!(sl > entry)) return { ok: false, reason: 'sl_wrong_side' };
   }
-  // 每段距离百分比 (取绝对值, 相对前一档)
-  const seg = [
-    { name: 'entry-TP1', from: entry, to: tp1 },
-    { name: 'TP1-TP2', from: tp1, to: tp2 },
-    { name: 'TP2-TP3', from: tp2, to: tp3 },
-    { name: 'entry-SL', from: entry, to: sl },
-  ].map(s => ({ ...s, pct: Math.abs((s.to - s.from) / s.from) * 100 }));
-
-  const bad = seg.find(s =>
-    s.pct < MANUAL_FALLBACK_PCT_MIN - 1e-9 || s.pct > MANUAL_FALLBACK_PCT_MAX + 1e-9
-  );
-  if (bad) {
-    return {
-      ok: false,
-      reason: `segment_out_of_range:${bad.name}=${bad.pct.toFixed(3)}%`,
-      segments: seg,
-    };
-  }
-  return { ok: true, segments: seg };
+  
+  return { ok: true, segments: [] };
 }
 
 function requireAdmin(req, res, next) {
@@ -344,6 +329,8 @@ async function processSignal(sig, opts = {}) {
       if (source === 'regime_plan') return '✅ regime tradePlan (与 TG 推送一致)';
       if (source === 'template_fallback') return '⚠️ 模板回退 (regime plan 不可用)';
       if (source === 'manual_fallback') return `🛠 手动回退方案 (±${MANUAL_FALLBACK_PCT}% / ${MANUAL_FALLBACK_POSITION_PCT}%仓)`;
+      if (source === 'manual_fallback_atr') return `🛠 手动挂单 (ATR动态计算 / 动态仓位)`;
+      if (source === 'manual_follow_atr') return `⚡ 手动追单 (ATR动态计算 / 动态仓位)`;
       if (source === 'signal_explicit') {
         return callerSource === 'regime'
           ? '✅ regime 喊单锁定价位 (TG 推送时定格)'
@@ -880,7 +867,7 @@ router.post('/manual-open', requireAdmin, async (req, res) => {
     symbol: cfg.symbol,
   };
 
-  // 优先尝试 regime tradePlan; 不可用时用手动回退方案 (0.5%~1.2% / 10% 仓位)
+  // 优先尝试 regime tradePlan; 不可用时用动态 ATR 方案
   const planLv = planLevelsFromRegime(direction);
   if (!planLv) {
     const marketPrice = priceFeed.getStatus().lastPrice;
@@ -888,24 +875,31 @@ router.post('/manual-open', requireAdmin, async (req, res) => {
       return res.status(503).json({
         ok: false,
         error: 'price_feed_not_ready',
-        hint: 'WS 行情尚未就绪, 无法计算手动回退方案的 entry',
+        hint: 'WS 行情尚未就绪, 无法计算动态 ATR 方案的 entry',
       });
     }
     let lv;
     try {
-      lv = computeManualFallbackLevels(direction, marketPrice);
+      lv = computeManualFallbackLevels(direction, marketPrice, true);
     } catch (e) {
       return res.status(400).json({ ok: false, error: e.message });
     }
-    const validate = validateManualLevels(direction, marketPrice, lv.tp1, lv.tp2, lv.tp3, lv.sl);
+    const validate = validateManualLevels(direction, lv.entry, lv.tp1, lv.tp2, lv.tp3, lv.sl);
     if (!validate.ok) {
       return res.status(400).json({ ok: false, error: 'manual_levels_invalid:' + validate.reason, segments: validate.segments });
     }
-    sig.entry = marketPrice;
+    sig.entry = lv.entry;
     sig.stop_loss = lv.sl;
     sig.tp1 = lv.tp1; sig.tp2 = lv.tp2; sig.tp3 = lv.tp3;
-    sig.position_size = `${MANUAL_FALLBACK_POSITION_PCT}%`;
-    sig._priceSource = 'manual_fallback';
+    
+    // 使用最新 regime 的置信度仓位，若无则默认低置信度 3%
+    let getLatestPlan;
+    try { getLatestPlan = require('../regimeModule').getLatestPlan; } catch (e) {}
+    const planInfo = getLatestPlan ? getLatestPlan() : null;
+    const conf = planInfo?.tradePlan?.confidence || 'low';
+    const posPct = ({ high: 5, medium: 4, low: 3 })[conf];
+    sig.position_size = `${posPct}%`;
+    sig._priceSource = 'manual_fallback_atr';
   }
 
   const r = await processSignal(sig, { source: 'manual_ui' });
@@ -949,14 +943,21 @@ router.post('/manual-follow', requireAdmin, async (req, res) => {
 
   let lv;
   try {
-    lv = computeManualFallbackLevels(direction, marketPrice);
+    lv = computeManualFallbackLevels(direction, marketPrice, false);
   } catch (e) {
     return res.status(400).json({ ok: false, error: e.message });
   }
-  const validate = validateManualLevels(direction, marketPrice, lv.tp1, lv.tp2, lv.tp3, lv.sl);
+  const validate = validateManualLevels(direction, lv.entry, lv.tp1, lv.tp2, lv.tp3, lv.sl);
   if (!validate.ok) {
     return res.status(400).json({ ok: false, error: 'manual_levels_invalid:' + validate.reason, segments: validate.segments });
   }
+
+  // 获取动态仓位
+  let getLatestPlan;
+  try { getLatestPlan = require('../regimeModule').getLatestPlan; } catch (e) {}
+  const planInfo = getLatestPlan ? getLatestPlan() : null;
+  const conf = planInfo?.tradePlan?.confidence || 'low';
+  const posPct = ({ high: 5, medium: 4, low: 3 })[conf];
 
   const sig = {
     token: cfg.token,
@@ -965,11 +966,11 @@ router.post('/manual-follow', requireAdmin, async (req, res) => {
     // 强制 immediate (跳过 pending 限价分支), 立即按市价 forwardOpen
     market: true,
     immediate: true,
-    entry: marketPrice,
+    entry: lv.entry,
     stop_loss: lv.sl,
     tp1: lv.tp1, tp2: lv.tp2, tp3: lv.tp3,
-    position_size: `${MANUAL_FALLBACK_POSITION_PCT}%`,
-    _priceSource: 'manual_fallback',
+    position_size: `${posPct}%`,
+    _priceSource: 'manual_follow_atr',
   };
 
   // skipRegimePlan: 即便 regime 有 plan 也不查/不替换, 严格按手动追单语义
