@@ -164,7 +164,7 @@ async function sendTradeSignal(plan, regime, meta = {}) {
   const tps = Array.isArray(plan.takeProfits) ? plan.takeProfits : [];
   const tpLines = tps.map(t =>
     `🎯 <b>${escapeHTML(t.level)}</b>: <code>${escapeHTML(fmt(t.price))}</code>` +
-    `   (${escapeHTML(t.rr)} · +${escapeHTML(fmt(t.gainPct, 2))}% · 平${escapeHTML(t.closePct)}%)`
+    `   (${escapeHTML(t.r)} · +${escapeHTML(fmt(t.gainPct, 2))}% · 平${escapeHTML(t.closePct)}%)`
   );
 
   // 严格过滤：只保留交易参数

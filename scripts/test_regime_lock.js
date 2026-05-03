@@ -38,9 +38,9 @@ const PLAN_A = {
   suggestedPositionPct: 10,
   confidenceLabel: '低',
   takeProfits: [
-    { level: 'TP1', price: 78221.27, rr: '1R', gainPct: '0.40', closePct: 50, note: '' },
-    { level: 'TP2', price: 78529.01, rr: '2R', gainPct: '0.79', closePct: 30, note: '' },
-    { level: 'TP3', price: 78836.76, rr: '3R', gainPct: '1.19', closePct: 20, note: '' },
+    { level: 'TP1', price: 78221.27, r: '1R', gainPct: '0.40', closePct: 50, note: '' },
+    { level: 'TP2', price: 78529.01, r: '2R', gainPct: '0.79', closePct: 30, note: '' },
+    { level: 'TP3', price: 78836.76, r: '3R', gainPct: '1.19', closePct: 20, note: '' },
   ],
 };
 const PLAN_B = {
@@ -52,9 +52,9 @@ const PLAN_B = {
   suggestedPositionPct: 5,
   confidenceLabel: '中',
   takeProfits: [
-    { level: 'TP1', price: 79300.00, rr: '1R', gainPct: '0.40', closePct: 50, note: '' },
-    { level: 'TP2', price: 79600.00, rr: '2R', gainPct: '0.79', closePct: 30, note: '' },
-    { level: 'TP3', price: 79900.00, rr: '3R', gainPct: '1.19', closePct: 20, note: '' },
+    { level: 'TP1', price: 79300.00, r: '1R', gainPct: '0.40', closePct: 50, note: '' },
+    { level: 'TP2', price: 79600.00, r: '2R', gainPct: '0.79', closePct: 30, note: '' },
+    { level: 'TP3', price: 79900.00, r: '3R', gainPct: '1.19', closePct: 20, note: '' },
   ],
 };
 
