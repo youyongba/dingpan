@@ -578,11 +578,11 @@ function buildPlanRichLines(plan, regime, klines) {
   lines.push([{ text: '🚪 入场价：', bold: true }, { text: String(plan.entry), bold: true }, { text: '   (回踩 0.5×ATR)' }]);
   lines.push([{ text: '🛡️ 止损价：', bold: true }, { text: String(plan.stopLoss), bold: true }, { text: `   (-${plan.riskPct}%，1.5×ATR)` }]);
   lines.push([{ text: '🎯 TP1：', bold: true }, { text: String(plan.takeProfits[0].price), bold: true },
-    { text: `   (+${plan.takeProfits[0].gainPct}% · 1R · 平 ${plan.takeProfits[0].closePct}%)` }]);
+    { text: `   +${plan.takeProfits[0].gainPct}% · 1R · 平 ${plan.takeProfits[0].closePct}%` }]);
   lines.push([{ text: '🎯 TP2：', bold: true }, { text: String(plan.takeProfits[1].price), bold: true },
-    { text: `   (+${plan.takeProfits[1].gainPct}% · 2R · 平 ${plan.takeProfits[1].closePct}%)` }]);
+    { text: `   +${plan.takeProfits[1].gainPct}% · 2R · 平 ${plan.takeProfits[1].closePct}%` }]);
   lines.push([{ text: '🎯 TP3：', bold: true }, { text: String(plan.takeProfits[2].price), bold: true },
-    { text: `   (+${plan.takeProfits[2].gainPct}% · 3R · 平 ${plan.takeProfits[2].closePct}%)` }]);
+    { text: `   +${plan.takeProfits[2].gainPct}% · 3R · 平 ${plan.takeProfits[2].closePct}%` }]);
   lines.push([{ text: '💼 仓位建议：', bold: true }, { text: plan.suggestedPositionPct + '%', bold: true }]);
   lines.push([{ text: '🎖️ 置信度：', bold: true }, { text: plan.confidenceLabel, bold: true }]);
   lines.push([{ text: '━━━━━ 指标依据 ━━━━━' }]);
@@ -674,11 +674,11 @@ function buildSnapshotRichLines(regime, klines, indicators, tradePlan, fundingDa
     lines.push([{ text: '🛡️ 止损价：', bold: true }, { text: String(tradePlan.stopLoss), bold: true },
       { text: `   (-${tradePlan.riskPct}%)` }]);
     lines.push([{ text: '🎯 TP1：', bold: true }, { text: String(tradePlan.takeProfits[0].price), bold: true },
-      { text: `   +${tradePlan.takeProfits[0].gainPct}% · 平 ${tradePlan.takeProfits[0].closePct}%` }]);
+      { text: `   +${tradePlan.takeProfits[0].gainPct}% · 1R · 平 ${tradePlan.takeProfits[0].closePct}%` }]);
     lines.push([{ text: '🎯 TP2：', bold: true }, { text: String(tradePlan.takeProfits[1].price), bold: true },
-      { text: `   +${tradePlan.takeProfits[1].gainPct}% · 平 ${tradePlan.takeProfits[1].closePct}%` }]);
+      { text: `   +${tradePlan.takeProfits[1].gainPct}% · 2R · 平 ${tradePlan.takeProfits[1].closePct}%` }]);
     lines.push([{ text: '🎯 TP3：', bold: true }, { text: String(tradePlan.takeProfits[2].price), bold: true },
-      { text: `   +${tradePlan.takeProfits[2].gainPct}% · 平 ${tradePlan.takeProfits[2].closePct}%` }]);
+      { text: `   +${tradePlan.takeProfits[2].gainPct}% · 3R · 平 ${tradePlan.takeProfits[2].closePct}%` }]);
     lines.push([{ text: '💼 仓位建议：', bold: true }, { text: tradePlan.suggestedPositionPct + '%', bold: true }]);
     lines.push([{ text: '🎖️ 置信度：', bold: true }, { text: tradePlan.confidenceLabel, bold: true }]);
   } else {
@@ -801,7 +801,8 @@ function buildWebhookRegimeLines(prevRegime, cur, plan, lastClose) {
     lines.push([{ text: '━━━━━ 交易建议 ━━━━━' }]);
     lines.push([{ text: '动作：', bold: true }, { text: plan.action, bold: true },
       { text: `   仓位 ${plan.suggestedPositionPct}%` }]);
-    lines.push([{ text: `入场 ${plan.entry} / 止损 ${plan.stopLoss} / TP1 ${plan.takeProfits[0].price}` }]);
+    lines.push([{ text: `入场 ${plan.entry} / 止损 ${plan.stopLoss}` }]);
+    lines.push([{ text: `TP1 ${plan.takeProfits[0].price} (1R) / TP2 ${plan.takeProfits[1].price} (2R) / TP3 ${plan.takeProfits[2].price} (3R)` }]);
   } else if (plan) {
     lines.push([{ text: '🟡 观望：', bold: true }, { text: plan.reason || '—' }]);
   }
