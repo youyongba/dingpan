@@ -1306,8 +1306,8 @@
     if (!confirm(
       `确认一键追${dirZh} (立即市价)?\n` +
       `· 不参考 Regime tradePlan\n` +
-      `· entry = 当前市价, TP/SL 按 0.5%~1.2% 阶梯派生\n` +
-      `· 仓位 10%`
+      `· entry = 当前市价, TP/SL 按 ATR (1.5倍风险) 与 R倍 动态派生\n` +
+      `· 仓位使用当前市场 Regime 置信度 (3%~5%)`
     )) return;
     if (btn) btn.disabled = true;
     if (otherBtn) otherBtn.disabled = true;
@@ -1444,7 +1444,7 @@
         ? '已持有多头仓位, 同方向不可重复追单 (重置后可再追)'
         : longPending
           ? '多头已有 pending 挂单, 不可同方向追单 (会冲突, 取消挂单后可追)'
-          : '一键立即市价开多, 仓位 10%, TP/SL 按 0.5%~1.2% 阶梯派生 (不参考 Regime)';
+          : '一键立即市价开多, 仓位由 Regime 决定, TP/SL 按 ATR 动态派生 (不参考 Regime 入场价)';
     }
     if (followShortBtn) {
       followShortBtn.disabled = shortBusy;
@@ -1452,7 +1452,7 @@
         ? '已持有空头仓位, 同方向不可重复追单 (重置后可再追)'
         : shortPending
           ? '空头已有 pending 挂单, 不可同方向追单 (会冲突, 取消挂单后可追)'
-          : '一键立即市价开空, 仓位 10%, TP/SL 按 0.5%~1.2% 阶梯派生 (不参考 Regime)';
+          : '一键立即市价开空, 仓位由 Regime 决定, TP/SL 按 ATR 动态派生 (不参考 Regime 入场价)';
     }
 
     closeAllBtn.disabled = !anyActive;
@@ -1468,7 +1468,7 @@
     ].filter(Boolean);
     meta.textContent = tags.length
       ? `当前: ${tags.join(' · ')} · 重复同方向开仓/追单会被拒绝`
-      : '挂单优先 Regime, 否则 0.5%~1.2% / 10%仓; 追单一律 0.5%~1.2% / 10%仓 (不参考 Regime)';
+      : '挂单优先 Regime, 否则动态 ATR 回退; 追单一律动态 ATR (不回踩) (不参考 Regime 入场价)';
   }
 
   async function setAutoTrade(enabled) {
