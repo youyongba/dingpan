@@ -59,6 +59,9 @@
     display: flex; align-items: center; justify-content: space-between;
     flex-wrap: wrap; gap: 8px; margin-bottom: 10px;
   }
+  @media (max-width: 600px) {
+    .plan-head { flex-direction: column; align-items: flex-start; gap: 6px; }
+  }
   .plan-action {
     font-size: 16px; font-weight: 700;
   }
@@ -202,6 +205,10 @@
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
     padding: 10px 14px; margin-bottom: 12px; border-radius: 8px;
     border: 1px solid #30363d; background: #161b22;
+  }
+  @media (max-width: 600px) {
+    .trade-actions-bar { flex-direction: column; align-items: stretch; }
+    .manual-btn { width: 100%; margin-left: 0 !important; }
   }
   .trade-actions-bar .ta-label { font-size: 13px; color: #c9d1d9; font-weight: 600; }
   .manual-btn {
