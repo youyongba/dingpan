@@ -195,15 +195,21 @@
   /* 自动交易开关 */
   .auto-trade-bar {
     display: flex; align-items: center; gap: 14px;
-    padding: 10px 14px; margin-bottom: 12px; border-radius: 8px;
-    border: 1px solid #30363d; background: #161b22;
+    padding: 14px 18px; margin-bottom: 16px; border-radius: 12px;
+    border: 1px solid #30363d; background: linear-gradient(145deg, #161b22, #0e1116);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
   }
-  .auto-trade-bar .at-label { font-size: 13px; color: #c9d1d9; font-weight: 600; }
-  .auto-trade-bar .at-state { font-size: 12px; padding: 2px 8px; border-radius: 4px; }
-  .auto-trade-bar .at-state.on  { background: #3fb95033; color: #3fb950; }
-  .auto-trade-bar .at-state.off { background: #d2992233; color: #d29922; }
-  .auto-trade-bar .at-divider { color: #30363d; font-size: 14px; user-select: none; }
-  .auto-trade-bar .at-meta { font-size: 11px; color: #8b949e; margin-left: auto; }
+  @media (max-width: 600px) {
+    .auto-trade-bar { flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: space-between; padding: 16px; gap: 12px; }
+    .auto-trade-bar .at-meta { width: 100%; margin-left: 0; text-align: left; border-top: 1px solid #30363d; padding-top: 10px; }
+  }
+  .auto-trade-bar .at-label { font-size: 15px; color: #e6edf3; font-weight: 700; display: flex; align-items: center; gap: 6px; }
+  .auto-trade-bar .at-label::before { content: '⚙️'; font-size: 16px; }
+  .auto-trade-bar .at-state { font-size: 13px; padding: 4px 10px; border-radius: 6px; font-weight: 600; transition: all 0.3s; }
+  .auto-trade-bar .at-state.on  { background: rgba(63, 185, 80, 0.15); color: #3fb950; border: 1px solid rgba(63, 185, 80, 0.3); }
+  .auto-trade-bar .at-state.off { background: rgba(210, 153, 34, 0.15); color: #d29922; border: 1px solid rgba(210, 153, 34, 0.3); }
+  .auto-trade-bar .at-divider { color: #30363d; font-size: 14px; user-select: none; display: none; } /* 在新设计中隐藏分割线 */
+  .auto-trade-bar .at-meta { font-size: 12px; color: #8b949e; margin-left: auto; line-height: 1.4; }
 
   /* 手动交易操作栏 (开多 / 开空 / 全平) */
   .trade-actions-bar {
@@ -260,18 +266,24 @@
   .toast .toast-body  { color: #c9d1d9; font-size: 12px; line-height: 1.5; }
   @keyframes toast-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
   /* iOS 风格开关 */
-  .switch { position: relative; display: inline-block; width: 44px; height: 24px; }
+  .switch { position: relative; display: inline-block; width: 48px; height: 26px; }
+  @media (max-width: 600px) {
+    .switch { margin-left: auto; }
+  }
   .switch input { opacity: 0; width: 0; height: 0; }
   .switch .slider {
     position: absolute; cursor: pointer; inset: 0;
-    background: #30363d; border-radius: 24px; transition: .2s;
+    background: #21262d; border-radius: 26px; transition: .3s;
+    border: 1px solid #30363d;
   }
   .switch .slider::before {
-    content: ""; position: absolute; height: 18px; width: 18px;
-    left: 3px; top: 3px; background: white; border-radius: 50%; transition: .2s;
+    content: ""; position: absolute; height: 20px; width: 20px;
+    left: 2px; bottom: 2px; background: #8b949e; border-radius: 50%; transition: .3s;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
   }
-  .switch input:checked + .slider { background: #3fb950; }
-  .switch input:checked + .slider::before { transform: translateX(20px); }
+  .switch input:checked + .slider { background: #1f6feb; border-color: #1f6feb; }
+  .switch input:checked + .slider::before { transform: translateX(22px); background: #ffffff; }
+  .switch input:focus + .slider { box-shadow: 0 0 1px #1f6feb; }
   .switch input:disabled + .slider { opacity: 0.5; cursor: not-allowed; }
 
   .latest {
