@@ -3,7 +3,12 @@
 <head>
 <meta charset="UTF-8" />
 <title>BTC/USDT 宏观市场状态 (Regime) 监控</title>
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<meta name="theme-color" content="#0e1116" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Regime" />
+<link rel="manifest" href="/manifest.json" />
 <!-- Chart.js + 时间轴适配 -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -497,6 +502,12 @@
 </style>
 </head>
 <body>
+
+<!-- PWA 开机启动画面 -->
+<div id="pwa-splash" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:#0e1116;z-index:999999;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#58a6ff;transition:opacity 0.4s ease;">
+  <div style="font-size:48px;font-weight:800;margin-bottom:16px;letter-spacing:2px;">📈 Regime</div>
+  <div style="color:#8b949e;font-size:13px;">正在连接交易引擎...</div>
+</div>
 
 <h1>BTC/USDT 宏观市场状态监控</h1>
 <div class="meta">
@@ -2543,6 +2554,23 @@ async function copyLatestData() {
     if (!document.hidden) refreshList();
   }, POLL_MS);
 })();
+
+// PWA 启动画面与 Service Worker 注册
+window.addEventListener('load', () => {
+  setTimeout(() => {
+    const splash = document.getElementById('pwa-splash');
+    if (splash) {
+      splash.style.opacity = '0';
+      setTimeout(() => splash.remove(), 400);
+    }
+  }, 600); // 预留一点展示时间
+});
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(err => console.error('SW Setup failed:', err));
+  });
+}
 </script>
 
 </body>
