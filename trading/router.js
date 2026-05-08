@@ -892,12 +892,11 @@ router.post('/manual-open', requireAdmin, async (req, res) => {
     sig.stop_loss = lv.sl;
     sig.tp1 = lv.tp1; sig.tp2 = lv.tp2; sig.tp3 = lv.tp3;
     
-    // 使用最新 regime 的置信度仓位，若无则默认低置信度 3%
+    // 使用最新 regime 的置信度仓位
     let getLatestPlan;
     try { getLatestPlan = require('../regimeModule').getLatestPlan; } catch (e) {}
     const planInfo = getLatestPlan ? getLatestPlan() : null;
-    const conf = planInfo?.tradePlan?.confidence || 'low';
-    const posPct = ({ high: 5, medium: 4, low: 3 })[conf];
+    const posPct = planInfo?.tradePlan?.suggestedPositionPct || 3;
     sig.position_size = `${posPct}%`;
     sig._priceSource = 'manual_fallback_atr';
   }
@@ -956,8 +955,7 @@ router.post('/manual-follow', requireAdmin, async (req, res) => {
   let getLatestPlan;
   try { getLatestPlan = require('../regimeModule').getLatestPlan; } catch (e) {}
   const planInfo = getLatestPlan ? getLatestPlan() : null;
-  const conf = planInfo?.tradePlan?.confidence || 'low';
-  const posPct = req.body?.position_size ? parseFloat(req.body.position_size) : ({ high: 5, medium: 4, low: 3 })[conf];
+  const posPct = req.body?.position_size ? parseFloat(req.body.position_size) : (planInfo?.tradePlan?.suggestedPositionPct || 3);
 
   const sig = {
     token: cfg.token,
