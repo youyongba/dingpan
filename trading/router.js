@@ -896,7 +896,7 @@ router.post('/manual-open', requireAdmin, async (req, res) => {
     let getLatestPlan;
     try { getLatestPlan = require('../regimeModule').getLatestPlan; } catch (e) {}
     const planInfo = getLatestPlan ? getLatestPlan() : null;
-    const posPct = planInfo?.tradePlan?.suggestedPositionPct || 3;
+    const posPct = planInfo?.tradePlan?.suggestedPositionPct || 50;
     sig.position_size = `${posPct}%`;
     sig._priceSource = 'manual_fallback_atr';
   }
@@ -955,7 +955,7 @@ router.post('/manual-follow', requireAdmin, async (req, res) => {
   let getLatestPlan;
   try { getLatestPlan = require('../regimeModule').getLatestPlan; } catch (e) {}
   const planInfo = getLatestPlan ? getLatestPlan() : null;
-  const posPct = req.body?.position_size ? parseFloat(req.body.position_size) : (planInfo?.tradePlan?.suggestedPositionPct || 3);
+  const posPct = req.body?.position_size ? parseFloat(req.body.position_size) : (planInfo?.tradePlan?.suggestedPositionPct || 50);
 
   const sig = {
     token: cfg.token,
