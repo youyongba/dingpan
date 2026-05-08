@@ -411,7 +411,7 @@ function buildTradePlan(ind, regime, klines) {
   const tp3 = entry + dirSign * 3 * risk;
 
   // 仓位建议
-  const positionPct = ({ high: 5, medium: 4, low: 3 })[confidence];
+  const positionPct = ({ high: 50, medium: 50, low: 50 })[confidence];
 
   // 数值精度
   const round2 = (n) => Math.round(n * 100) / 100;
