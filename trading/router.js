@@ -952,12 +952,12 @@ router.post('/manual-follow', requireAdmin, async (req, res) => {
     return res.status(400).json({ ok: false, error: 'manual_levels_invalid:' + validate.reason, segments: validate.segments });
   }
 
-  // 获取动态仓位
+  // 获取动态仓位，或者使用请求中指定的仓位
   let getLatestPlan;
   try { getLatestPlan = require('../regimeModule').getLatestPlan; } catch (e) {}
   const planInfo = getLatestPlan ? getLatestPlan() : null;
   const conf = planInfo?.tradePlan?.confidence || 'low';
-  const posPct = ({ high: 5, medium: 4, low: 3 })[conf];
+  const posPct = req.body?.position_size ? parseFloat(req.body.position_size) : ({ high: 5, medium: 4, low: 3 })[conf];
 
   const sig = {
     token: cfg.token,
