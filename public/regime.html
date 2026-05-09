@@ -1254,8 +1254,21 @@
     }
   }
 
-  function renderPositions(positions, lastPrice) {
+  // 渲染仓位卡.
+  //
+  // ⚠️ 编辑模式与重画的 race:
+  //   SSE 价格流 (200ms/帧) 与 /status 轮询 (5s) 都会调用本函数, 整段 body.innerHTML 重画.
+  //   如果用户正在「✏️ 编辑止盈止损」面板里输入, 重画会把 input 值覆盖回服务端值, 完全无法编辑.
+  //
+  //   解决: 自动周期重画时, 跳过 posEditOpen[dir]=true 的方向 (整张卡冻结);
+  //         用户主动 togglePosEdit / resetPosEditInputs 时传 opts.force=true 强制重画.
+  //         编辑面板顶部显示 "⏸ 编辑模式 - 该方向已暂停实时刷新" 给用户预期.
+  //         保存成功后 fetchAutoTradeStatus 会重新拉一次, 此时 posEditOpen 已被 saveAdjustLevels 复位.
+  function renderPositions(positions, lastPrice, opts = {}) {
+    const force = !!opts.force;
     ['long', 'short'].forEach(dir => {
+      // 编辑面板展开 + 非强制 → 跳过该方向重画, 保护用户输入框
+      if (!force && posEditOpen[dir]) return;
       const p = positions[dir] || {};
       const card = document.querySelector(`.pos-card.${dir}`);
       const badge = document.getElementById(`pos${cap(dir)}Badge`);
@@ -1422,7 +1435,8 @@
     if (lastPositionsSnapshot) {
       const lastPriceForCard = priceStream.alive && priceStream.lastPrice != null
         ? priceStream.lastPrice : null;
-      renderPositions(lastPositionsSnapshot, lastPriceForCard);
+      // force=true: 翻转后立即重画该方向, 否则展开瞬间会被自动周期跳过 → 编辑面板不出现
+      renderPositions(lastPositionsSnapshot, lastPriceForCard, { force: true });
     }
   };
 
@@ -1446,6 +1460,9 @@
     };
     return `
       <div class="pos-edit-panel" id="posEditPanel_${cap1}">
+        <div style="font-size:11px;color:#d29922;margin-bottom:4px;font-weight:600;">
+          ⏸ 编辑模式 — 该方向卡片已暂停实时刷新, 收起编辑后自动恢复
+        </div>
         <div style="font-size:11px;color:#8b949e;margin-bottom:6px;">
           ${target === 'active' ? '调整持仓 TP/SL — 已触发级别灰显, 改动会立即生效, 下一 tick 按新价位 evaluate.'
                                 : '调整挂单价位 — entry/TP/SL 都可改, 改完 riskEngine 立即按新 entry 判定 fill.'}
@@ -1476,7 +1493,8 @@
     if (lastPositionsSnapshot) {
       const lastPriceForCard = priceStream.alive && priceStream.lastPrice != null
         ? priceStream.lastPrice : null;
-      renderPositions(lastPositionsSnapshot, lastPriceForCard);
+      // force=true: 编辑面板展开期间也要强制重画一次 input 值
+      renderPositions(lastPositionsSnapshot, lastPriceForCard, { force: true });
     }
   };
 
