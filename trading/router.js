@@ -976,6 +976,177 @@ router.post('/manual-follow', requireAdmin, async (req, res) => {
   res.status(r.status).json(r.body);
 });
 
+// ============ POST /adjust-levels: 手动调整 TP1/TP2/TP3/SL ============
+//
+// body: { direction: 'long'|'short', tp1?:number, tp2?:number, tp3?:number, sl?:number, entry?:number }
+//
+// 适用场景:
+//   - active 持仓: 改 TP/SL (entry 字段忽略). 已触发的 TP level 自动跳过 (skipped 字段返回)
+//   - pending 挂单: 改 entry/TP/SL (任意字段)
+//
+// 自动按方向校验合法性 (tp 升降序 + sl 与 entry 关系), 不通过则 400 拒绝并保留旧值.
+// 改完同步推送一条 fireMonitorOpen 把新点位刷给监控通道, 与 riskEngine 共享 state,
+// 下一 tick 立即按新价位 evaluate.
+router.post('/adjust-levels', requireAdmin, (req, res) => {
+  const direction = req.body?.direction;
+  if (!['long', 'short'].includes(direction)) {
+    return res.status(400).json({ ok: false, error: 'direction must be long|short' });
+  }
+  const before = state.getPosition(direction);
+  if (!before) return res.status(404).json({ ok: false, error: 'no_position' });
+
+  // 解析 incoming levels (只取传了的字段, undefined 跳过)
+  const incoming = {};
+  ['tp1', 'tp2', 'tp3', 'sl', 'entry'].forEach((k) => {
+    if (req.body && req.body[k] != null) incoming[k] = Number(req.body[k]);
+  });
+  if (Object.keys(incoming).length === 0) {
+    return res.status(400).json({ ok: false, error: 'no_levels_provided' });
+  }
+
+  // ---------- pending 分支 ----------
+  if (before.pending && before.pendingPlan) {
+    const plan = before.pendingPlan;
+    const merged = {
+      entry: incoming.entry != null ? incoming.entry : Number(plan.entry),
+      tp1:   incoming.tp1   != null ? incoming.tp1   : Number(plan.tp1),
+      tp2:   incoming.tp2   != null ? incoming.tp2   : Number(plan.tp2),
+      tp3:   incoming.tp3   != null ? incoming.tp3   : Number(plan.tp3),
+      sl:    incoming.sl    != null ? incoming.sl    : Number(plan.sl),
+    };
+    const v = validateManualLevels(direction, merged.entry, merged.tp1, merged.tp2, merged.tp3, merged.sl);
+    if (!v.ok) {
+      return res.status(400).json({ ok: false, error: 'invalid_levels:' + v.reason, target: 'pending', merged });
+    }
+    const r = state.updatePendingLevels(direction, incoming);
+    if (!r.ok) return res.status(409).json({ ok: false, error: r.error });
+
+    exec.notify({
+      type: 'pending_armed',
+      title: `✏️ ${direction.toUpperCase()} 挂单价位已手动调整`,
+      lines: [
+        `symbol: ${config.get().symbol}`,
+        `方向: ${direction} (pending)`,
+        `entry: ${r.prev.entry} → ${r.next.entry}`,
+        `SL  : ${r.prev.sl} → ${r.next.sl}`,
+        `TP1 : ${r.prev.tp1} → ${r.next.tp1}`,
+        `TP2 : ${r.prev.tp2} → ${r.next.tp2}`,
+        `TP3 : ${r.prev.tp3} → ${r.next.tp3}`,
+        `操作来源: ${req.body?.source || 'manual_ui'}`,
+      ],
+    });
+    exec.fireMonitorOpen({
+      direction,
+      entry: r.next.entry,
+      tp1: r.next.tp1, tp2: r.next.tp2, tp3: r.next.tp3,
+      sl: r.next.sl,
+      comment: `挂单点位调整 · manual_ui · entry=${r.next.entry}`,
+    });
+    return res.json({ ok: true, target: 'pending', prev: r.prev, next: r.next, skipped: r.skipped });
+  }
+
+  // ---------- active 分支 ----------
+  if (!before.active) return res.status(409).json({ ok: false, error: 'no_active_or_pending_position' });
+
+  // 校验时使用的 entry = 持仓 entryPrice (不可改)
+  // tp/sl 用 incoming 优先, 缺省回退现值
+  const entry = Number(before.entryPrice);
+  const merged = {
+    tp1: incoming.tp1 != null ? incoming.tp1 : Number(before.tp1),
+    tp2: incoming.tp2 != null ? incoming.tp2 : Number(before.tp2),
+    tp3: incoming.tp3 != null ? incoming.tp3 : Number(before.tp3),
+    sl:  incoming.sl  != null ? incoming.sl  : Number(before.currentStopLoss),
+  };
+  const v = validateManualLevels(direction, entry, merged.tp1, merged.tp2, merged.tp3, merged.sl);
+  if (!v.ok) {
+    return res.status(400).json({ ok: false, error: 'invalid_levels:' + v.reason, target: 'active', entry, merged });
+  }
+  // active 仓位不允许改 entry (改了就破坏成交价审计) — 显式提示
+  if (incoming.entry != null && Number(incoming.entry) !== entry) {
+    return res.status(400).json({ ok: false, error: 'cannot_change_entry_on_active', entry });
+  }
+
+  const r = state.updateActiveLevels(direction, {
+    tp1: incoming.tp1, tp2: incoming.tp2, tp3: incoming.tp3, sl: incoming.sl,
+  });
+  if (!r.ok) return res.status(409).json({ ok: false, error: r.error });
+
+  exec.notify({
+    type: 'open_ok',
+    title: `✏️ ${direction.toUpperCase()} 持仓 TP/SL 已手动调整`,
+    lines: [
+      `symbol: ${config.get().symbol}`,
+      `方向: ${direction} (active)`,
+      `入场价: ${entry}`,
+      `SL : ${r.prev.currentStopLoss} → ${r.next.currentStopLoss}`,
+      `TP1: ${r.prev.tp1} → ${r.next.tp1}` + (before.tpHit?.tp1 ? ' (已触发, 跳过)' : ''),
+      `TP2: ${r.prev.tp2} → ${r.next.tp2}` + (before.tpHit?.tp2 ? ' (已触发, 跳过)' : ''),
+      `TP3: ${r.prev.tp3} → ${r.next.tp3}` + (before.tpHit?.tp3 ? ' (已触发, 跳过)' : ''),
+      r.skipped.length ? `跳过项: ${r.skipped.join(', ')}` : null,
+      `操作来源: ${req.body?.source || 'manual_ui'}`,
+    ].filter(Boolean),
+  });
+  exec.fireMonitorOpen({
+    direction,
+    entry,
+    tp1: r.next.tp1, tp2: r.next.tp2, tp3: r.next.tp3,
+    sl: r.next.currentStopLoss,
+    comment: `持仓点位调整 · manual_ui · entry=${entry}`,
+  });
+  return res.json({
+    ok: true, target: 'active', entry,
+    prev: { tp1: r.prev.tp1, tp2: r.prev.tp2, tp3: r.prev.tp3, sl: r.prev.currentStopLoss },
+    next: { tp1: r.next.tp1, tp2: r.next.tp2, tp3: r.next.tp3, sl: r.next.currentStopLoss },
+    skipped: r.skipped,
+  });
+});
+
+// ============ POST /manual-fire: 一键触发 TP1/TP2/TP3/SL ============
+//
+// body: { direction: 'long'|'short', level: 'tp_1'|'tp_2'|'tp_3'|'sl', set_protection_sl?:boolean }
+//
+// 设计:
+//   - 完全复用 processSignal 的 take_profit/stop_loss 分支, 与外部 webhook / riskEngine
+//     共享同一把幂等锁 (state.markTpHit / state.closeAndUnlock), 不会重复 fire
+//   - level=tp_1 默认按当前 cfg.tp1Protection 决定是否同时设置保本止损; 也支持 body.set_protection_sl 强制覆盖
+//   - 仅对 active 持仓有效; pending 不可触发 (没成交, 触发无意义), 直接 409
+//   - 强制 cfg.token 校验通过 (与 webhook 一致)
+router.post('/manual-fire', requireAdmin, async (req, res) => {
+  const direction = req.body?.direction;
+  const level = req.body?.level;
+  if (!['long', 'short'].includes(direction)) {
+    return res.status(400).json({ ok: false, error: 'direction must be long|short' });
+  }
+  if (!['tp_1', 'tp_2', 'tp_3', 'sl'].includes(level)) {
+    return res.status(400).json({ ok: false, error: "level must be tp_1|tp_2|tp_3|sl" });
+  }
+  const cfg = config.get();
+  if (!cfg.enabled) {
+    return res.status(409).json({ ok: false, error: 'auto_trade_disabled', hint: '请先开启自动下单总开关' });
+  }
+  const p = state.getPosition(direction);
+  if (!p || !p.active) {
+    return res.status(409).json({ ok: false, error: 'no_active_position', direction });
+  }
+
+  let sig;
+  if (level === 'sl') {
+    sig = { token: cfg.token, action: 'stop_loss', symbol: cfg.symbol, direction, trigger: 'manual_fire' };
+  } else {
+    // TP1 默认跟随 cfg.tp1Protection; 用户可显式传 set_protection_sl 覆盖
+    const setProt = req.body?.set_protection_sl != null
+      ? !!req.body.set_protection_sl
+      : (level === 'tp_1' && cfg.tp1Protection !== false);
+    sig = {
+      token: cfg.token, action: 'take_profit', symbol: cfg.symbol,
+      direction, trigger: level, set_protection_sl: setProt,
+    };
+  }
+
+  const r = await processSignal(sig, { source: 'manual_fire' });
+  res.status(r.status).json({ ...r.body, level, direction });
+});
+
 // ============ POST /close-all-positions: 一键全平 ============
 //
 // 遍历 long/short 两个 slot, 对 active=true 的方向:

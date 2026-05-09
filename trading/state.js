@@ -266,6 +266,96 @@ function manualReset(direction) {
   return prev;
 }
 
+/**
+ * 修改 active 持仓的 TP1/TP2/TP3/SL 价位 (用户手动调整止盈止损).
+ *
+ * 设计要点:
+ *   - 只允许修改未触发的 TP (tpHit.tpN=false) — 已触发的 level 直接忽略, 防止改动
+ *     已成交的级别造成审计混乱
+ *   - sl 总是同步更新 currentStopLoss; initialStopLoss 不变 (保留审计原值)
+ *   - 即便 protectionArmed=true (TP1 已触发, SL 已上移到 entry), 也允许用户覆盖,
+ *     用户改完之后 protectionArmed 状态保持不变 (用户知道在做什么)
+ *   - 与 riskEngine 共享同一份 state, 改完的下一个 tick 立即按新价位 evaluate
+ *
+ * @param {'long'|'short'} direction
+ * @param {{tp1?:number, tp2?:number, tp3?:number, sl?:number}} levels
+ * @returns {{ok:true, prev:object, next:object} | {ok:false, error:string}}
+ */
+function updateActiveLevels(direction, levels) {
+  if (!state) load();
+  const p = state[direction];
+  if (!p || !p.active) return { ok: false, error: 'no_active_position' };
+
+  const next = { ...p };
+  const prevSnapshot = { tp1: p.tp1, tp2: p.tp2, tp3: p.tp3,
+    initialStopLoss: p.initialStopLoss, currentStopLoss: p.currentStopLoss };
+  const tpHit = p.tpHit || { tp1: false, tp2: false, tp3: false };
+  const skipped = [];
+
+  ['tp1', 'tp2', 'tp3'].forEach((k) => {
+    if (levels[k] == null) return;
+    const v = Number(levels[k]);
+    if (!Number.isFinite(v) || v <= 0) {
+      skipped.push(`${k}_invalid`);
+      return;
+    }
+    if (tpHit[k]) {
+      skipped.push(`${k}_already_hit`);
+      return;
+    }
+    next[k] = v;
+  });
+
+  if (levels.sl != null) {
+    const v = Number(levels.sl);
+    if (Number.isFinite(v) && v > 0) {
+      next.currentStopLoss = v;
+    } else {
+      skipped.push('sl_invalid');
+    }
+  }
+
+  state[direction] = next;
+  save();
+  return { ok: true, prev: prevSnapshot, next, skipped };
+}
+
+/**
+ * 修改 pending 挂单的 entry/TP1/TP2/TP3/SL 价位.
+ *
+ * 设计要点:
+ *   - pending 还没成交, 全部字段都允许改 (entry / sl / tp1-3)
+ *   - 改完后 riskEngine 下一 tick 会按新 entry 重新判断是否触发 fill
+ *   - leverage / positionSize 不允许通过此接口改 (走 cancel + 重新 manual-open)
+ *
+ * @param {'long'|'short'} direction
+ * @param {{entry?:number, tp1?:number, tp2?:number, tp3?:number, sl?:number}} levels
+ * @returns {{ok:true, prev:object, next:object} | {ok:false, error:string}}
+ */
+function updatePendingLevels(direction, levels) {
+  if (!state) load();
+  const p = state[direction];
+  if (!p || !p.pending || !p.pendingPlan) return { ok: false, error: 'no_pending' };
+
+  const plan = { ...p.pendingPlan };
+  const prev = { entry: plan.entry, tp1: plan.tp1, tp2: plan.tp2, tp3: plan.tp3, sl: plan.sl };
+  const skipped = [];
+
+  ['entry', 'tp1', 'tp2', 'tp3', 'sl'].forEach((k) => {
+    if (levels[k] == null) return;
+    const v = Number(levels[k]);
+    if (!Number.isFinite(v) || v <= 0) {
+      skipped.push(`${k}_invalid`);
+      return;
+    }
+    plan[k] = v;
+  });
+
+  state[direction] = { ...p, pendingPlan: plan };
+  save();
+  return { ok: true, prev, next: plan, skipped };
+}
+
 load();
 
 module.exports = {
@@ -274,4 +364,6 @@ module.exports = {
   markTpHit, closeAndUnlock, manualReset,
   // pending 限价待触发
   armPending, cancelPending, markPendingFilled,
+  // 手动调整止盈止损
+  updateActiveLevels, updatePendingLevels,
 };

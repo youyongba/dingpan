@@ -148,6 +148,80 @@
   }
   .cancel-pending-btn:hover { background: #1f6feb22; }
   .cancel-pending-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* ============ 持仓内嵌: 编辑止盈止损 + 一键触发 ============ */
+  .pos-edit-toggle {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: #30363d; color: #c9d1d9; border: 1px solid #30363d;
+    padding: 3px 10px; font-size: 11px; border-radius: 5px; cursor: pointer;
+    transition: .15s; margin-left: 6px;
+  }
+  .pos-edit-toggle:hover { background: #58a6ff22; color: #58a6ff; border-color: #58a6ff55; }
+  .pos-edit-toggle.active { background: #58a6ff22; color: #58a6ff; border-color: #58a6ff; }
+  .pos-edit-panel {
+    margin-top: 8px; padding: 10px; border-radius: 6px;
+    background: #0e1116; border: 1px dashed #30363d;
+  }
+  .pos-edit-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+    gap: 6px; margin-bottom: 8px;
+  }
+  .pos-edit-grid label {
+    display: flex; flex-direction: column; gap: 2px;
+    font-size: 10px; color: #8b949e;
+  }
+  .pos-edit-grid label.entry  { color: #58a6ff; }
+  .pos-edit-grid label.tp1, .pos-edit-grid label.tp2, .pos-edit-grid label.tp3 { color: #3fb950; }
+  .pos-edit-grid label.sl     { color: #ff7b72; }
+  .pos-edit-grid input {
+    background: #161b22; border: 1px solid #30363d; color: #e6edf3;
+    border-radius: 4px; padding: 4px 6px; font-size: 12px;
+    font-family: 'SF Mono', Menlo, monospace; width: 100%;
+  }
+  .pos-edit-grid input:focus { outline: none; border-color: #58a6ff; }
+  .pos-edit-grid input:disabled { opacity: 0.5; cursor: not-allowed; }
+  .pos-edit-grid input.hit { background: #161b2266; color: #6e7681; border-color: #21262d; }
+  .pos-edit-grid label .hit-tag {
+    font-size: 9px; color: #d29922; font-weight: 700; text-transform: uppercase;
+  }
+  .pos-edit-actions {
+    display: flex; gap: 6px; flex-wrap: wrap;
+  }
+  .pos-edit-btn {
+    flex: 1; min-width: 80px;
+    border: 1px solid #30363d; background: #21262d; color: #e6edf3;
+    padding: 5px 10px; font-size: 11px; font-weight: 600;
+    border-radius: 4px; cursor: pointer; transition: .15s;
+  }
+  .pos-edit-btn:hover:not(:disabled) { transform: translateY(-1px); }
+  .pos-edit-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .pos-edit-btn.save   { border-color: #58a6ff66; color: #58a6ff; }
+  .pos-edit-btn.save:hover:not(:disabled)   { background: #58a6ff22; border-color: #58a6ff; }
+  .pos-edit-btn.reset  { border-color: #d2992266; color: #d29922; flex: 0 0 auto; min-width: 64px; }
+  .pos-edit-btn.reset:hover:not(:disabled)  { background: #d2992222; border-color: #d29922; }
+
+  /* 一键触发按钮组 (TP1/TP2/TP3/SL) */
+  .pos-fire-bar {
+    display: flex; gap: 4px; flex-wrap: wrap; margin-top: 8px;
+    padding: 6px; border-radius: 6px;
+    background: #0e1116; border: 1px solid #30363d;
+  }
+  .pos-fire-bar .fire-label {
+    font-size: 10px; color: #8b949e; align-self: center; padding: 0 4px;
+  }
+  .pos-fire-btn {
+    flex: 1; min-width: 56px;
+    border: 1px solid #30363d; background: #161b22; color: #e6edf3;
+    padding: 4px 6px; font-size: 11px; font-weight: 600;
+    border-radius: 4px; cursor: pointer; transition: .15s;
+  }
+  .pos-fire-btn:hover:not(:disabled) { transform: translateY(-1px); }
+  .pos-fire-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .pos-fire-btn.tp { border-color: #3fb95066; color: #3fb950; }
+  .pos-fire-btn.tp:hover:not(:disabled) { background: #3fb95022; border-color: #3fb950; }
+  .pos-fire-btn.tp.hit { border-color: #21262d; color: #6e7681; background: #161b22; }
+  .pos-fire-btn.sl { border-color: #ff7b7266; color: #ff7b72; }
+  .pos-fire-btn.sl:hover:not(:disabled) { background: #ff7b7222; border-color: #ff7b72; }
   .pos-body { font-size: 12px; color: #c9d1d9; line-height: 1.7; }
   .pos-body .row { display: flex; justify-content: space-between; }
   .pos-body .row .k { color: #8b949e; }
@@ -1216,6 +1290,7 @@
         if (card) card.classList.add('pending-armed');
         badge.className = 'pos-badge pending';
         badge.textContent = '⏳ 待触发';
+        const editOpen = !!posEditOpen[dir];
         body.innerHTML = `
           <div class="pending-banner">
             <div class="pb-title">📋 限价挂单已锁定 · 等待价格${isLong ? '回踩' : '反弹'}至 entry</div>
@@ -1233,8 +1308,10 @@
             <div class="tp-cell">TP3 20%<br><span style="font-family:'SF Mono',Menlo,monospace;">${fmt(plan.tp3, 2)}</span></div>
           </div>
           <div style="margin-top:8px;text-align:right;">
+            <button class="pos-edit-toggle ${editOpen ? 'active' : ''}" onclick="togglePosEdit('${dir}')">${editOpen ? '▴ 收起编辑' : '✏️ 编辑挂单价位'}</button>
             <button class="cancel-pending-btn" onclick="cancelPending('${dir}')">❎ 取消挂单</button>
           </div>
+          ${editOpen ? renderPosEditPanel(dir, 'pending', { entry: plan.entry, tp1: plan.tp1, tp2: plan.tp2, tp3: plan.tp3, sl: plan.sl }) : ''}
         `;
         btn.disabled = false;
         btn.title = '当前为 pending 挂单, 重置会清空挂单';
@@ -1302,6 +1379,16 @@
         const color = slip >= 0 ? '#ff7b72' : '#3fb950'; // 正滑点(更差)红, 负滑点(更好)绿
         slipHtml = `   <span style="color:${color};font-size:11px;">滑点 ${sign}${slip.toFixed(3)}%</span>`;
       }
+      const editOpen = !!posEditOpen[dir];
+      const tpHit = p.tpHit || {};
+      const fireBar = `
+        <div class="pos-fire-bar" title="一键触发对应 TP / SL · 与 webhook/riskEngine 共享同一把幂等锁, 不会重复 fire">
+          <span class="fire-label">⚡ 一键触发:</span>
+          <button class="pos-fire-btn tp ${tpHit.tp1 ? 'hit' : ''}" ${tpHit.tp1 ? 'disabled' : ''} onclick="manualFire('${dir}','tp_1')" title="${tpHit.tp1 ? 'TP1 已触发' : '立即触发 TP1 平仓 50% (含保本止损按 cfg)'}">${tpHit.tp1 ? 'TP1 ✓' : 'TP1'}</button>
+          <button class="pos-fire-btn tp ${tpHit.tp2 ? 'hit' : ''}" ${tpHit.tp2 ? 'disabled' : ''} onclick="manualFire('${dir}','tp_2')" title="${tpHit.tp2 ? 'TP2 已触发' : '立即触发 TP2 平仓 30%'}">${tpHit.tp2 ? 'TP2 ✓' : 'TP2'}</button>
+          <button class="pos-fire-btn tp ${tpHit.tp3 ? 'hit' : ''}" ${tpHit.tp3 ? 'disabled' : ''} onclick="manualFire('${dir}','tp_3')" title="${tpHit.tp3 ? 'TP3 已触发' : '立即触发 TP3 平仓 20% + 自动解锁'}">${tpHit.tp3 ? 'TP3 ✓' : 'TP3'}</button>
+          <button class="pos-fire-btn sl" onclick="manualFire('${dir}','sl')" title="立即触发 SL 100% 全平 + 自动解锁">SL</button>
+        </div>`;
       body.innerHTML = `
         <div class="row"><span class="k">价位来源</span><span class="v">${srcLabel}</span></div>
         <div class="row"><span class="k">市价入场</span><span class="v">${fmt(p.entryPrice, 2)}${slipHtml}</span></div>
@@ -1314,11 +1401,180 @@
           ${tpCell('tp2', 'TP2 30%', p.tp2)}
           ${tpCell('tp3', 'TP3 20%', p.tp3)}
         </div>
+        ${fireBar}
+        <div style="margin-top:8px;text-align:right;">
+          <button class="pos-edit-toggle ${editOpen ? 'active' : ''}" onclick="togglePosEdit('${dir}')">${editOpen ? '▴ 收起编辑' : '✏️ 编辑止盈止损'}</button>
+        </div>
+        ${editOpen ? renderPosEditPanel(dir, 'active', { entry: p.entryPrice, tp1: p.tp1, tp2: p.tp2, tp3: p.tp3, sl: p.currentStopLoss, tpHit }) : ''}
       `;
       btn.disabled = false;
       btn.title = '取消该方向所有未触发的 TP/SL 并解锁';
     });
   }
+
+  // ============ 持仓内嵌编辑面板 + 一键触发 ============
+
+  // 各方向编辑面板的展开状态; renderPositions 每帧重画都读这个 map
+  const posEditOpen = { long: false, short: false };
+
+  window.togglePosEdit = function togglePosEdit(direction) {
+    posEditOpen[direction] = !posEditOpen[direction];
+    if (lastPositionsSnapshot) {
+      const lastPriceForCard = priceStream.alive && priceStream.lastPrice != null
+        ? priceStream.lastPrice : null;
+      renderPositions(lastPositionsSnapshot, lastPriceForCard);
+    }
+  };
+
+  /**
+   * 渲染编辑面板 (active 持仓 / pending 挂单通用).
+   * @param {'long'|'short'} dir
+   * @param {'active'|'pending'} target
+   * @param {{entry, tp1, tp2, tp3, sl, tpHit?}} levels
+   */
+  function renderPosEditPanel(dir, target, levels) {
+    const cap1 = cap(dir);
+    const tpHit = levels.tpHit || {};
+    const entryReadOnly = target === 'active';   // active 仓位 entry 不可改 (审计要求)
+    const fmt2 = (v) => (v == null || !Number.isFinite(Number(v))) ? '' : Number(v).toFixed(2);
+    const tpInput = (k, label) => {
+      const hit = tpHit[k];
+      return `<label class="${k}">
+        <span>${label}${hit ? ' <span class="hit-tag">已触发</span>' : ''}</span>
+        <input type="number" step="0.01" min="0" id="posEdit_${cap1}_${k}" value="${fmt2(levels[k])}" ${hit ? 'disabled class="hit"' : ''} />
+      </label>`;
+    };
+    return `
+      <div class="pos-edit-panel" id="posEditPanel_${cap1}">
+        <div style="font-size:11px;color:#8b949e;margin-bottom:6px;">
+          ${target === 'active' ? '调整持仓 TP/SL — 已触发级别灰显, 改动会立即生效, 下一 tick 按新价位 evaluate.'
+                                : '调整挂单价位 — entry/TP/SL 都可改, 改完 riskEngine 立即按新 entry 判定 fill.'}
+        </div>
+        <div class="pos-edit-grid">
+          <label class="entry">
+            <span>入场价 ${entryReadOnly ? '(不可改)' : '(可改)'}</span>
+            <input type="number" step="0.01" min="0" id="posEdit_${cap1}_entry" value="${fmt2(levels.entry)}" ${entryReadOnly ? 'disabled class="hit"' : ''} />
+          </label>
+          ${tpInput('tp1', '止盈 1 (50%)')}
+          ${tpInput('tp2', '止盈 2 (30%)')}
+          ${tpInput('tp3', '止盈 3 (20%)')}
+          <label class="sl">
+            <span>止损 (100%)</span>
+            <input type="number" step="0.01" min="0" id="posEdit_${cap1}_sl" value="${fmt2(levels.sl)}" />
+          </label>
+        </div>
+        <div class="pos-edit-actions">
+          <button class="pos-edit-btn save" onclick="saveAdjustLevels('${dir}','${target}')">💾 保存修改</button>
+          <button class="pos-edit-btn reset" onclick="resetPosEditInputs('${dir}')">↺ 重置输入</button>
+        </div>
+      </div>
+    `;
+  }
+
+  // 把当前 input 值清空回填快照 — 用户改错后能一键回到当前真实状态
+  window.resetPosEditInputs = function resetPosEditInputs(direction) {
+    if (lastPositionsSnapshot) {
+      const lastPriceForCard = priceStream.alive && priceStream.lastPrice != null
+        ? priceStream.lastPrice : null;
+      renderPositions(lastPositionsSnapshot, lastPriceForCard);
+    }
+  };
+
+  /**
+   * 保存调整后的 TP/SL/Entry. 收集 input 值, 与快照对比, 仅传变化的字段.
+   * @param {'long'|'short'} direction
+   * @param {'active'|'pending'} target
+   */
+  window.saveAdjustLevels = async function saveAdjustLevels(direction, target) {
+    const cap1 = cap(direction);
+    const snap = lastPositionsSnapshot && lastPositionsSnapshot[direction];
+    if (!snap) {
+      showToast('err', '❌ 没有可调整的持仓', '请等待 /status 同步后重试');
+      return;
+    }
+    const cur = target === 'active'
+      ? { entry: snap.entryPrice, tp1: snap.tp1, tp2: snap.tp2, tp3: snap.tp3, sl: snap.currentStopLoss }
+      : (snap.pendingPlan ? {
+          entry: snap.pendingPlan.entry, tp1: snap.pendingPlan.tp1,
+          tp2: snap.pendingPlan.tp2, tp3: snap.pendingPlan.tp3, sl: snap.pendingPlan.sl,
+        } : null);
+    if (!cur) {
+      showToast('err', '❌ 仓位状态已变化', '可能已被自动平仓或取消, 请刷新');
+      return;
+    }
+    const tpHit = snap.tpHit || {};
+    const payload = { direction, source: 'manual_ui' };
+    const changes = [];
+    const fields = target === 'active' ? ['tp1', 'tp2', 'tp3', 'sl'] : ['entry', 'tp1', 'tp2', 'tp3', 'sl'];
+    for (const k of fields) {
+      const inp = document.getElementById(`posEdit_${cap1}_${k}`);
+      if (!inp || inp.disabled) continue;
+      const raw = inp.value.trim();
+      if (raw === '') continue;
+      const v = Number(raw);
+      if (!Number.isFinite(v) || v <= 0) {
+        showToast('warn', `⚠️ ${k.toUpperCase()} 输入非法`, '必须是大于 0 的数字', 4000);
+        return;
+      }
+      const old = Number(cur[k]);
+      if (Number.isFinite(old) && Math.abs(v - old) < 0.005) continue;   // 没改动跳过
+      payload[k] = v;
+      changes.push(`${k.toUpperCase()}: ${Number.isFinite(old) ? old.toFixed(2) : '--'} → ${v.toFixed(2)}` + (tpHit[k] ? ' (已触发, 后端会跳过)' : ''));
+    }
+    if (changes.length === 0) {
+      showToast('warn', '⚠️ 未检测到改动', '请修改至少一个价位再保存', 3000);
+      return;
+    }
+    const dirZh = direction === 'long' ? '多头' : '空头';
+    const tgtZh = target === 'active' ? '持仓' : '挂单';
+    if (!confirm(`确认调整${dirZh}${tgtZh}价位?\n\n` + changes.join('\n'))) return;
+
+    try {
+      const j = await callAdminApi('/api/auto-trade/adjust-levels', payload);
+      const lines = [
+        `target: ${j.target}`,
+        ...changes,
+      ];
+      if (j.skipped && j.skipped.length) lines.push(`后端跳过: ${j.skipped.join(', ')}`);
+      showToast('ok', `✏️ ${dirZh}${tgtZh}价位已更新`, lines, 7000);
+      posEditOpen[direction] = false;
+      await fetchAutoTradeStatus();
+    } catch (e) {
+      showToast('err', `❌ 调整失败`, (e.message || '') + ' (旧价位保持不变)', 8000);
+    }
+  };
+
+  /**
+   * 一键触发 TP1/TP2/TP3/SL.
+   * 复用后端 /manual-fire → processSignal(take_profit/stop_loss) 通道,
+   * 与 riskEngine + 外部 webhook 共享同一把幂等锁, 不会重复 fire.
+   */
+  window.manualFire = async function manualFire(direction, level) {
+    const dirZh = direction === 'long' ? '多头' : '空头';
+    const lvlZh = ({ tp_1: 'TP1 (平 50% + 保本止损)', tp_2: 'TP2 (平 30%)',
+                    tp_3: 'TP3 (平 20% + 解锁)', sl: 'SL (100% 全平 + 解锁)' })[level] || level;
+    if (!confirm(
+      `确认立即触发 ${dirZh} ${lvlZh}?\n\n` +
+      `· 等同于 webhook/价格自然触发, 立即推送平仓信号\n` +
+      `· 与自动风控共享幂等锁, 不会重复 fire\n` +
+      (level === 'sl' || level === 'tp_3' ? `· 触发后该方向自动解锁, 可重新开仓` : '')
+    )) return;
+    try {
+      const j = await callAdminApi('/api/auto-trade/manual-fire', { direction, level });
+      const tag = level === 'sl' ? '🛑' : level === 'tp_3' ? '✅' : '🎯';
+      showToast('ok', `${tag} ${dirZh} ${level.toUpperCase()} 已触发`,
+        `webhook 已推送, 后续状态请看仓位卡更新`, 6000);
+    } catch (e) {
+      const msg = e.message || '';
+      if (msg.includes('already_fired') || msg.includes('already_closed') || msg.includes('no_active_position')) {
+        showToast('warn', `⚠️ 该 ${level.toUpperCase()} 已被触发`, '可能价格刚刚自然触发, 请刷新查看', 5000);
+      } else {
+        showToast('err', `❌ 触发 ${level.toUpperCase()} 失败`, msg, 8000);
+      }
+    } finally {
+      await fetchAutoTradeStatus();
+    }
+  };
   function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
   async function resetDirection(direction) {
