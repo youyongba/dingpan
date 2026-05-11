@@ -633,6 +633,8 @@ router.get('/status', (req, res) => {
 /**
  * POST /price-trigger/arm
  *
+ * 追加一条触发器到指定方向的 items[] (允许多条同时启用).
+ *
  * body: {
  *   direction: 'long' | 'short',
  *   triggerPrice: number,            必填
@@ -644,6 +646,9 @@ router.get('/status', (req, res) => {
  *   - direction / triggerPrice / action 合法
  *   - 触发价与当前价差 ≥ 0.05% (避免立即命中误触)
  *   - 必须能拿到 baselinePrice (传入 或 priceFeed.lastPrice)
+ *   - 同方向若已有等价触发器 (同价同 action) → 409 拒绝, 防止误点重复 arm
+ *
+ * 副作用: arm 新条会自动解开同方向 locked=true (相当于"重新启用监听").
  */
 router.post('/price-trigger/arm', requireAdmin, (req, res) => {
   const direction = req.body?.direction;
@@ -670,7 +675,6 @@ router.post('/price-trigger/arm', requireAdmin, (req, res) => {
     }
     baselinePrice = Number(px);
   }
-  // 0.05% 容差: 太近会立即被 evaluate 触发, 失去"触发器"语义
   if (Math.abs(baselinePrice - triggerPrice) / baselinePrice < 0.0005) {
     return res.status(400).json({
       ok: false, error: 'trigger_too_close_to_baseline',
@@ -678,54 +682,112 @@ router.post('/price-trigger/arm', requireAdmin, (req, res) => {
     });
   }
 
-  const trigger = state.armPriceTrigger(direction, { triggerPrice, action, baselinePrice });
+  let trigger;
+  try {
+    trigger = state.armPriceTrigger(direction, { triggerPrice, action, baselinePrice });
+  } catch (e) {
+    if (e?.message === 'duplicate_trigger') {
+      return res.status(409).json({
+        ok: false, error: 'duplicate_trigger',
+        hint: `同方向已存在等价触发器 (价 ${triggerPrice.toFixed(2)} · ${action}), 请先取消或换一个价/动作`,
+        existing: e.existing,
+      });
+    }
+    return res.status(400).json({ ok: false, error: e?.message || 'arm_failed' });
+  }
 
   const cfg = config.get();
   const titleEmoji = direction === 'long' ? '📈' : '📉';
   const actZh = action === 'follow' ? '🚀 立即追单 (市价)' : '📋 挂单 (限价待触发)';
   const sideZh = trigger.side === 'above' ? '上涨到' : '下跌到';
+  // 显示该方向当前共有多少条 (含本条)
+  const allItems = state.getPriceTriggers()[direction].items;
   exec.notify({
     type: 'wait',
-    title: `${titleEmoji} ${direction.toUpperCase()} 价格触发器已启用`,
+    title: `${titleEmoji} ${direction.toUpperCase()} 价格触发器已添加 (共 ${allItems.length} 条)`,
     lines: [
       `symbol: ${cfg.symbol}`,
       `触发方向: ${direction}`,
       `当前价: ${baselinePrice.toFixed(2)}`,
-      `触发价: ${triggerPrice.toFixed(2)} (价格${sideZh})`,
-      `触发动作: ${actZh}`,
+      `本条触发价: ${triggerPrice.toFixed(2)} (价格${sideZh})`,
+      `本条动作: ${actZh}`,
+      `本条 id: ${trigger.id}`,
       `运行位置: 后端 WS 监听 (浏览器关闭照样触发)`,
-      `❎ 取消: POST /api/auto-trade/price-trigger/cancel {"direction":"${direction}"}`,
+      `📐 成交锁: 该方向任意一条 fire 成功后, 剩余触发器全部清除并锁定`,
+      `❎ 取消单条: POST /api/auto-trade/price-trigger/cancel {"direction":"${direction}","id":"${trigger.id}"}`,
+      `❎ 清空该方向: POST /api/auto-trade/price-trigger/cancel-all {"direction":"${direction}"}`,
     ],
   });
-  res.json({ ok: true, direction, trigger });
+  res.json({ ok: true, direction, trigger, total: allItems.length });
 });
 
 /**
  * POST /price-trigger/cancel
  *
- * body: { direction: 'long' | 'short' }
- * 不需要 admin token (取消 = 不下单, 风险等价于无操作).
+ * body: { direction: 'long' | 'short', id: string }
+ *
+ * 按 id 取消单条触发器. 不需要 admin token (取消 = 不下单).
  */
 router.post('/price-trigger/cancel', (req, res) => {
+  const direction = req.body?.direction;
+  const id = req.body?.id;
+  if (!['long', 'short'].includes(direction)) {
+    return res.status(400).json({ ok: false, error: 'direction must be long|short' });
+  }
+  if (!id || typeof id !== 'string') {
+    return res.status(400).json({
+      ok: false, error: 'missing_id',
+      hint: '现支持多触发器, 取消必须指定 id; 一键清空请用 /price-trigger/cancel-all',
+    });
+  }
+  const prev = state.cancelPriceTrigger(direction, id, req.body?.reason || 'manual_api');
+  if (!prev) {
+    return res.status(404).json({ ok: false, error: 'trigger_not_found', direction, id });
+  }
+  const cfg = config.get();
+  const titleEmoji = direction === 'long' ? '📈' : '📉';
+  const remaining = state.getPriceTriggers()[direction].items.length;
+  exec.notify({
+    type: 'wait',
+    title: `🚫 ${titleEmoji} ${direction.toUpperCase()} 已取消单条触发器 (剩余 ${remaining} 条)`,
+    lines: [
+      `symbol: ${cfg.symbol}`,
+      `原触发价: ${Number(prev.triggerPrice).toFixed(2)} (${prev.side})`,
+      `原动作: ${prev.action === 'follow' ? '追单' : '挂单'}`,
+      `id: ${prev.id}`,
+      `启用时间: ${cnTime(prev.armedAt)}`,
+      `取消原因: ${prev.cancelReason || 'manual'}`,
+    ],
+  });
+  res.json({ ok: true, direction, prev, remaining });
+});
+
+/**
+ * POST /price-trigger/cancel-all
+ *
+ * body: { direction: 'long' | 'short' }
+ *
+ * 一键清空某方向所有触发器 (UI 上"全部取消"按钮 / 反向信号场景).
+ * 不需要 admin token. 不影响 locked 标记 (locked 由 fire 成功设置, 由 arm 重置).
+ */
+router.post('/price-trigger/cancel-all', (req, res) => {
   const direction = req.body?.direction;
   if (!['long', 'short'].includes(direction)) {
     return res.status(400).json({ ok: false, error: 'direction must be long|short' });
   }
-  const prev = state.cancelPriceTrigger(direction, req.body?.reason || 'manual_api');
-  if (!prev) {
-    return res.status(404).json({ ok: false, error: 'no_active_trigger', direction });
+  const prev = state.cancelAllPriceTriggers(direction, req.body?.reason || 'manual_all');
+  if (!prev || prev.length === 0) {
+    return res.status(404).json({ ok: false, error: 'no_active_triggers', direction });
   }
   const cfg = config.get();
   const titleEmoji = direction === 'long' ? '📈' : '📉';
   exec.notify({
     type: 'wait',
-    title: `🚫 ${titleEmoji} ${direction.toUpperCase()} 价格触发器已取消`,
+    title: `🚫 ${titleEmoji} ${direction.toUpperCase()} 已清空全部 ${prev.length} 条触发器`,
     lines: [
       `symbol: ${cfg.symbol}`,
-      `原触发价: ${Number(prev.triggerPrice).toFixed(2)} (${prev.side})`,
-      `原动作: ${prev.action === 'follow' ? '追单' : '挂单'}`,
-      `启用时间: ${cnTime(prev.armedAt)}`,
-      `取消原因: ${prev.cancelReason || 'manual'}`,
+      `方向: ${direction}`,
+      ...prev.map(t => `  · ${Number(t.triggerPrice).toFixed(2)} (${t.side}) · ${t.action === 'follow' ? '追单' : '挂单'}`),
     ],
   });
   res.json({ ok: true, direction, prev });

@@ -27,18 +27,90 @@ const STATE_FILE = process.env.AUTO_TRADE_STATE_PATH
 // ============ 价格触发器 (PriceTrigger) ============
 // 与 pending 独立的"一级闸门": 用户先设"价格到 X 我才挂单/追单",
 // 价格触达后, riskEngine 调 processSignal 走 manual-open (action='open' 挂单)
-// 或 manual-follow (action='follow' 立即市价追单). 命中后该 slot 立即变成
-// EMPTY_PRICE_TRIGGER, 与 pending 限价单同样 disk 持久化, 与浏览器无关.
-const EMPTY_PRICE_TRIGGER = () => ({
-  enabled: false,
+// 或 manual-follow (action='follow' 立即市价追单). 与浏览器无关, disk 持久化.
+//
+// 支持多触发器 + 成交锁 (用户硬性需求迭代):
+//   - 同方向可以同时启用多条触发价 (多 slot 数组)
+//   - 任意一条 fire 成功 → 该方向 locked=true, 清空剩余, 不再 evaluate
+//   - 用户重新 armPriceTrigger → 自动 locked=false (重置监听)
+//
+// 数据结构:
+//   priceTriggers[dir] = {
+//     items: [ Trigger, Trigger, ... ],       // 已启用的多条触发器
+//     locked: false,                          // 成交锁: fire 成功后 true, arm 时重置 false
+//     lastFiredAt: ISO,                       // 上一次 fire 时间 (审计)
+//     lastFiredTrigger: { ... } | null,       // 上一次 fire 成功的 Trigger 快照
+//     lastError: string | null,               // 上一次 fire 失败原因 (UI 可读)
+//   }
+const EMPTY_DIRECTION_TRIGGERS = () => ({
+  items: [],
+  locked: false,
+  lastFiredAt: null,
+  lastFiredTrigger: null,
+  lastError: null,
+});
+
+const EMPTY_TRIGGER = () => ({
+  id: null,
   triggerPrice: null,          // 触发价 (USDT)
   side: null,                  // 'above' | 'below'  (arm 时根据 baseline vs trigger 决定)
   action: null,                // 'open' (挂单 → /manual-open) | 'follow' (追单 → /manual-follow)
   baselinePrice: null,         // arm 时的市价 (审计)
   armedAt: null,               // ISO string, 启用时间
-  lastFiredAt: null,           // ISO string, 上一次成功 fire 时间 (审计)
-  lastError: null,             // 上一次 fire 失败的原因 (字符串), 用户可在 UI 看见
 });
+
+// 用单调时间 + 随机短码生成 id, 不需要外部依赖
+function _newTriggerId() {
+  return 'tr_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+}
+
+/**
+ * 向后兼容: 旧 disk state 是单条 { enabled, triggerPrice, ... } 格式,
+ * load 时检测到 (无 items 字段 + 有 enabled 字段) 就迁移成新数组格式.
+ * 仅在 load 阶段调用一次, 兼容旧用户数据.
+ */
+function _migrateLegacyTrigger(legacy) {
+  const next = EMPTY_DIRECTION_TRIGGERS();
+  if (!legacy || typeof legacy !== 'object') return next;
+  // 已是新格式 (含 items 数组) → 透传, 仅做防御性补全
+  if (Array.isArray(legacy.items)) {
+    return {
+      items: legacy.items
+        .filter(t => t && Number.isFinite(Number(t.triggerPrice)))
+        .map(t => ({
+          ...EMPTY_TRIGGER(),
+          id: t.id || _newTriggerId(),
+          triggerPrice: Number(t.triggerPrice),
+          side: t.side === 'above' || t.side === 'below' ? t.side : null,
+          action: t.action === 'follow' ? 'follow' : 'open',
+          baselinePrice: Number.isFinite(Number(t.baselinePrice)) ? Number(t.baselinePrice) : null,
+          armedAt: t.armedAt || null,
+        }))
+        .filter(t => t.side != null),
+      locked: !!legacy.locked,
+      lastFiredAt: legacy.lastFiredAt || null,
+      lastFiredTrigger: legacy.lastFiredTrigger || null,
+      lastError: legacy.lastError || null,
+    };
+  }
+  // 旧格式: 单条 enabled 标记
+  if (legacy.enabled && Number.isFinite(Number(legacy.triggerPrice))) {
+    next.items.push({
+      ...EMPTY_TRIGGER(),
+      id: _newTriggerId(),
+      triggerPrice: Number(legacy.triggerPrice),
+      side: legacy.side === 'above' || legacy.side === 'below' ? legacy.side : null,
+      action: legacy.action === 'follow' ? 'follow' : 'open',
+      baselinePrice: Number.isFinite(Number(legacy.baselinePrice)) ? Number(legacy.baselinePrice) : null,
+      armedAt: legacy.armedAt || null,
+    });
+    console.log('[trade.state] 迁移旧 priceTrigger 单条 → items[]:', JSON.stringify(next.items[0]));
+  }
+  // 保留旧的审计字段 (如果有)
+  next.lastFiredAt = legacy.lastFiredAt || null;
+  next.lastError = legacy.lastError || null;
+  return next;
+}
 
 const EMPTY_POSITION = () => ({
   active: false,         // 是否持仓中
@@ -88,10 +160,11 @@ function load() {
   state = {
     long: { ...EMPTY_POSITION(), ...(disk?.long || {}) },
     short: { ...EMPTY_POSITION(), ...(disk?.short || {}) },
-    // 价格触发器与 long/short 仓位独立, 两侧各一个 slot, 互不影响
+    // 价格触发器与 long/short 仓位独立, 两侧各一个 slot (items[] 数组), 互不影响
+    // _migrateLegacyTrigger 兼容旧单条格式 {enabled,triggerPrice,...} → 新数组格式
     priceTriggers: {
-      long:  { ...EMPTY_PRICE_TRIGGER(), ...(disk?.priceTriggers?.long  || {}) },
-      short: { ...EMPTY_PRICE_TRIGGER(), ...(disk?.priceTriggers?.short || {}) },
+      long:  _migrateLegacyTrigger(disk?.priceTriggers?.long),
+      short: _migrateLegacyTrigger(disk?.priceTriggers?.short),
     },
     updatedAt: disk?.updatedAt || null,
   };
@@ -99,11 +172,10 @@ function load() {
   ['long', 'short'].forEach(k => {
     state[k].tpHit = state[k].tpHit || { tp1: false, tp2: false, tp3: false };
   });
-  // 旧 disk state 没 priceTriggers, load 后正常为空; armPriceTrigger 时再写盘
   console.log(
     `[trade.state] 已加载: long.locked=${state.long.locked}, short.locked=${state.short.locked}` +
-    ` | priceTriggers.long.enabled=${state.priceTriggers.long.enabled}` +
-    ` priceTriggers.short.enabled=${state.priceTriggers.short.enabled}`
+    ` | priceTriggers long.items=${state.priceTriggers.long.items.length}(locked=${state.priceTriggers.long.locked})` +
+    ` short.items=${state.priceTriggers.short.items.length}(locked=${state.priceTriggers.short.locked})`
   );
   return state;
 }
@@ -398,18 +470,19 @@ function updatePendingLevels(direction, levels) {
 //   - 两者可以串联: trigger 命中 → 调 manual-open → pending → 价格回踩 → 真正下单
 
 /**
- * 启用价格触发器 (一个方向 slot).
+ * 追加一条价格触发器到指定方向的 items[].
  *
- * ⚠️ 幂等 / 覆盖语义:
- *   - 同方向已有 enabled trigger → 直接覆盖 (用户重设触发价)
- *   - 与该方向仓位的 active/pending 完全独立, 不影响开/平
+ * 语义:
+ *   - 与该方向已有触发器**叠加** (允许同时挂多条触发价)
+ *   - 同方向若处于 locked=true (上一次 fire 成功的锁), arm 会自动解锁 + 清 lastError
+ *   - 触发器与仓位的 active/pending 状态完全独立, 不影响 canOpen
  *
  * @param {'long'|'short'} direction
  * @param {object} args
- * @param {number} args.triggerPrice   触发价 (必填, USDT)
- * @param {'open'|'follow'} args.action  触发后动作 (必填)
- * @param {number} args.baselinePrice  启用时的市价 (必填, 用于推导 side)
- * @returns {object} 已 arm 的 trigger 快照
+ * @param {number} args.triggerPrice
+ * @param {'open'|'follow'} args.action
+ * @param {number} args.baselinePrice
+ * @returns {object} 新增的 trigger 快照 (含 id)
  */
 function armPriceTrigger(direction, args) {
   if (!state) load();
@@ -419,73 +492,150 @@ function armPriceTrigger(direction, args) {
   const action = args?.action === 'follow' ? 'follow' : 'open';
   if (!Number.isFinite(triggerPrice) || triggerPrice <= 0) throw new Error('invalid_trigger_price');
   if (!Number.isFinite(baselinePrice) || baselinePrice <= 0) throw new Error('invalid_baseline_price');
-  // side: trigger > baseline → 'above' (价格上涨到 trigger 触发); 反之 'below'
-  // 与原前端 armPriceTrigger 语义完全一致
   const side = triggerPrice > baselinePrice ? 'above' : 'below';
-  const next = {
-    ...EMPTY_PRICE_TRIGGER(),
-    enabled: true,
-    triggerPrice,
-    side,
-    action,
-    baselinePrice,
+  const slot = state.priceTriggers[direction];
+
+  // 防重复: 同方向已存在等价 trigger (同价同 action) → 拒绝, 避免误点重复 arm
+  const dup = slot.items.find(t =>
+    Math.abs(Number(t.triggerPrice) - triggerPrice) < 1e-9 && t.action === action
+  );
+  if (dup) {
+    const e = new Error('duplicate_trigger');
+    e.existing = { ...dup };
+    throw e;
+  }
+
+  const newTrigger = {
+    ...EMPTY_TRIGGER(),
+    id: _newTriggerId(),
+    triggerPrice, side, action, baselinePrice,
     armedAt: new Date().toISOString(),
   };
-  state.priceTriggers[direction] = next;
-  save();
-  return { ...next };
-}
-
-/**
- * 取消价格触发器 (手动 / 触发后清除 / 反向信号).
- *
- * @param {'long'|'short'} direction
- * @param {string} [reason]   仅作日志/审计
- * @returns {object|null} prev 触发器快照, 或 null (本来就没启用)
- */
-function cancelPriceTrigger(direction, reason = 'manual') {
-  if (!state) load();
-  if (direction !== 'long' && direction !== 'short') return null;
-  const prev = state.priceTriggers[direction];
-  if (!prev || !prev.enabled) return null;
+  // ⭐ arm 新触发器 = 用户重启监听, 解开成交锁 + 清掉旧错误
   state.priceTriggers[direction] = {
-    ...EMPTY_PRICE_TRIGGER(),
-    lastFiredAt: prev.lastFiredAt,    // 保留审计字段
-    lastError: reason === 'manual' ? null : (prev.lastError || null),
+    ...slot,
+    items: [...slot.items, newTrigger],
+    locked: false,
+    lastError: null,
   };
   save();
-  return { ...prev, cancelReason: reason };
+  return { ...newTrigger };
 }
 
 /**
- * 原子触发并清除. 与 markTpHit / closeAndUnlock 同样的幂等模式:
- *   - 已被消费 / 未启用 → 返回 null (拦住"两个 tick 同帧 evaluate 都看到 hit"的 race)
- *   - 成功消费         → 把 priceTriggers[dir] 写成 disabled (firedAt 标记), 返回 prev
- *
- * 调用方 (riskEngine.firePriceTrigger) 必须检查返回值,
- * null 时直接退出, 不调 processSignal, 不发通知.
+ * 按 id 取消单条触发器 (UI 上每条触发器右侧的 ❎ 按钮).
  *
  * @param {'long'|'short'} direction
- * @param {number} hitPrice    实际触发时的市价 (用于审计与通知)
- * @returns {object|null}      原 trigger 快照 (含 action / triggerPrice 等)
+ * @param {string} id
+ * @param {string} [reason='manual']
+ * @returns {object|null} 被删除的 trigger 快照; 找不到返回 null
  */
-function consumePriceTrigger(direction, hitPrice) {
+function cancelPriceTrigger(direction, id, reason = 'manual') {
   if (!state) load();
   if (direction !== 'long' && direction !== 'short') return null;
-  const prev = state.priceTriggers[direction];
-  if (!prev || !prev.enabled) return null;
+  if (!id) return null;
+  const slot = state.priceTriggers[direction];
+  const idx = slot.items.findIndex(t => t && t.id === id);
+  if (idx < 0) return null;
+  const removed = slot.items[idx];
+  const nextItems = [...slot.items.slice(0, idx), ...slot.items.slice(idx + 1)];
+  state.priceTriggers[direction] = { ...slot, items: nextItems };
+  save();
+  return { ...removed, cancelReason: reason };
+}
+
+/**
+ * 清空某方向所有触发器 (一键全部取消 / 反向信号).
+ * 用 reason='fired_lock' 时会同时 locked=true (供 markPriceTriggerFiredLock 复用).
+ *
+ * @param {'long'|'short'} direction
+ * @param {string} [reason='manual_all']
+ * @returns {object[]} 被清空的 items 列表 (副本)
+ */
+function cancelAllPriceTriggers(direction, reason = 'manual_all') {
+  if (!state) load();
+  if (direction !== 'long' && direction !== 'short') return [];
+  const slot = state.priceTriggers[direction];
+  const prev = slot.items.map(t => ({ ...t }));
   state.priceTriggers[direction] = {
-    ...EMPTY_PRICE_TRIGGER(),
+    ...slot,
+    items: [],
+    // manual_all / reverse_signal 不锁; 仅 fired_lock 锁
+    locked: reason === 'fired_lock' ? true : slot.locked,
+    // 手动清空 → 顺便清 lastError, 让 UI 不再红字
+    lastError: reason === 'manual_all' ? null : slot.lastError,
+  };
+  save();
+  return prev;
+}
+
+/**
+ * 原子按 id 消费一条 trigger (riskEngine.firePriceTrigger 调).
+ *
+ * ⚠️ 幂等保护 (与 markTpHit / closeAndUnlock 同模式):
+ *   - 找不到 id (已被取消 / 已被消费 / 整方向已 locked-clear) → 返回 null
+ *   - 成功消费 → 从 items[] 移除并落盘, 返回 prev 快照
+ *
+ * 调用方必须检查返回值, null 时直接放弃 fire — 这是最后一道防线,
+ * 即便 _ptInFlight 异常未释放, items 已空就拦得住"重复 fire 已 fire 的那条".
+ *
+ * @param {'long'|'short'} direction
+ * @param {string} id
+ * @param {number} hitPrice
+ * @returns {object|null}
+ */
+function consumePriceTrigger(direction, id, hitPrice) {
+  if (!state) load();
+  if (direction !== 'long' && direction !== 'short') return null;
+  if (!id) return null;
+  const slot = state.priceTriggers[direction];
+  if (slot.locked) return null;              // 已锁 = 不再消费 (双保险)
+  const idx = slot.items.findIndex(t => t && t.id === id);
+  if (idx < 0) return null;
+  const removed = slot.items[idx];
+  const nextItems = [...slot.items.slice(0, idx), ...slot.items.slice(idx + 1)];
+  state.priceTriggers[direction] = { ...slot, items: nextItems };
+  save();
+  return { ...removed, hitPrice: Number(hitPrice) };
+}
+
+/**
+ * 标记某方向已 fire 成功 → 锁定 + 清空剩余触发器 (核心成交锁逻辑).
+ *
+ * 用户硬性要求: "同方向有一个成交就锁定不再触发".
+ * 这里在 riskEngine.firePriceTrigger 返回 ok 后调用:
+ *   - 清空 items (剩下未触发的触发价直接作废)
+ *   - locked=true (本帧后续 evaluate 直接跳过该方向, 即便 items 被外力填回)
+ *   - 记 lastFiredAt / lastFiredTrigger 供 UI 显示与审计
+ *
+ * 解锁方式:
+ *   - 用户重新 armPriceTrigger → 该函数会自动 locked=false
+ *   - 用户调 cancelAllPriceTriggers (reason='manual_all') → 不解锁但清空 items
+ *
+ * @param {'long'|'short'} direction
+ * @param {object} firedTrigger    刚 fire 成功的那条 (用于审计 lastFiredTrigger)
+ * @returns {{cleared:number, lockedItems:object[]}}  cleared=被锁定时清掉的剩余条数
+ */
+function markPriceTriggerFiredLock(direction, firedTrigger) {
+  if (!state) load();
+  if (direction !== 'long' && direction !== 'short') return { cleared: 0, lockedItems: [] };
+  const slot = state.priceTriggers[direction];
+  const lockedItems = slot.items.map(t => ({ ...t }));
+  state.priceTriggers[direction] = {
+    ...slot,
+    items: [],
+    locked: true,
     lastFiredAt: new Date().toISOString(),
+    lastFiredTrigger: firedTrigger ? { ...firedTrigger } : null,
+    lastError: null,
   };
   save();
-  return { ...prev, hitPrice: Number(hitPrice) };
+  return { cleared: lockedItems.length, lockedItems };
 }
 
 /**
- * 触发失败时, 把 lastError 写盘 (UI 可读), 不改 enabled.
- * ⚠️ 注意: 当前实现是"触发即消费", consumePriceTrigger 已经把 enabled=false 了.
- * 这里仅在 fire 整体失败时附加错误信息 (用户在 /status 里能看见原因).
+ * 记录某方向上一次 fire 失败的原因 (manualOpenImpl 返回非 2xx 时).
+ * 不动 items / locked, 仅写 lastError 字段供 UI 红字提示.
  *
  * @param {'long'|'short'} direction
  * @param {string} errorMsg
@@ -493,18 +643,20 @@ function consumePriceTrigger(direction, hitPrice) {
 function recordPriceTriggerError(direction, errorMsg) {
   if (!state) load();
   if (direction !== 'long' && direction !== 'short') return;
-  const cur = state.priceTriggers[direction];
-  if (!cur) return;
-  state.priceTriggers[direction] = { ...cur, lastError: String(errorMsg || '').slice(0, 240) };
+  const slot = state.priceTriggers[direction];
+  state.priceTriggers[direction] = {
+    ...slot,
+    lastError: String(errorMsg || '').slice(0, 240),
+  };
   save();
 }
 
-/** 返回 priceTriggers 状态 (供 /status 输出 / 内部读取) */
+/** 返回 priceTriggers 状态 (供 /status 输出 / 内部读取); items 是 deep copy */
 function getPriceTriggers() {
   if (!state) load();
   return {
-    long:  { ...state.priceTriggers.long },
-    short: { ...state.priceTriggers.short },
+    long:  { ...state.priceTriggers.long,  items: state.priceTriggers.long.items.map(t => ({ ...t })) },
+    short: { ...state.priceTriggers.short, items: state.priceTriggers.short.items.map(t => ({ ...t })) },
   };
 }
 
@@ -519,6 +671,12 @@ module.exports = {
   // 手动调整止盈止损
   updateActiveLevels, updatePendingLevels,
   // ⭐ 价格触发器 (与浏览器无关, 由 riskEngine 监听 WS 直接 evaluate)
-  armPriceTrigger, cancelPriceTrigger, consumePriceTrigger,
-  recordPriceTriggerError, getPriceTriggers,
+  // 多触发器 + 成交锁: items[] 数组, fire 成功 → markPriceTriggerFiredLock 锁整方向
+  armPriceTrigger,
+  cancelPriceTrigger,        // 按 id 取消单条
+  cancelAllPriceTriggers,    // 一键清空某方向
+  consumePriceTrigger,       // 原子按 id 消费 (riskEngine 用)
+  markPriceTriggerFiredLock, // fire 成功后调: 清空 + 锁定 (riskEngine 用)
+  recordPriceTriggerError,
+  getPriceTriggers,
 };
