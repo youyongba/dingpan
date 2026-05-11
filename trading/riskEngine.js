@@ -40,6 +40,23 @@ const _inFlight = { long: false, short: false };
 const recentlyFired = { long: 0, short: 0 };
 const FIRE_COOLDOWN_MS = 1500;
 
+// 价格触发器 (PriceTrigger) 独立的 in-flight 锁: 与 _inFlight (TP/SL/pending) 分离,
+// 因为 trigger 命中 → 调 processSignal 这一步可能很慢 (forwardOpen webhook 出站),
+// 期间不能阻塞 TP/SL 的 evaluate, 但同方向的 trigger 自己必须挡住重入.
+const _ptInFlight = { long: false, short: false };
+
+// processSignal 懒加载 (避免与 router 循环依赖):
+// router 现在不 require riskEngine, 但 riskEngine 需要 router.processSignal,
+// 用 lazy require 在第一次 fire 时取一次, 缓存 (require 本身是幂等的, 也可直接 require)
+let _processSignalCache = null;
+function _processSignal() {
+  if (!_processSignalCache) {
+    try { _processSignalCache = require('./router').processSignal; }
+    catch (e) { console.error('[trade.risk] 无法加载 router.processSignal:', e.message); return null; }
+  }
+  return _processSignalCache;
+}
+
 // WS 状态通知冷却 (避免重连失败刷屏)
 const WS_NOTIFY_COOLDOWN_MS = 5 * 60 * 1000;
 let lastWsErrorNotifyAt = 0;
@@ -155,6 +172,10 @@ function _runEval(price, ts) {
     try { evaluate(dir, price, ts); }
     catch (e) { console.error('[trade.risk] evaluate error:', e.message); }
   });
+  // ⭐ 价格触发器评估 — 与 TP/SL/pending 同步在每帧 tick 上做,
+  // 触发后内部调 processSignal 走 manual-open / manual-follow 的所有现有幂等链路.
+  try { evaluatePriceTriggers(price, ts); }
+  catch (e) { console.error('[trade.risk] evaluatePriceTriggers error:', e.message); }
 }
 
 function onTick({ price, ts }) {
@@ -209,6 +230,179 @@ function evaluate(direction, price, tickTs) {
     const hit = isLong ? price <= entry : price >= entry;
     if (hit) return firePendingFill(direction, price, tickTs);
   }
+}
+
+/**
+ * 价格触发器评估 — 每帧 tick 都跑.
+ *
+ * 与 TP/SL/pending evaluate 独立: trigger 命中 → 调 processSignal (有 await 出站 webhook),
+ * 不能让它阻塞同方向的 SL/TP. 所以使用单独的 _ptInFlight, 不复用 _inFlight.
+ *
+ * 触发条件 (与原前端 evaluatePriceTriggers 完全等价):
+ *   side='above' : 价格 >= triggerPrice
+ *   side='below' : 价格 <= triggerPrice
+ *
+ * @param {number} price
+ * @param {number} tickTs   原始 tick 时间戳 (用于触发延迟统计)
+ */
+function evaluatePriceTriggers(price, tickTs) {
+  if (!Number.isFinite(price) || price <= 0) return;
+  const triggers = state.getPriceTriggers();
+  for (const dir of ['long', 'short']) {
+    if (_ptInFlight[dir]) continue;            // 闸 A: 上一次还没 fire 完
+    const t = triggers[dir];
+    if (!t || !t.enabled) continue;
+    const trigger = Number(t.triggerPrice);
+    if (!Number.isFinite(trigger)) continue;
+    const hit = (t.side === 'above' && price >= trigger)
+              || (t.side === 'below' && price <= trigger);
+    if (!hit) continue;
+    _ptInFlight[dir] = true;
+    // 注意: firePriceTrigger 内部第一步就 state.consumePriceTrigger (写盘 enabled=false),
+    // 后续 tick 看到 enabled=false 直接 continue, 即便 _ptInFlight 因异常没释放也兜得住.
+    firePriceTrigger(dir, price, tickTs).catch((e) => {
+      console.error(`[trade.risk] firePriceTrigger ${dir} 抛出:`, e?.message || e);
+    });
+  }
+}
+
+/**
+ * 真正执行价格触发器: 消费 state → 调 processSignal → 通知 → 落审计.
+ *
+ * action='open'   → /manual-open  的 in-process 版本: 复用 processSignal({action:'open_*'}),
+ *                   走 pending 限价分支 (与 regime auto 同一通道)
+ * action='follow' → /manual-follow 的 in-process 版本: 设 sig.market=immediate=true,
+ *                   skipRegimePlan=true (与手动追单语义完全一致, ATR 动态计算 / 动态仓位)
+ */
+async function firePriceTrigger(direction, hitPrice, tickTs) {
+  _recordFireLatency(tickTs);
+  try {
+    // ⚠️ 关键: 先 consume 写盘 (enabled=false 立即生效), 再走后续 processSignal.
+    //         consumePriceTrigger 是幂等的, 第二次返回 null → 直接放弃, 防止重复触发.
+    const prev = state.consumePriceTrigger(direction, hitPrice);
+    if (!prev) {
+      console.warn(`[trade.risk] ⚠️ ${direction} priceTrigger 已被消费, 拒绝重复 fire`);
+      return;
+    }
+    const action = prev.action === 'follow' ? 'follow' : 'open';
+    const cfg = config.get();
+    const titleEmoji = direction === 'long' ? '📈' : '📉';
+    const triggerStr = Number(prev.triggerPrice).toFixed(2);
+    const hitStr = Number(hitPrice).toFixed(2);
+    const sideStr = prev.side === 'above' ? '≥' : '≤';
+
+    console.log(`[trade.risk] 🎯 priceTrigger HIT direction=${direction} side=${prev.side} trigger=${triggerStr} hit=${hitStr} action=${action}`);
+
+    // 命中即时推一条飞书 (用户能看见"触发器命中, 即将下单"). 失败的话后面 catch 还会推一条.
+    exec.notify({
+      type: 'wait',
+      title: `${titleEmoji} ${direction.toUpperCase()} 价格触发器命中 → ${action === 'follow' ? '🚀 立即追单' : '📋 挂单'}`,
+      lines: [
+        `symbol: ${cfg.symbol}`,
+        `触发方向: ${direction}`,
+        `触发价: ${triggerStr} (${prev.side})`,
+        `命中价: ${hitStr} ${sideStr} ${triggerStr}`,
+        `启用时间: ${cnTime(prev.armedAt)}`,
+        `动作: ${action === 'follow' ? '🚀 立即市价追单 (ATR动态计算)' : '📋 挂单 (优先 regime plan, 无则 ATR 回退)'}`,
+      ],
+    });
+
+    // 构造 sig, 复用 processSignal 的所有现有 幂等/校验/通知 逻辑 (与 /manual-open / /manual-follow 同源)
+    const sig = {
+      token: cfg.token,
+      action: direction === 'long' ? 'open_long' : 'open_short',
+      symbol: cfg.symbol,
+    };
+    let processOpts;
+    if (action === 'follow') {
+      // 手动追单逻辑: 一律 ATR 动态计算 + 立即市价 (与 router 的 /manual-follow 完全一致)
+      // ATR / 仓位 的计算放在 router 内部 (processSignal 看到 _priceSource='manual_follow_atr' 走对应分支),
+      // 这里直接通过 'price_trigger_follow' source 触发, router 会根据 skipRegimePlan + market=true 处理.
+      // 简单起见, 我们直接复用 router 内部已有的"手动追单"路径 — 通过暴露的 fireManualFollow.
+      sig.market = true;
+      sig.immediate = true;
+      processOpts = { source: 'price_trigger_follow', skipRegimePlan: true };
+      // 注意: 这里没有显式 entry/sl/tp, processSignal 会走 calcLevels 模板回退.
+      // 用户硬性要求"追单 = ATR 动态回退方案", router.js 的 /manual-follow 端点会先 computeManualFallbackLevels.
+      // 为完全一致, 我们让 router 暴露 fireManualFollowImpl, 这里调它. 见 router.js 改动.
+      const fireFn = _getRouterManualFollow();
+      if (typeof fireFn === 'function') {
+        const r = await fireFn({ direction, source: 'price_trigger_follow', position_size: null });
+        return _finalizePriceTriggerResult(direction, prev, hitPrice, r, action);
+      }
+      // 兜底: 万一拿不到 fireManualFollowImpl 就走 processSignal (模板回退)
+    } else {
+      // 手动挂单逻辑: 复用 router 的 /manual-open 实现 (regime plan 优先, 无则 ATR 动态计算)
+      const fireFn = _getRouterManualOpen();
+      if (typeof fireFn === 'function') {
+        const r = await fireFn({ direction, source: 'price_trigger_open' });
+        return _finalizePriceTriggerResult(direction, prev, hitPrice, r, action);
+      }
+      // 兜底: 模板回退
+      processOpts = { source: 'price_trigger_open' };
+    }
+    // 兜底路径: 走通用 processSignal (template/regime plan, 不走 ATR 动态)
+    const fn = _processSignal();
+    if (!fn) {
+      state.recordPriceTriggerError(direction, 'router_not_ready');
+      return;
+    }
+    const r = await fn(sig, processOpts);
+    return _finalizePriceTriggerResult(direction, prev, hitPrice, r, action);
+  } finally {
+    _ptInFlight[direction] = false;
+  }
+}
+
+/** processSignal / manualOpen / manualFollow 返回值统一收尾: 推飞书 + 落 lastError */
+function _finalizePriceTriggerResult(direction, prev, hitPrice, r, action) {
+  const cfg = config.get();
+  const titleEmoji = direction === 'long' ? '📈' : '📉';
+  const triggerStr = Number(prev.triggerPrice).toFixed(2);
+  const hitStr = Number(hitPrice).toFixed(2);
+  // r 形态:
+  //   - processSignal 直接返回: { status, body }
+  //   - manualOpenImpl / manualFollowImpl 返回: { status, body }  (统一)
+  const ok = r && r.status >= 200 && r.status < 300 && r.body && r.body.ok !== false;
+  if (!ok) {
+    const reason = r?.body?.error || r?.body?.hint || `http_${r?.status || 'unknown'}`;
+    state.recordPriceTriggerError(direction, reason);
+    exec.notify({
+      type: 'open_blocked',
+      title: `❌ ${direction.toUpperCase()} 价格触发器命中但 ${action === 'follow' ? '追单' : '挂单'} 失败`,
+      lines: [
+        `symbol: ${cfg.symbol}`,
+        `触发价/命中价: ${triggerStr} / ${hitStr}`,
+        `失败原因: ${reason}`,
+        `状态码: ${r?.status || '--'}`,
+        `触发器已自动消费, 如需重试请重新启用`,
+      ],
+      isAlert: true,
+    });
+    console.error(`[trade.risk] ❌ priceTrigger ${direction} fire 失败: ${reason}`);
+    return;
+  }
+  // 成功 — 这里不再推额外飞书, 因为 processSignal/manualOpenImpl/manualFollowImpl 内部
+  // 已经推过 "pending_armed" / "open_ok" / forwardOpen 等通知, 不重复刷屏.
+  console.log(`[trade.risk] ✅ priceTrigger ${direction} fire 成功 action=${action} status=${r.status}`);
+}
+
+// 懒加载 router 暴露的内部函数, 与 _processSignal 同一思路, 避免循环依赖
+let _manualOpenImplCache = null;
+let _manualFollowImplCache = null;
+function _getRouterManualOpen() {
+  if (_manualOpenImplCache === null) {
+    try { _manualOpenImplCache = require('./router').manualOpenImpl || false; }
+    catch (_) { _manualOpenImplCache = false; }
+  }
+  return _manualOpenImplCache || null;
+}
+function _getRouterManualFollow() {
+  if (_manualFollowImplCache === null) {
+    try { _manualFollowImplCache = require('./router').manualFollowImpl || false; }
+    catch (_) { _manualFollowImplCache = false; }
+  }
+  return _manualFollowImplCache || null;
 }
 
 async function fireTp(direction, level, triggerPrice, tickTs) {

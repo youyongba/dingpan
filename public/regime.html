@@ -1142,8 +1142,8 @@
         if (lastPositionsSnapshot) {
           renderPositions(lastPositionsSnapshot, priceStream.lastPrice);
         }
-        // 价格触发器: 同帧检查 + 重画距离百分比
-        evaluatePriceTriggers(priceStream.lastPrice);
+        // 价格触发器: 后端 riskEngine 直接监听 WS 触发, 前端仅重画"距离触发价 %"
+        // (触发器状态本身由 5s 的 fetchAutoTradeStatus 拉, 不再在浏览器 evaluate)
         renderPriceTriggers(priceStream.lastPrice);
       };
 
@@ -1212,6 +1212,12 @@
       lastPositionsSnapshot = j.positions || {};   // 缓存供 SSE tick 重画距离用
       renderPositions(lastPositionsSnapshot, lastPriceForCard);
       updateManualActions(lastPositionsSnapshot, autoTrade.enabled);
+
+      // ⭐ 价格触发器: 改为完全后端驱动 (riskEngine + WS 监听 + disk 持久化),
+      // 浏览器关闭/刷新都照样触发. 前端只负责显示和 arm/cancel 的 API 调用,
+      // 触发器状态从 /status 拉取, 不再 evaluate 本地.
+      syncPriceTriggersFromStatus(j.priceTriggers || {});
+      renderPriceTriggers(lastPriceForCard);
       // TP1 保本止损开关
       const tp1On = j.tp1Protection !== false;
       const tp1Toggle = document.getElementById('tp1ProtectionToggle');
@@ -1458,6 +1464,9 @@
         <input type="number" step="0.01" min="0" id="posEdit_${cap1}_${k}" value="${fmt2(levels[k])}" ${hit ? 'disabled class="hit"' : ''} />
       </label>`;
     };
+    const constraintHint = dir === 'long'
+      ? '⚠️ 多头约束: 入场价 &lt; TP1 &lt; TP2 &lt; TP3, 且 SL &lt; 入场价'
+      : '⚠️ 空头约束: 入场价 &gt; TP1 &gt; TP2 &gt; TP3, 且 SL &gt; 入场价';
     return `
       <div class="pos-edit-panel" id="posEditPanel_${cap1}">
         <div style="font-size:11px;color:#d29922;margin-bottom:4px;font-weight:600;">
@@ -1466,6 +1475,9 @@
         <div style="font-size:11px;color:#8b949e;margin-bottom:6px;">
           ${target === 'active' ? '调整持仓 TP/SL — 已触发级别灰显, 改动会立即生效, 下一 tick 按新价位 evaluate.'
                                 : '调整挂单价位 — entry/TP/SL 都可改, 改完 riskEngine 立即按新 entry 判定 fill.'}
+        </div>
+        <div style="font-size:11px;color:#d29922;margin-bottom:6px;background:#161b22;padding:4px 6px;border-radius:4px;border-left:3px solid #d29922;">
+          ${constraintHint}
         </div>
         <div class="pos-edit-grid">
           <label class="entry">
@@ -1499,7 +1511,63 @@
   };
 
   /**
+   * 客户端预校验 — 与后端 validateManualLevels 同算法, 提前拦截 400.
+   *
+   * 多头约束: tp1 > entry, tp2 > tp1, tp3 > tp2, sl < entry
+   * 空头约束: tp1 < entry, tp2 < tp1, tp3 < tp2, sl > entry
+   *
+   * 返回中文化的错误说明 (含具体冲突的两个值), 而不是后端的英文 reason code.
+   */
+  function validateAdjustLevelsClient(direction, merged) {
+    const isLong = direction === 'long';
+    const { entry, tp1, tp2, tp3, sl } = merged;
+    const all = [['entry', entry], ['tp1', tp1], ['tp2', tp2], ['tp3', tp3], ['sl', sl]];
+    for (const [k, v] of all) {
+      if (!Number.isFinite(Number(v)) || Number(v) <= 0) {
+        return { ok: false, hint: `${k.toUpperCase()} 数值缺失或非法 (${v})` };
+      }
+    }
+    const f = (n) => Number(n).toFixed(2);
+    if (isLong) {
+      if (!(tp1 > entry)) return { ok: false, hint: `多头 TP1 (${f(tp1)}) 必须高于入场价 (${f(entry)})` };
+      if (!(tp2 > tp1))   return { ok: false, hint: `多头 TP2 (${f(tp2)}) 必须高于 TP1 (${f(tp1)})` };
+      if (!(tp3 > tp2))   return { ok: false, hint: `多头 TP3 (${f(tp3)}) 必须高于 TP2 (${f(tp2)})` };
+      if (!(sl < entry))  return { ok: false, hint: `多头止损 (${f(sl)}) 必须低于入场价 (${f(entry)})` };
+    } else {
+      if (!(tp1 < entry)) return { ok: false, hint: `空头 TP1 (${f(tp1)}) 必须低于入场价 (${f(entry)})` };
+      if (!(tp2 < tp1))   return { ok: false, hint: `空头 TP2 (${f(tp2)}) 必须低于 TP1 (${f(tp1)})` };
+      if (!(tp3 < tp2))   return { ok: false, hint: `空头 TP3 (${f(tp3)}) 必须低于 TP2 (${f(tp2)})` };
+      if (!(sl > entry))  return { ok: false, hint: `空头止损 (${f(sl)}) 必须高于入场价 (${f(entry)})` };
+    }
+    return { ok: true };
+  }
+
+  // 后端错误码 → 中文友好提示
+  const ADJUST_ERROR_MAP = {
+    'invalid_levels:tp_wrong_order':    'TP 价位顺序非法 (多头需 TP1<TP2<TP3, 空头需 TP1>TP2>TP3)',
+    'invalid_levels:sl_wrong_side':     '止损价方向反了 (多头 SL 必须低于入场, 空头 SL 必须高于入场)',
+    'invalid_levels:non_numeric_levels':'有价位字段缺失或非数字',
+    'no_levels_provided':               '没有提供任何要修改的价位',
+    'no_position':                      '该方向当前无任何持仓或挂单',
+    'no_active_or_pending_position':    '该方向当前无 active 持仓也无 pending 挂单',
+    'cannot_change_entry_on_active':    '已成交持仓不允许修改入场价 (审计要求)',
+    'no_active_position':               '该方向无 active 持仓 (可能刚被自动平仓)',
+    'no_pending':                       '该方向无 pending 挂单 (可能刚被触发或取消)',
+  };
+  function translateAdjustError(code) {
+    if (!code) return '未知错误';
+    return ADJUST_ERROR_MAP[code] || code;   // 没映射的返回原文方便排查
+  }
+
+  /**
    * 保存调整后的 TP/SL/Entry. 收集 input 值, 与快照对比, 仅传变化的字段.
+   *
+   * 流程:
+   *   1) 收集所有 input 值 → 单字段非法 (NaN/<=0) 直接 toast 拒绝
+   *   2) 与快照 diff, 跳过未改动字段
+   *   3) 客户端预校验整体 merged 关系 (多头 tp 升序+sl<entry; 空头反之)
+   *      → 提前拦截后端 400, 给出"具体哪两个值冲突"的中文提示
+   *   4) confirm 二次确认 → 发请求 → 错误码翻译为中文
    * @param {'long'|'short'} direction
    * @param {'active'|'pending'} target
    */
@@ -1523,6 +1591,8 @@
     const tpHit = snap.tpHit || {};
     const payload = { direction, source: 'manual_ui' };
     const changes = [];
+    // merged: 改后的最终价位 (改了用 input, 没改用 cur), 用于客户端预校验
+    const merged = { entry: Number(cur.entry), tp1: Number(cur.tp1), tp2: Number(cur.tp2), tp3: Number(cur.tp3), sl: Number(cur.sl) };
     const fields = target === 'active' ? ['tp1', 'tp2', 'tp3', 'sl'] : ['entry', 'tp1', 'tp2', 'tp3', 'sl'];
     for (const k of fields) {
       const inp = document.getElementById(`posEdit_${cap1}_${k}`);
@@ -1537,12 +1607,27 @@
       const old = Number(cur[k]);
       if (Number.isFinite(old) && Math.abs(v - old) < 0.005) continue;   // 没改动跳过
       payload[k] = v;
+      merged[k] = v;
       changes.push(`${k.toUpperCase()}: ${Number.isFinite(old) ? old.toFixed(2) : '--'} → ${v.toFixed(2)}` + (tpHit[k] ? ' (已触发, 后端会跳过)' : ''));
     }
     if (changes.length === 0) {
       showToast('warn', '⚠️ 未检测到改动', '请修改至少一个价位再保存', 3000);
       return;
     }
+
+    // 客户端预校验整体 merged 关系 — 与后端 validateManualLevels 同算法
+    const v = validateAdjustLevelsClient(direction, merged);
+    if (!v.ok) {
+      showToast('err', '❌ 价位关系不合法', [
+        v.hint,
+        '请修正后再保存. 完整方案需满足:',
+        direction === 'long'
+          ? '多头: 入场 < TP1 < TP2 < TP3, 且 SL < 入场'
+          : '空头: 入场 > TP1 > TP2 > TP3, 且 SL > 入场',
+      ], 8000);
+      return;
+    }
+
     const dirZh = direction === 'long' ? '多头' : '空头';
     const tgtZh = target === 'active' ? '持仓' : '挂单';
     if (!confirm(`确认调整${dirZh}${tgtZh}价位?\n\n` + changes.join('\n'))) return;
@@ -1558,7 +1643,10 @@
       posEditOpen[direction] = false;
       await fetchAutoTradeStatus();
     } catch (e) {
-      showToast('err', `❌ 调整失败`, (e.message || '') + ' (旧价位保持不变)', 8000);
+      const raw = e.message || '';
+      const zh = translateAdjustError(raw);
+      showToast('err', `❌ 调整失败 (${raw || 'unknown'})`,
+        [zh, '旧价位保持不变, 请修正后重试'], 9000);
     }
   };
 
@@ -1779,73 +1867,48 @@
     }
   }
 
-  // ============ 价格触发器 (本地浏览器监听 SSE 价格流) ============
+  // ============ 价格触发器 (⭐ 后端 WS 监听版, 浏览器关掉照样触发) ============
   //
-  // 状态结构 (按方向独立):
-  //   { enabled, triggerPrice, action, baselinePrice, side, armedAt, firing }
-  //   - action: 'open' (走 /manual-open 限价挂单) | 'follow' (走 /manual-follow 立即市价)
-  //   - side  : 'above' (价格涨到 trigger 触发) | 'below' (价格跌到 trigger 触发)
-  //             启用时根据 baselinePrice vs triggerPrice 自动判定
-  //   - firing: 触发中标志, 防止 SSE 高频帧期间重复触发
+  // 改造说明:
+  //   - 原版本: 浏览器监听 SSE 价格流 + localStorage 持久化, 关浏览器 / SSE 断流就漏触发
+  //   - 现版本: 后端 trading/state.js + riskEngine.js + WS 直监听, disk 持久化
+  //             前端只读 /status 显示 + 调 /price-trigger/arm /cancel 改状态
   //
-  // 持久化: localStorage 'PRICE_TRIGGERS_V1', 页面刷新仍生效, 触发后自动清除.
-  const PRICE_TRIGGER_KEY = 'PRICE_TRIGGERS_V1';
+  // 状态结构 (与后端 state.priceTriggers[dir] 完全对齐):
+  //   { enabled, triggerPrice, side, action, baselinePrice, armedAt, lastFiredAt, lastError }
+  //
+  // 数据流:
+  //   1) fetchAutoTradeStatus 拉 /status → syncPriceTriggersFromStatus 写入本地缓存
+  //   2) renderPriceTriggers 用本地缓存 + 实时价 重画 UI (+ 距触发价 % 提示)
+  //   3) 启用 / 取消 → callAdminApi → 后端 state.armPriceTrigger / cancelPriceTrigger
+  //   4) 命中 → riskEngine 自己 fire, 与浏览器无关 (用户从飞书 / 5s 轮询看到结果)
   const priceTriggers = {
-    long:  { enabled: false, triggerPrice: null, action: 'open', baselinePrice: null, side: null, armedAt: 0, firing: false },
-    short: { enabled: false, triggerPrice: null, action: 'open', baselinePrice: null, side: null, armedAt: 0, firing: false },
+    long:  { enabled: false, triggerPrice: null, action: null, baselinePrice: null, side: null, armedAt: null, lastFiredAt: null, lastError: null },
+    short: { enabled: false, triggerPrice: null, action: null, baselinePrice: null, side: null, armedAt: null, lastFiredAt: null, lastError: null },
   };
 
-  function loadPriceTriggersFromStorage() {
-    try {
-      const raw = localStorage.getItem(PRICE_TRIGGER_KEY);
-      if (!raw) return;
-      const obj = JSON.parse(raw);
-      ['long', 'short'].forEach((dir) => {
-        if (!obj || !obj[dir]) return;
-        const t = obj[dir];
-        if (!t.enabled || !Number.isFinite(Number(t.triggerPrice))) return;
-        priceTriggers[dir] = {
-          enabled: true,
-          triggerPrice: Number(t.triggerPrice),
-          action: t.action === 'follow' ? 'follow' : 'open',
-          baselinePrice: Number.isFinite(Number(t.baselinePrice)) ? Number(t.baselinePrice) : null,
-          side: t.side === 'above' || t.side === 'below' ? t.side : null,
-          armedAt: Number(t.armedAt) || 0,
-          firing: false,
-        };
-      });
-    } catch (e) { /* corrupted, ignore */ }
-  }
+  // 一次性清理旧版本 localStorage 残留 (避免用户疑惑"为什么还有数据")
+  try {
+    if (localStorage.getItem('PRICE_TRIGGERS_V1')) {
+      localStorage.removeItem('PRICE_TRIGGERS_V1');
+      console.log('[priceTrigger] 已迁移到后端, 清除旧版 localStorage 数据');
+    }
+  } catch (_) {}
 
-  function savePriceTriggersToStorage() {
-    try {
-      const out = {};
-      ['long', 'short'].forEach((dir) => {
-        const t = priceTriggers[dir];
-        if (!t.enabled) return;
-        out[dir] = {
-          enabled: true,
-          triggerPrice: t.triggerPrice,
-          action: t.action,
-          baselinePrice: t.baselinePrice,
-          side: t.side,
-          armedAt: t.armedAt,
-        };
-      });
-      localStorage.setItem(PRICE_TRIGGER_KEY, JSON.stringify(out));
-    } catch (e) { /* localStorage 满或被禁, 静默 */ }
-  }
-
-  function syncTriggerInputsFromState() {
+  /** 从 /status 拉到的 j.priceTriggers 同步到本地缓存 */
+  function syncPriceTriggersFromStatus(remote) {
     ['long', 'short'].forEach((dir) => {
-      const t = priceTriggers[dir];
-      const cap1 = cap(dir);
-      const priceEl  = document.getElementById('ptPrice'  + cap1);
-      const actionEl = document.getElementById('ptAction' + cap1);
-      if (t.enabled) {
-        if (priceEl  && t.triggerPrice != null) priceEl.value = t.triggerPrice;
-        if (actionEl && t.action)               actionEl.value = t.action;
-      }
+      const r = remote && remote[dir] ? remote[dir] : null;
+      priceTriggers[dir] = {
+        enabled: !!(r && r.enabled),
+        triggerPrice: r && Number.isFinite(Number(r.triggerPrice)) ? Number(r.triggerPrice) : null,
+        action: r && (r.action === 'open' || r.action === 'follow') ? r.action : null,
+        baselinePrice: r && Number.isFinite(Number(r.baselinePrice)) ? Number(r.baselinePrice) : null,
+        side: r && (r.side === 'above' || r.side === 'below') ? r.side : null,
+        armedAt: r?.armedAt || null,
+        lastFiredAt: r?.lastFiredAt || null,
+        lastError: r?.lastError || null,
+      };
     });
   }
 
@@ -1865,11 +1928,11 @@
       if (t.enabled) {
         card.classList.add('armed');
         status.className = 'pt-status armed';
-        status.textContent = '监听中';
+        status.textContent = '后端监听中';
         armBtn.disabled = true;
         cancelBtn.disabled = false;
-        if (priceEl)  priceEl.disabled  = true;
-        if (actionEl) actionEl.disabled = true;
+        if (priceEl)  { priceEl.disabled  = true; if (t.triggerPrice != null) priceEl.value = t.triggerPrice; }
+        if (actionEl) { actionEl.disabled = true; if (t.action) actionEl.value = t.action; }
         const sideZh = t.side === 'above' ? '涨到' : '跌到';
         const actZh  = t.action === 'follow' ? '🚀 立即追单 (市价)' : '📋 手动挂单 (限价)';
         const target = Number(t.triggerPrice).toFixed(2);
@@ -1882,7 +1945,8 @@
           else if (distPct < 0.3) cls += ' near';
           distHtml = ` · 距触发 <span class="${cls}">${distPct.toFixed(3)}%</span> (${distAbs.toFixed(2)} U)`;
         }
-        info.innerHTML = `等价格${sideZh} <b>${target}</b> 触发 → ${actZh}${distHtml}`;
+        const errHtml = t.lastError ? ` <span style="color:#f85149;">⚠️ 上次失败: ${t.lastError}</span>` : '';
+        info.innerHTML = `等价格${sideZh} <b>${target}</b> 触发 → ${actZh}${distHtml} · <span style="color:#3fb950;">🛰 后端 WS 监听</span>${errHtml}`;
       } else {
         card.classList.remove('armed');
         status.className = 'pt-status idle';
@@ -1891,14 +1955,15 @@
         cancelBtn.disabled = true;
         if (priceEl)  priceEl.disabled  = false;
         if (actionEl) actionEl.disabled = false;
-        info.textContent = dir === 'long'
+        const errHint = t.lastError ? ` ⚠️ 上次触发失败: ${t.lastError}` : '';
+        info.textContent = (dir === 'long'
           ? '未启用. 价格触达后将按所选动作开多.'
-          : '未启用. 价格触达后将按所选动作开空.';
+          : '未启用. 价格触达后将按所选动作开空.') + errHint;
       }
     });
   }
 
-  function armPriceTrigger(direction) {
+  async function armPriceTrigger(direction) {
     const cap1 = cap(direction);
     const priceEl  = document.getElementById('ptPrice'  + cap1);
     const actionEl = document.getElementById('ptAction' + cap1);
@@ -1909,130 +1974,92 @@
     }
     const action = (actionEl && actionEl.value) === 'follow' ? 'follow' : 'open';
 
-    // 基准价: 优先 SSE 实时价, 退回 /status 快照. 没有就让用户先等价格流就绪.
+    // baseline 让后端用它的 priceFeed.lastPrice 推导 (与后端 WS 同一时点, 最准),
+    // 这里只做"差额过近"的本地预校验, 提升用户体验
     const baseline = Number.isFinite(priceStream.lastPrice) ? priceStream.lastPrice : null;
-    if (baseline == null) {
-      showToast('warn', '⚠️ 等待价格流就绪',
-        '当前未连接到实时价格流, 请稍候片刻再启用 (页面顶部「价格源」需为 实时)', 5000);
-      return;
-    }
-    if (Math.abs(baseline - trigger) / baseline < 0.0005) {
+    if (baseline != null && Math.abs(baseline - trigger) / baseline < 0.0005) {
       showToast('warn', '⚠️ 触发价与当前价过于接近',
         `当前 ${baseline.toFixed(2)} ≈ 触发价 ${trigger.toFixed(2)} (差 < 0.05%), 易立即触发, 请重新确认`, 6000);
       return;
     }
     const dirZh = direction === 'long' ? '多' : '空';
     const actZh = action === 'follow' ? '追单 (立即市价)' : '手动挂单 (限价待触发)';
-    const sideZh = trigger > baseline ? '上涨到' : '下跌到';
+    const sideZh = baseline != null ? (trigger > baseline ? '上涨到' : '下跌到') : '触达';
     if (!confirm(
       `启用${dirZh}单价格触发器?\n` +
-      `· 当前价: ${baseline.toFixed(2)}\n` +
+      `· 当前价: ${baseline != null ? baseline.toFixed(2) : '--'}\n` +
       `· 触发价: ${trigger.toFixed(2)} (价格${sideZh}时触发)\n` +
       `· 触发后: ${actZh}\n` +
-      `· 触发后会自动取消该方向触发器, 不会重复执行.`
+      `· 监听位置: 🛰 后端 WS (浏览器关掉照样触发)\n` +
+      `· 触发后会自动消费该方向触发器, 不会重复执行.`
     )) return;
 
-    priceTriggers[direction] = {
-      enabled: true,
-      triggerPrice: trigger,
-      action,
-      baselinePrice: baseline,
-      side: trigger > baseline ? 'above' : 'below',
-      armedAt: Date.now(),
-      firing: false,
-    };
-    savePriceTriggersToStorage();
-    renderPriceTriggers(priceStream.lastPrice);
-    showToast('ok', `🎯 ${dirZh}单触发器已启用`,
-      `等待价格${sideZh} ${trigger.toFixed(2)} 触发 → ${actZh}`, 4000);
-  }
-
-  function cancelPriceTrigger(direction, opts = {}) {
-    const t = priceTriggers[direction];
-    if (!t.enabled) return;
-    priceTriggers[direction] = {
-      enabled: false, triggerPrice: null, action: t.action, baselinePrice: null,
-      side: null, armedAt: 0, firing: false,
-    };
-    savePriceTriggersToStorage();
-    renderPriceTriggers(priceStream.lastPrice);
-    if (!opts.silent) {
-      const dirZh = direction === 'long' ? '多' : '空';
-      showToast('warn', `🚫 ${dirZh}单触发器已取消`, '后续价格变动不再触发该方向自动开仓', 3000);
+    const armBtn   = document.getElementById('ptArm'    + cap1 + 'Btn');
+    const oldText = armBtn ? armBtn.textContent : '';
+    if (armBtn) { armBtn.disabled = true; armBtn.textContent = '启用中…'; }
+    try {
+      const body = { direction, triggerPrice: trigger, action };
+      if (baseline != null) body.baselinePrice = baseline;
+      const j = await callAdminApi('/api/auto-trade/price-trigger/arm', body);
+      console.log(`[priceTrigger] ✅ ${direction} armed (backend):`, j);
+      // 同步本地缓存 → 立即重画 (避免等下一次 5s 轮询)
+      if (j.trigger) {
+        priceTriggers[direction] = {
+          enabled: true,
+          triggerPrice: Number(j.trigger.triggerPrice),
+          action: j.trigger.action,
+          baselinePrice: Number(j.trigger.baselinePrice),
+          side: j.trigger.side,
+          armedAt: j.trigger.armedAt,
+          lastFiredAt: null,
+          lastError: null,
+        };
+      }
+      renderPriceTriggers(priceStream.lastPrice);
+      showToast('ok', `🎯 ${dirZh}单触发器已启用 (后端监听)`,
+        `等待价格${j.trigger?.side === 'above' ? '上涨到' : '下跌到'} ${trigger.toFixed(2)} 触发 → ${actZh} · 浏览器关掉照样触发`, 5000);
+    } catch (e) {
+      console.error(`[priceTrigger] ❌ arm 失败:`, e?.message || e, e?.body || '');
+      showToast('err', `❌ ${dirZh}单触发器启用失败`,
+        `${e.message || '未知错误'} (请检查总开关 / token / 触发价合法性)`, 8000);
+    } finally {
+      if (armBtn) { armBtn.disabled = false; armBtn.textContent = oldText; }
+      try { await fetchAutoTradeStatus(); } catch (_) {}
     }
   }
 
-  /**
-   * 检查触发条件 — 在每一帧 SSE 价格流到达时调用.
-   *   above: 价格 >= triggerPrice 触发
-   *   below: 价格 <= triggerPrice 触发
-   * 触发成功 → 调用 /manual-open 或 /manual-follow, 然后清除该方向触发器.
-   */
-  function evaluatePriceTriggers(currentPrice) {
-    if (!Number.isFinite(currentPrice) || currentPrice <= 0) return;
-    ['long', 'short'].forEach((dir) => {
-      const t = priceTriggers[dir];
-      if (!t.enabled || t.firing) return;
-      const trigger = Number(t.triggerPrice);
-      if (!Number.isFinite(trigger)) return;
-      const hit = (t.side === 'above' && currentPrice >= trigger)
-                || (t.side === 'below' && currentPrice <= trigger);
-      if (!hit) return;
-      t.firing = true;
-      firePriceTrigger(dir, currentPrice).catch(() => {});
-    });
-  }
-
-  async function firePriceTrigger(direction, hitPrice) {
+  async function cancelPriceTrigger(direction) {
     const t = priceTriggers[direction];
+    if (!t.enabled) return;
     const dirZh = direction === 'long' ? '多' : '空';
-    const action = t.action;
-    const apiPath = action === 'follow' ? '/api/auto-trade/manual-follow' : '/api/auto-trade/manual-open';
-    const actZh = action === 'follow' ? '追单 (立即市价)' : '手动挂单 (限价待触发)';
-
-    showToast('warn', `🎯 ${dirZh}单触发器命中`,
-      `当前价 ${Number(hitPrice).toFixed(2)} ${t.side === 'above' ? '≥' : '≤'} 触发价 ${Number(t.triggerPrice).toFixed(2)} → 准备执行 ${actZh}`, 4000);
-
-    // 触发就立刻取消, 避免高频 tick 期间重复触发 / 后续 retry 又下单
-    cancelPriceTrigger(direction, { silent: true });
-
+    if (!confirm(`确认取消${dirZh}单价格触发器? 后续价格变动不再触发该方向自动开仓.`)) return;
+    const cap1 = cap(direction);
+    const cancelBtn = document.getElementById('ptCancel' + cap1 + 'Btn');
+    const oldText = cancelBtn ? cancelBtn.textContent : '';
+    if (cancelBtn) { cancelBtn.disabled = true; cancelBtn.textContent = '取消中…'; }
     try {
-      const j = await callAdminApi(apiPath, { direction });
-      const p = j.position || {};
-      if (action === 'open') {
-        const mode = j.mode || (p.pending ? 'pending' : 'immediate');
-        if (mode === 'pending') {
-          const plan = p.pendingPlan || {};
-          showToast('ok', `✅ ${dirZh}单触发执行成功 (挂单)`, [
-            `价位来源: ${j.priceSource || '--'}`,
-            `🚪 待触发 entry: ${plan.entry != null ? Number(plan.entry).toFixed(2) : '--'}`,
-            `仓位 ${plan.positionSize || '--'} / ${plan.leverage || '--'}x`,
-            `SL ${plan.sl != null ? Number(plan.sl).toFixed(2) : '--'} | TP1 ${plan.tp1 != null ? Number(plan.tp1).toFixed(2) : '--'} | TP2 ${plan.tp2 != null ? Number(plan.tp2).toFixed(2) : '--'} | TP3 ${plan.tp3 != null ? Number(plan.tp3).toFixed(2) : '--'}`,
-          ], 8000);
-        } else {
-          showToast('ok', `✅ ${dirZh}单触发执行成功 (已成交)`, [
-            `入场: ${p.entryPrice ?? '--'} | 仓位 ${p.positionSize || '--'} / ${p.leverage || '--'}x`,
-            `SL ${p.currentStopLoss != null ? Number(p.currentStopLoss).toFixed(2) : '--'}`,
-          ], 8000);
-        }
-      } else {
-        showToast('ok', `🚀 ${dirZh}单触发执行成功 (追单/市价)`, [
-          `入场: ${p.entryPrice ?? '--'} | 仓位 ${p.positionSize || '--'} / ${p.leverage || '--'}x`,
-          `SL ${p.currentStopLoss != null ? Number(p.currentStopLoss).toFixed(2) : '--'}`,
-        ], 8000);
+      // cancel 不需要 admin token (与后端路由设计一致)
+      const r = await fetch('/api/auto-trade/price-trigger/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ direction }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || j.ok === false) {
+        throw new Error(j.error || `HTTP ${r.status}`);
       }
+      console.log(`[priceTrigger] 🚫 ${direction} cancelled (backend):`, j);
+      priceTriggers[direction] = {
+        enabled: false, triggerPrice: null, action: null, baselinePrice: null,
+        side: null, armedAt: null, lastFiredAt: t.lastFiredAt, lastError: null,
+      };
+      renderPriceTriggers(priceStream.lastPrice);
+      showToast('warn', `🚫 ${dirZh}单触发器已取消`, '后续价格变动不再触发该方向自动开仓', 3000);
     } catch (e) {
-      // 触发失败: 将状态标为 failed (UI 提示), 触发器已取消, 用户可重新设置
-      showToast('err', `❌ ${dirZh}单触发执行失败`,
-        `${e.message || '未知错误'} (触发器已取消, 如需重试请重新启用)`, 9000);
-      const cap1 = cap(direction);
-      const status = document.getElementById('ptStatus' + cap1);
-      if (status) {
-        status.className = 'pt-status failed';
-        status.textContent = '执行失败';
-      }
+      console.error(`[priceTrigger] ❌ cancel 失败:`, e?.message || e);
+      showToast('err', `❌ 取消失败`, e.message || '未知错误', 6000);
     } finally {
-      // 立即拉一次状态, 让"挂多/挂空"按钮等同步禁用
+      if (cancelBtn) { cancelBtn.disabled = false; cancelBtn.textContent = oldText; }
       try { await fetchAutoTradeStatus(); } catch (_) {}
     }
   }
@@ -2688,9 +2715,15 @@
     if (armBtn)    armBtn.addEventListener('click', () => armPriceTrigger(dir));
     if (cancelBtn) cancelBtn.addEventListener('click', () => cancelPriceTrigger(dir));
   });
-  loadPriceTriggersFromStorage();
-  syncTriggerInputsFromState();
   renderPriceTriggers(priceStream.lastPrice);
+
+  // ⭐ 价格触发器现已搬到后端 (riskEngine + WS 直监听 + disk 持久化),
+  // 前端无须做"tab 回前台主动检查"了, 因为触发判定不在浏览器跑. 这里仍保留
+  // visibilitychange 监听, 回前台立即拉一次 /status, 让 UI 显示最新状态.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    fetchAutoTradeStatus().catch(() => {});
+  });
 
   // 启动顺序：先拉自动交易状态(决定文案), 再加载行情数据
   fetchAutoTradeStatus().then(load);

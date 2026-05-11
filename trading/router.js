@@ -615,7 +615,120 @@ router.get('/status', (req, res) => {
     tp1Protection: cfg.tp1Protection !== false,
     priceFeed: priceFeed.getStatus(),
     positions: state.get(),
+    // ⭐ 价格触发器 (后端 WS 监听 + disk 持久化, 浏览器关掉也会触发)
+    priceTriggers: state.getPriceTriggers(),
   });
+});
+
+// ============ 价格触发器路由 (后端版, 取代浏览器 localStorage) ============
+//
+// 设计:
+//   - 状态由 trading/state.js 持久化, 浏览器关闭/刷新都保留
+//   - riskEngine 每帧 tick evaluate, 命中调 manualOpenImpl / manualFollowImpl
+//   - arm 需要 admin token (与开仓动作同级); cancel 不需要 (撤销等价于不下单)
+//
+// 与 pending 限价单的区别: trigger 是"第一级闸门 — 价格到 X 才开始挂单/追单",
+// 命中后才进入 pending (action='open') 或立即市价 (action='follow').
+
+/**
+ * POST /price-trigger/arm
+ *
+ * body: {
+ *   direction: 'long' | 'short',
+ *   triggerPrice: number,            必填
+ *   action: 'open' | 'follow',       必填
+ *   baselinePrice?: number           可选, 不传则用当前 WS 市价
+ * }
+ *
+ * 校验:
+ *   - direction / triggerPrice / action 合法
+ *   - 触发价与当前价差 ≥ 0.05% (避免立即命中误触)
+ *   - 必须能拿到 baselinePrice (传入 或 priceFeed.lastPrice)
+ */
+router.post('/price-trigger/arm', requireAdmin, (req, res) => {
+  const direction = req.body?.direction;
+  const triggerPrice = Number(req.body?.triggerPrice);
+  const action = req.body?.action === 'follow' ? 'follow' : (req.body?.action === 'open' ? 'open' : null);
+  let baselinePrice = Number(req.body?.baselinePrice);
+
+  if (!['long', 'short'].includes(direction)) {
+    return res.status(400).json({ ok: false, error: 'direction must be long|short' });
+  }
+  if (!Number.isFinite(triggerPrice) || triggerPrice <= 0) {
+    return res.status(400).json({ ok: false, error: 'invalid_trigger_price' });
+  }
+  if (!action) {
+    return res.status(400).json({ ok: false, error: "action must be 'open' or 'follow'" });
+  }
+  if (!Number.isFinite(baselinePrice) || baselinePrice <= 0) {
+    const px = priceFeed.getStatus().lastPrice;
+    if (!Number.isFinite(px)) {
+      return res.status(503).json({
+        ok: false, error: 'price_feed_not_ready',
+        hint: 'WS 行情未就绪, 无法推导触发方向, 请稍候重试 (或显式传 baselinePrice)',
+      });
+    }
+    baselinePrice = Number(px);
+  }
+  // 0.05% 容差: 太近会立即被 evaluate 触发, 失去"触发器"语义
+  if (Math.abs(baselinePrice - triggerPrice) / baselinePrice < 0.0005) {
+    return res.status(400).json({
+      ok: false, error: 'trigger_too_close_to_baseline',
+      hint: `触发价 ${triggerPrice.toFixed(2)} 与当前价 ${baselinePrice.toFixed(2)} 相差 < 0.05%, 易立即触发, 请调远`,
+    });
+  }
+
+  const trigger = state.armPriceTrigger(direction, { triggerPrice, action, baselinePrice });
+
+  const cfg = config.get();
+  const titleEmoji = direction === 'long' ? '📈' : '📉';
+  const actZh = action === 'follow' ? '🚀 立即追单 (市价)' : '📋 挂单 (限价待触发)';
+  const sideZh = trigger.side === 'above' ? '上涨到' : '下跌到';
+  exec.notify({
+    type: 'wait',
+    title: `${titleEmoji} ${direction.toUpperCase()} 价格触发器已启用`,
+    lines: [
+      `symbol: ${cfg.symbol}`,
+      `触发方向: ${direction}`,
+      `当前价: ${baselinePrice.toFixed(2)}`,
+      `触发价: ${triggerPrice.toFixed(2)} (价格${sideZh})`,
+      `触发动作: ${actZh}`,
+      `运行位置: 后端 WS 监听 (浏览器关闭照样触发)`,
+      `❎ 取消: POST /api/auto-trade/price-trigger/cancel {"direction":"${direction}"}`,
+    ],
+  });
+  res.json({ ok: true, direction, trigger });
+});
+
+/**
+ * POST /price-trigger/cancel
+ *
+ * body: { direction: 'long' | 'short' }
+ * 不需要 admin token (取消 = 不下单, 风险等价于无操作).
+ */
+router.post('/price-trigger/cancel', (req, res) => {
+  const direction = req.body?.direction;
+  if (!['long', 'short'].includes(direction)) {
+    return res.status(400).json({ ok: false, error: 'direction must be long|short' });
+  }
+  const prev = state.cancelPriceTrigger(direction, req.body?.reason || 'manual_api');
+  if (!prev) {
+    return res.status(404).json({ ok: false, error: 'no_active_trigger', direction });
+  }
+  const cfg = config.get();
+  const titleEmoji = direction === 'long' ? '📈' : '📉';
+  exec.notify({
+    type: 'wait',
+    title: `🚫 ${titleEmoji} ${direction.toUpperCase()} 价格触发器已取消`,
+    lines: [
+      `symbol: ${cfg.symbol}`,
+      `原触发价: ${Number(prev.triggerPrice).toFixed(2)} (${prev.side})`,
+      `原动作: ${prev.action === 'follow' ? '追单' : '挂单'}`,
+      `启用时间: ${cnTime(prev.armedAt)}`,
+      `取消原因: ${prev.cancelReason || 'manual'}`,
+    ],
+  });
+  res.json({ ok: true, direction, prev });
 });
 
 // ============ GET /price-stream (SSE 实时价格流) ============
@@ -847,18 +960,27 @@ router.post('/cancel-pending', (req, res) => {
 // 整体走 pending 限价模式 (与 regime auto 同一通道), 价格触达 entry 才发 forwardOpen.
 //
 // ⚠️ 总开关关闭时直接拒绝, 避免"以为关了不下单, 手动一按又下了"的语义混乱.
-router.post('/manual-open', requireAdmin, async (req, res) => {
-  const direction = req.body?.direction;
+/**
+ * /manual-open 的可复用实现: 抽出来供:
+ *   1) HTTP 端点 POST /api/auto-trade/manual-open (用户点击 UI 按钮)
+ *   2) riskEngine.firePriceTrigger 价格触发器命中后 in-process 调用 (浏览器关掉也能下单)
+ *
+ * @param {object} opts
+ * @param {'long'|'short'} opts.direction
+ * @param {string} [opts.source='manual_ui']  传给 processSignal 的来源标记
+ * @returns {Promise<{status:number, body:object}>}
+ */
+async function manualOpenImpl(opts = {}) {
+  const direction = opts.direction;
   if (!['long', 'short'].includes(direction)) {
-    return res.status(400).json({ ok: false, error: 'direction must be long|short' });
+    return { status: 400, body: { ok: false, error: 'direction must be long|short' } };
   }
   const cfg = config.get();
   if (!cfg.enabled) {
-    return res.status(409).json({
-      ok: false,
-      error: 'auto_trade_disabled',
-      hint: '请先开启「自动下单」总开关再手动开仓',
-    });
+    return {
+      status: 409,
+      body: { ok: false, error: 'auto_trade_disabled', hint: '请先开启「自动下单」总开关再手动开仓' },
+    };
   }
 
   const sig = {
@@ -872,27 +994,25 @@ router.post('/manual-open', requireAdmin, async (req, res) => {
   if (!planLv) {
     const marketPrice = priceFeed.getStatus().lastPrice;
     if (!Number.isFinite(marketPrice)) {
-      return res.status(503).json({
-        ok: false,
-        error: 'price_feed_not_ready',
-        hint: 'WS 行情尚未就绪, 无法计算动态 ATR 方案的 entry',
-      });
+      return {
+        status: 503,
+        body: { ok: false, error: 'price_feed_not_ready', hint: 'WS 行情尚未就绪, 无法计算动态 ATR 方案的 entry' },
+      };
     }
     let lv;
     try {
       lv = computeManualFallbackLevels(direction, marketPrice, true);
     } catch (e) {
-      return res.status(400).json({ ok: false, error: e.message });
+      return { status: 400, body: { ok: false, error: e.message } };
     }
     const validate = validateManualLevels(direction, lv.entry, lv.tp1, lv.tp2, lv.tp3, lv.sl);
     if (!validate.ok) {
-      return res.status(400).json({ ok: false, error: 'manual_levels_invalid:' + validate.reason, segments: validate.segments });
+      return { status: 400, body: { ok: false, error: 'manual_levels_invalid:' + validate.reason, segments: validate.segments } };
     }
     sig.entry = lv.entry;
     sig.stop_loss = lv.sl;
     sig.tp1 = lv.tp1; sig.tp2 = lv.tp2; sig.tp3 = lv.tp3;
-    
-    // 使用最新 regime 的置信度仓位
+
     let getLatestPlan;
     try { getLatestPlan = require('../regimeModule').getLatestPlan; } catch (e) {}
     const planInfo = getLatestPlan ? getLatestPlan() : null;
@@ -901,7 +1021,11 @@ router.post('/manual-open', requireAdmin, async (req, res) => {
     sig._priceSource = 'manual_fallback_atr';
   }
 
-  const r = await processSignal(sig, { source: 'manual_ui' });
+  return processSignal(sig, { source: opts.source || 'manual_ui' });
+}
+
+router.post('/manual-open', requireAdmin, async (req, res) => {
+  const r = await manualOpenImpl({ direction: req.body?.direction, source: 'manual_ui' });
   res.status(r.status).json(r.body);
 });
 
@@ -917,51 +1041,60 @@ router.post('/manual-open', requireAdmin, async (req, res) => {
 //   - 同步推送 TG + 飞书
 //
 // 复用 processSignal 的所有现有 防重复/冷却/方向校验/价位校验/通知 逻辑.
-router.post('/manual-follow', requireAdmin, async (req, res) => {
-  const direction = req.body?.direction;
+/**
+ * /manual-follow 的可复用实现: 抽出来供:
+ *   1) HTTP 端点 POST /api/auto-trade/manual-follow (用户点击 UI 按钮)
+ *   2) riskEngine.firePriceTrigger 价格触发器命中后 in-process 调用
+ *
+ * @param {object} opts
+ * @param {'long'|'short'} opts.direction
+ * @param {string} [opts.source='manual_follow']
+ * @param {string|number} [opts.position_size]  覆盖默认 / regime 置信度仓位
+ * @returns {Promise<{status:number, body:object}>}
+ */
+async function manualFollowImpl(opts = {}) {
+  const direction = opts.direction;
   if (!['long', 'short'].includes(direction)) {
-    return res.status(400).json({ ok: false, error: 'direction must be long|short' });
+    return { status: 400, body: { ok: false, error: 'direction must be long|short' } };
   }
   const cfg = config.get();
   if (!cfg.enabled) {
-    return res.status(409).json({
-      ok: false,
-      error: 'auto_trade_disabled',
-      hint: '请先开启「自动下单」总开关再手动追单',
-    });
+    return {
+      status: 409,
+      body: { ok: false, error: 'auto_trade_disabled', hint: '请先开启「自动下单」总开关再手动追单' },
+    };
   }
 
   const marketPrice = priceFeed.getStatus().lastPrice;
   if (!Number.isFinite(marketPrice)) {
-    return res.status(503).json({
-      ok: false,
-      error: 'price_feed_not_ready',
-      hint: 'WS 行情尚未就绪, 无法以市价进行手动追单',
-    });
+    return {
+      status: 503,
+      body: { ok: false, error: 'price_feed_not_ready', hint: 'WS 行情尚未就绪, 无法以市价进行手动追单' },
+    };
   }
 
   let lv;
   try {
     lv = computeManualFallbackLevels(direction, marketPrice, false);
   } catch (e) {
-    return res.status(400).json({ ok: false, error: e.message });
+    return { status: 400, body: { ok: false, error: e.message } };
   }
   const validate = validateManualLevels(direction, lv.entry, lv.tp1, lv.tp2, lv.tp3, lv.sl);
   if (!validate.ok) {
-    return res.status(400).json({ ok: false, error: 'manual_levels_invalid:' + validate.reason, segments: validate.segments });
+    return { status: 400, body: { ok: false, error: 'manual_levels_invalid:' + validate.reason, segments: validate.segments } };
   }
 
-  // 获取动态仓位，或者使用请求中指定的仓位
   let getLatestPlan;
   try { getLatestPlan = require('../regimeModule').getLatestPlan; } catch (e) {}
   const planInfo = getLatestPlan ? getLatestPlan() : null;
-  const posPct = req.body?.position_size ? parseFloat(req.body.position_size) : (planInfo?.tradePlan?.suggestedPositionPct || 50);
+  const posPct = opts.position_size != null
+    ? parseFloat(opts.position_size)
+    : (planInfo?.tradePlan?.suggestedPositionPct || 50);
 
   const sig = {
     token: cfg.token,
     action: direction === 'long' ? 'open_long' : 'open_short',
     symbol: cfg.symbol,
-    // 强制 immediate (跳过 pending 限价分支), 立即按市价 forwardOpen
     market: true,
     immediate: true,
     entry: lv.entry,
@@ -971,8 +1104,15 @@ router.post('/manual-follow', requireAdmin, async (req, res) => {
     _priceSource: 'manual_follow_atr',
   };
 
-  // skipRegimePlan: 即便 regime 有 plan 也不查/不替换, 严格按手动追单语义
-  const r = await processSignal(sig, { source: 'manual_follow', skipRegimePlan: true });
+  return processSignal(sig, { source: opts.source || 'manual_follow', skipRegimePlan: true });
+}
+
+router.post('/manual-follow', requireAdmin, async (req, res) => {
+  const r = await manualFollowImpl({
+    direction: req.body?.direction,
+    source: 'manual_follow',
+    position_size: req.body?.position_size,
+  });
   res.status(r.status).json(r.body);
 });
 
@@ -1263,3 +1403,7 @@ module.exports.requireAdmin = requireAdmin;
 // 反向信号取消挂单 — regimeModule 在 dispatchWebhookSignals 里 in-process 调用
 // 避免绕 HTTP, 也与 fvg-signal 路由共享同一段逻辑/通知/日志格式.
 module.exports.cancelPendingByReverseSignal = cancelPendingByReverseSignal;
+// 价格触发器命中后由 riskEngine in-process 调用, 完全复用 HTTP 端点的逻辑
+// 这样浏览器关掉, 价格触发器照样能从 WS tick 命中 → manual-open / manual-follow
+module.exports.manualOpenImpl = manualOpenImpl;
+module.exports.manualFollowImpl = manualFollowImpl;

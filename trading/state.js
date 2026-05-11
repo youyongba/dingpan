@@ -24,6 +24,22 @@ const path = require('path');
 const STATE_FILE = process.env.AUTO_TRADE_STATE_PATH
   || path.join(__dirname, '..', 'data', 'auto_trade_state.json');
 
+// ============ 价格触发器 (PriceTrigger) ============
+// 与 pending 独立的"一级闸门": 用户先设"价格到 X 我才挂单/追单",
+// 价格触达后, riskEngine 调 processSignal 走 manual-open (action='open' 挂单)
+// 或 manual-follow (action='follow' 立即市价追单). 命中后该 slot 立即变成
+// EMPTY_PRICE_TRIGGER, 与 pending 限价单同样 disk 持久化, 与浏览器无关.
+const EMPTY_PRICE_TRIGGER = () => ({
+  enabled: false,
+  triggerPrice: null,          // 触发价 (USDT)
+  side: null,                  // 'above' | 'below'  (arm 时根据 baseline vs trigger 决定)
+  action: null,                // 'open' (挂单 → /manual-open) | 'follow' (追单 → /manual-follow)
+  baselinePrice: null,         // arm 时的市价 (审计)
+  armedAt: null,               // ISO string, 启用时间
+  lastFiredAt: null,           // ISO string, 上一次成功 fire 时间 (审计)
+  lastError: null,             // 上一次 fire 失败的原因 (字符串), 用户可在 UI 看见
+});
+
 const EMPTY_POSITION = () => ({
   active: false,         // 是否持仓中
   locked: false,         // 是否锁定 (拒绝同方向再开)
@@ -72,13 +88,23 @@ function load() {
   state = {
     long: { ...EMPTY_POSITION(), ...(disk?.long || {}) },
     short: { ...EMPTY_POSITION(), ...(disk?.short || {}) },
+    // 价格触发器与 long/short 仓位独立, 两侧各一个 slot, 互不影响
+    priceTriggers: {
+      long:  { ...EMPTY_PRICE_TRIGGER(), ...(disk?.priceTriggers?.long  || {}) },
+      short: { ...EMPTY_PRICE_TRIGGER(), ...(disk?.priceTriggers?.short || {}) },
+    },
     updatedAt: disk?.updatedAt || null,
   };
   // 兼容旧字段
   ['long', 'short'].forEach(k => {
     state[k].tpHit = state[k].tpHit || { tp1: false, tp2: false, tp3: false };
   });
-  console.log(`[trade.state] 已加载: long.locked=${state.long.locked}, short.locked=${state.short.locked}`);
+  // 旧 disk state 没 priceTriggers, load 后正常为空; armPriceTrigger 时再写盘
+  console.log(
+    `[trade.state] 已加载: long.locked=${state.long.locked}, short.locked=${state.short.locked}` +
+    ` | priceTriggers.long.enabled=${state.priceTriggers.long.enabled}` +
+    ` priceTriggers.short.enabled=${state.priceTriggers.short.enabled}`
+  );
   return state;
 }
 
@@ -356,6 +382,132 @@ function updatePendingLevels(direction, levels) {
   return { ok: true, prev, next: plan, skipped };
 }
 
+// ============================================================
+// ============ 价格触发器 (PriceTrigger) API ==================
+// ============================================================
+//
+// 设计目标: 把原本前端浏览器 localStorage 维护的"价格到 X 才挂单/追单"
+// 整体搬到后端, 由 riskEngine 每帧 tick evaluate. 浏览器关掉也照样触发.
+//
+// 状态: state.priceTriggers.{long,short}, 与仓位完全独立, 与 disk 同步落盘.
+//
+// 与 pending 限价单的区别:
+//   - pending  → 已经决定要开仓, 等价格回踩 entry 才 fill 真正下单 webhook
+//   - trigger  → 第一级闸门, 价格到 X 才"开始"挂单/追单流程; 触发后才进入
+//                 pending (action='open') 或立即市价 (action='follow').
+//   - 两者可以串联: trigger 命中 → 调 manual-open → pending → 价格回踩 → 真正下单
+
+/**
+ * 启用价格触发器 (一个方向 slot).
+ *
+ * ⚠️ 幂等 / 覆盖语义:
+ *   - 同方向已有 enabled trigger → 直接覆盖 (用户重设触发价)
+ *   - 与该方向仓位的 active/pending 完全独立, 不影响开/平
+ *
+ * @param {'long'|'short'} direction
+ * @param {object} args
+ * @param {number} args.triggerPrice   触发价 (必填, USDT)
+ * @param {'open'|'follow'} args.action  触发后动作 (必填)
+ * @param {number} args.baselinePrice  启用时的市价 (必填, 用于推导 side)
+ * @returns {object} 已 arm 的 trigger 快照
+ */
+function armPriceTrigger(direction, args) {
+  if (!state) load();
+  if (direction !== 'long' && direction !== 'short') throw new Error('invalid_direction');
+  const triggerPrice = Number(args?.triggerPrice);
+  const baselinePrice = Number(args?.baselinePrice);
+  const action = args?.action === 'follow' ? 'follow' : 'open';
+  if (!Number.isFinite(triggerPrice) || triggerPrice <= 0) throw new Error('invalid_trigger_price');
+  if (!Number.isFinite(baselinePrice) || baselinePrice <= 0) throw new Error('invalid_baseline_price');
+  // side: trigger > baseline → 'above' (价格上涨到 trigger 触发); 反之 'below'
+  // 与原前端 armPriceTrigger 语义完全一致
+  const side = triggerPrice > baselinePrice ? 'above' : 'below';
+  const next = {
+    ...EMPTY_PRICE_TRIGGER(),
+    enabled: true,
+    triggerPrice,
+    side,
+    action,
+    baselinePrice,
+    armedAt: new Date().toISOString(),
+  };
+  state.priceTriggers[direction] = next;
+  save();
+  return { ...next };
+}
+
+/**
+ * 取消价格触发器 (手动 / 触发后清除 / 反向信号).
+ *
+ * @param {'long'|'short'} direction
+ * @param {string} [reason]   仅作日志/审计
+ * @returns {object|null} prev 触发器快照, 或 null (本来就没启用)
+ */
+function cancelPriceTrigger(direction, reason = 'manual') {
+  if (!state) load();
+  if (direction !== 'long' && direction !== 'short') return null;
+  const prev = state.priceTriggers[direction];
+  if (!prev || !prev.enabled) return null;
+  state.priceTriggers[direction] = {
+    ...EMPTY_PRICE_TRIGGER(),
+    lastFiredAt: prev.lastFiredAt,    // 保留审计字段
+    lastError: reason === 'manual' ? null : (prev.lastError || null),
+  };
+  save();
+  return { ...prev, cancelReason: reason };
+}
+
+/**
+ * 原子触发并清除. 与 markTpHit / closeAndUnlock 同样的幂等模式:
+ *   - 已被消费 / 未启用 → 返回 null (拦住"两个 tick 同帧 evaluate 都看到 hit"的 race)
+ *   - 成功消费         → 把 priceTriggers[dir] 写成 disabled (firedAt 标记), 返回 prev
+ *
+ * 调用方 (riskEngine.firePriceTrigger) 必须检查返回值,
+ * null 时直接退出, 不调 processSignal, 不发通知.
+ *
+ * @param {'long'|'short'} direction
+ * @param {number} hitPrice    实际触发时的市价 (用于审计与通知)
+ * @returns {object|null}      原 trigger 快照 (含 action / triggerPrice 等)
+ */
+function consumePriceTrigger(direction, hitPrice) {
+  if (!state) load();
+  if (direction !== 'long' && direction !== 'short') return null;
+  const prev = state.priceTriggers[direction];
+  if (!prev || !prev.enabled) return null;
+  state.priceTriggers[direction] = {
+    ...EMPTY_PRICE_TRIGGER(),
+    lastFiredAt: new Date().toISOString(),
+  };
+  save();
+  return { ...prev, hitPrice: Number(hitPrice) };
+}
+
+/**
+ * 触发失败时, 把 lastError 写盘 (UI 可读), 不改 enabled.
+ * ⚠️ 注意: 当前实现是"触发即消费", consumePriceTrigger 已经把 enabled=false 了.
+ * 这里仅在 fire 整体失败时附加错误信息 (用户在 /status 里能看见原因).
+ *
+ * @param {'long'|'short'} direction
+ * @param {string} errorMsg
+ */
+function recordPriceTriggerError(direction, errorMsg) {
+  if (!state) load();
+  if (direction !== 'long' && direction !== 'short') return;
+  const cur = state.priceTriggers[direction];
+  if (!cur) return;
+  state.priceTriggers[direction] = { ...cur, lastError: String(errorMsg || '').slice(0, 240) };
+  save();
+}
+
+/** 返回 priceTriggers 状态 (供 /status 输出 / 内部读取) */
+function getPriceTriggers() {
+  if (!state) load();
+  return {
+    long:  { ...state.priceTriggers.long },
+    short: { ...state.priceTriggers.short },
+  };
+}
+
 load();
 
 module.exports = {
@@ -366,4 +518,7 @@ module.exports = {
   armPending, cancelPending, markPendingFilled,
   // 手动调整止盈止损
   updateActiveLevels, updatePendingLevels,
+  // ⭐ 价格触发器 (与浏览器无关, 由 riskEngine 监听 WS 直接 evaluate)
+  armPriceTrigger, cancelPriceTrigger, consumePriceTrigger,
+  recordPriceTriggerError, getPriceTriggers,
 };
