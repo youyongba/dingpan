@@ -1543,14 +1543,26 @@
   };
 
   /**
-   * 客户端预校验 — 与后端 validateManualLevels 同算法, 提前拦截 400.
+   * 客户端预校验 — 与后端校验算法同步, 提前拦截 400.
    *
-   * 多头约束: tp1 > entry, tp2 > tp1, tp3 > tp2, sl < entry
-   * 空头约束: tp1 < entry, tp2 < tp1, tp3 < tp2, sl > entry
+   * 两种模式 (按 target 区分):
+   *   - pending: 与后端 validateManualLevels 等价 (新开仓语义)
+   *       多头: tp1 > entry, tp2 > tp1, tp3 > tp2, sl < entry
+   *       空头: tp1 < entry, tp2 < tp1, tp3 < tp2, sl > entry
    *
-   * 返回中文化的错误说明 (含具体冲突的两个值), 而不是后端的英文 reason code.
+   *   - active: 与后端 validateAdjustActiveLevels 等价 (持仓中调整语义)
+   *       已触发的 TPN 完全跳过, 仅校验未触发部分;
+   *       TP1 已触发后 SL 允许上移到 entry 之上 (trailing / 锁利).
+   *       修复 bug: TP1 触发后保本止损 sl=entry, 用户什么都不改也无法保存
+   *
+   * 返回中文化的具体冲突说明, 不是后端的英文 reason code.
+   *
+   * @param {'long'|'short'} direction
+   * @param {{entry, tp1, tp2, tp3, sl}} merged 改后的最终价位 (已合并 input 与快照)
+   * @param {'active'|'pending'} target
+   * @param {{tp1?:boolean, tp2?:boolean, tp3?:boolean}} tpHit 仅 active 用到; pending 默认空对象
    */
-  function validateAdjustLevelsClient(direction, merged) {
+  function validateAdjustLevelsClient(direction, merged, target, tpHit) {
     const isLong = direction === 'long';
     const { entry, tp1, tp2, tp3, sl } = merged;
     const all = [['entry', entry], ['tp1', tp1], ['tp2', tp2], ['tp3', tp3], ['sl', sl]];
@@ -1560,31 +1572,98 @@
       }
     }
     const f = (n) => Number(n).toFixed(2);
-    if (isLong) {
-      if (!(tp1 > entry)) return { ok: false, hint: `多头 TP1 (${f(tp1)}) 必须高于入场价 (${f(entry)})` };
-      if (!(tp2 > tp1))   return { ok: false, hint: `多头 TP2 (${f(tp2)}) 必须高于 TP1 (${f(tp1)})` };
-      if (!(tp3 > tp2))   return { ok: false, hint: `多头 TP3 (${f(tp3)}) 必须高于 TP2 (${f(tp2)})` };
-      if (!(sl < entry))  return { ok: false, hint: `多头止损 (${f(sl)}) 必须低于入场价 (${f(entry)})` };
-    } else {
-      if (!(tp1 < entry)) return { ok: false, hint: `空头 TP1 (${f(tp1)}) 必须低于入场价 (${f(entry)})` };
-      if (!(tp2 < tp1))   return { ok: false, hint: `空头 TP2 (${f(tp2)}) 必须低于 TP1 (${f(tp1)})` };
-      if (!(tp3 < tp2))   return { ok: false, hint: `空头 TP3 (${f(tp3)}) 必须低于 TP2 (${f(tp2)})` };
-      if (!(sl > entry))  return { ok: false, hint: `空头止损 (${f(sl)}) 必须高于入场价 (${f(entry)})` };
+
+    if (target === 'pending') {
+      if (isLong) {
+        if (!(tp1 > entry)) return { ok: false, hint: `多头 TP1 (${f(tp1)}) 必须高于入场价 (${f(entry)})` };
+        if (!(tp2 > tp1))   return { ok: false, hint: `多头 TP2 (${f(tp2)}) 必须高于 TP1 (${f(tp1)})` };
+        if (!(tp3 > tp2))   return { ok: false, hint: `多头 TP3 (${f(tp3)}) 必须高于 TP2 (${f(tp2)})` };
+        if (!(sl < entry))  return { ok: false, hint: `多头止损 (${f(sl)}) 必须低于入场价 (${f(entry)})` };
+      } else {
+        if (!(tp1 < entry)) return { ok: false, hint: `空头 TP1 (${f(tp1)}) 必须低于入场价 (${f(entry)})` };
+        if (!(tp2 < tp1))   return { ok: false, hint: `空头 TP2 (${f(tp2)}) 必须低于 TP1 (${f(tp1)})` };
+        if (!(tp3 < tp2))   return { ok: false, hint: `空头 TP3 (${f(tp3)}) 必须低于 TP2 (${f(tp2)})` };
+        if (!(sl > entry))  return { ok: false, hint: `空头止损 (${f(sl)}) 必须高于入场价 (${f(entry)})` };
+      }
+      return { ok: true };
+    }
+
+    // ===== target === 'active': 持仓中调整, 跳过已触发的 TPN =====
+    const hit = tpHit || {};
+    const unfired = [];
+    if (!hit.tp1) unfired.push({ key: 'TP1', value: Number(tp1) });
+    if (!hit.tp2) unfired.push({ key: 'TP2', value: Number(tp2) });
+    if (!hit.tp3) unfired.push({ key: 'TP3', value: Number(tp3) });
+
+    // 1. 未触发 TP 之间的顺序
+    for (let i = 1; i < unfired.length; i++) {
+      const prev = unfired[i - 1];
+      const curr = unfired[i];
+      const ok = isLong ? curr.value > prev.value : curr.value < prev.value;
+      if (!ok) {
+        return {
+          ok: false,
+          hint: isLong
+            ? `${curr.key} (${f(curr.value)}) 必须高于 ${prev.key} (${f(prev.value)})`
+            : `${curr.key} (${f(curr.value)}) 必须低于 ${prev.key} (${f(prev.value)})`,
+        };
+      }
+    }
+
+    if (unfired.length > 0) {
+      const first = unfired[0];
+
+      // 2. 第一个未触发 TP 必须在 entry 反侧
+      const tpVsEntryOk = isLong ? first.value > entry : first.value < entry;
+      if (!tpVsEntryOk) {
+        return {
+          ok: false,
+          hint: isLong
+            ? `${first.key} (${f(first.value)}) 必须高于入场价 (${f(entry)})`
+            : `${first.key} (${f(first.value)}) 必须低于入场价 (${f(entry)})`,
+        };
+      }
+      // 3. SL 必须在第一个未触发 TP 的反侧 (否则 SL 永远先触发)
+      const slVsTpOk = isLong ? sl < first.value : sl > first.value;
+      if (!slVsTpOk) {
+        return {
+          ok: false,
+          hint: isLong
+            ? `止损 (${f(sl)}) 必须低于下一个 ${first.key} (${f(first.value)}), 否则 SL 永远先触发`
+            : `止损 (${f(sl)}) 必须高于下一个 ${first.key} (${f(first.value)}), 否则 SL 永远先触发`,
+        };
+      }
+    }
+
+    // 4. SL 与 entry: 仅 TP1 未触发时强制保护本金; TP1 已触发后允许 trailing
+    if (!hit.tp1) {
+      const slOk = isLong ? sl < entry : sl > entry;
+      if (!slOk) {
+        return {
+          ok: false,
+          hint: isLong
+            ? `TP1 尚未触发, 止损 (${f(sl)}) 必须低于入场价 (${f(entry)}) 以保护本金`
+            : `TP1 尚未触发, 止损 (${f(sl)}) 必须高于入场价 (${f(entry)}) 以保护本金`,
+        };
+      }
     }
     return { ok: true };
   }
 
   // 后端错误码 → 中文友好提示
   const ADJUST_ERROR_MAP = {
-    'invalid_levels:tp_wrong_order':    'TP 价位顺序非法 (多头需 TP1<TP2<TP3, 空头需 TP1>TP2>TP3)',
-    'invalid_levels:sl_wrong_side':     '止损价方向反了 (多头 SL 必须低于入场, 空头 SL 必须高于入场)',
-    'invalid_levels:non_numeric_levels':'有价位字段缺失或非数字',
-    'no_levels_provided':               '没有提供任何要修改的价位',
-    'no_position':                      '该方向当前无任何持仓或挂单',
-    'no_active_or_pending_position':    '该方向当前无 active 持仓也无 pending 挂单',
-    'cannot_change_entry_on_active':    '已成交持仓不允许修改入场价 (审计要求)',
-    'no_active_position':               '该方向无 active 持仓 (可能刚被自动平仓)',
-    'no_pending':                       '该方向无 pending 挂单 (可能刚被触发或取消)',
+    'invalid_levels:tp_wrong_order':            'TP 价位顺序非法 (未触发 TP 必须多头升序 / 空头降序)',
+    'invalid_levels:sl_wrong_side':             '止损价方向反了 (多头 SL 必须低于入场, 空头 SL 必须高于入场)',
+    'invalid_levels:sl_wrong_side_vs_tp':       '止损与下一个未触发 TP 同侧 (会导致 SL 永远先触发)',
+    'invalid_levels:sl_wrong_side_vs_entry':    'TP1 未触发时, 止损必须保护本金 (多头 SL<入场, 空头 SL>入场)',
+    'invalid_levels:tp_wrong_side_vs_entry':    '下一个未触发 TP 在入场价错误一侧',
+    'invalid_levels:non_numeric_levels':        '有价位字段缺失或非数字',
+    'no_levels_provided':                       '没有提供任何要修改的价位',
+    'no_position':                              '该方向当前无任何持仓或挂单',
+    'no_active_or_pending_position':            '该方向当前无 active 持仓也无 pending 挂单',
+    'cannot_change_entry_on_active':            '已成交持仓不允许修改入场价 (审计要求)',
+    'no_active_position':                       '该方向无 active 持仓 (可能刚被自动平仓)',
+    'no_pending':                               '该方向无 pending 挂单 (可能刚被触发或取消)',
   };
   function translateAdjustError(code) {
     if (!code) return '未知错误';
@@ -1647,15 +1726,21 @@
       return;
     }
 
-    // 客户端预校验整体 merged 关系 — 与后端 validateManualLevels 同算法
-    const v = validateAdjustLevelsClient(direction, merged);
+    // 客户端预校验整体 merged 关系 — 与后端校验同算法 (target 区分 active/pending 语义)
+    // active 模式下会带 tpHit, 跳过已触发的 TPN, 并允许 TP1 触发后 SL 上移到 entry 之上
+    const v = validateAdjustLevelsClient(direction, merged, target, tpHit);
     if (!v.ok) {
+      const baselineHint = target === 'pending'
+        ? (direction === 'long'
+            ? '挂单: 入场 < TP1 < TP2 < TP3, 且 SL < 入场'
+            : '挂单: 入场 > TP1 > TP2 > TP3, 且 SL > 入场')
+        : (direction === 'long'
+            ? '持仓: 未触发 TP 升序, SL 必须低于下一个未触发 TP (TP1 未触发时 SL<入场, TP1 已触发后 SL 可放飞)'
+            : '持仓: 未触发 TP 降序, SL 必须高于下一个未触发 TP (TP1 未触发时 SL>入场, TP1 已触发后 SL 可放飞)');
       showToast('err', '❌ 价位关系不合法', [
         v.hint,
-        '请修正后再保存. 完整方案需满足:',
-        direction === 'long'
-          ? '多头: 入场 < TP1 < TP2 < TP3, 且 SL < 入场'
-          : '空头: 入场 > TP1 > TP2 > TP3, 且 SL > 入场',
+        '请修正后再保存. 规则:',
+        baselineHint,
       ], 8000);
       return;
     }
@@ -1676,9 +1761,12 @@
       await fetchAutoTradeStatus();
     } catch (e) {
       const raw = e.message || '';
-      const zh = translateAdjustError(raw);
-      showToast('err', `❌ 调整失败 (${raw || 'unknown'})`,
-        [zh, '旧价位保持不变, 请修正后重试'], 9000);
+      // 后端 active 校验失败时会返回 j.hint (中文具体冲突说明), 优先用它
+      const backendHint = e.body && e.body.hint;
+      const zh = backendHint || translateAdjustError(raw);
+      const lines = [zh, '旧价位保持不变, 请修正后重试'];
+      if (backendHint && !ADJUST_ERROR_MAP[raw]) lines.push(`(原始错误码: ${raw})`);
+      showToast('err', `❌ 调整失败`, lines, 9000);
     }
   };
 

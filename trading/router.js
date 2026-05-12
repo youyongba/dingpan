@@ -125,6 +125,11 @@ function computeManualFallbackLevels(direction, entryPrice, isPending = false) {
 /**
  * 校验一组 entry/TP/SL 是否合法 (方向与大小关系)
  *
+ * ⚠️ 仅适用于"新开仓 / pending 挂单"场景 (尚无 TP 触发).
+ * active 持仓 (尤其是 TP1 已触发后) 的调整请用 validateAdjustActiveLevels — 那里允许:
+ *   - SL 上移到 entry 之上 (TP1 已触发后的 trailing/锁利)
+ *   - 已触发的 TPN 不参与排序校验
+ *
  * @returns {{ok:boolean, reason?:string, segments?:Array<{name,pct}>}}
  */
 function validateManualLevels(direction, entry, tp1, tp2, tp3, sl) {
@@ -143,6 +148,101 @@ function validateManualLevels(direction, entry, tp1, tp2, tp3, sl) {
   }
   
   return { ok: true, segments: [] };
+}
+
+/**
+ * 持仓中 (active) 的 TP/SL 调整专用校验.
+ *
+ * 与 validateManualLevels 的关键区别 (修复 TP1 触发后无法上移 SL 的 bug):
+ *   1) 已触发的 TPN (tpHit.tpN=true) 完全不参与校验 — 它们是历史价位, 改了也会被
+ *      state.updateActiveLevels 跳过
+ *   2) 未触发的 TP 之间保持升序 (多头) / 降序 (空头)
+ *   3) 第一个未触发的 TP 必须在 entry 反侧 (多头 > entry, 空头 < entry)
+ *      — 否则 riskEngine.evaluate 进入死分支永远摸不到
+ *   4) SL 必须严格在第一个未触发的 TP **反侧** (多头 SL < firstTp, 空头 SL > firstTp)
+ *      — 否则 SL 永远先触发, TP 永无机会
+ *   5) SL 与 entry 的关系**有条件放宽**:
+ *      - TP1 未触发: SL 仍必须保护本金 (多头 SL < entry)
+ *      - TP1 已触发: SL 任意 — 允许 trailing 上移到 entry 之上 (用户锁 TP1 后的利润),
+ *        甚至允许 SL > entry 但 < TP2 (合理的"半保本+锁利"策略)
+ *
+ * @param {'long'|'short'} direction
+ * @param {number} entry
+ * @param {{tp1, tp2, tp3, sl}} merged
+ * @param {{tp1?:boolean, tp2?:boolean, tp3?:boolean}} tpHit
+ * @returns {{ok:boolean, reason?:string, hint?:string}}
+ */
+function validateAdjustActiveLevels(direction, entry, merged, tpHit) {
+  const isLong = direction === 'long';
+  const safe = (v) => Number.isFinite(Number(v));
+  const { tp1, tp2, tp3, sl } = merged;
+  if (![entry, tp1, tp2, tp3, sl].every(safe)) {
+    return { ok: false, reason: 'non_numeric_levels' };
+  }
+  const hit = tpHit || {};
+  // 未触发 TP 列表 (按级别顺序). 已触发的不参与校验
+  const unfired = [];
+  if (!hit.tp1) unfired.push({ key: 'tp1', value: Number(tp1) });
+  if (!hit.tp2) unfired.push({ key: 'tp2', value: Number(tp2) });
+  if (!hit.tp3) unfired.push({ key: 'tp3', value: Number(tp3) });
+
+  // 1. 未触发 TP 之间的顺序
+  for (let i = 1; i < unfired.length; i++) {
+    const prev = unfired[i - 1];
+    const curr = unfired[i];
+    const ok = isLong ? curr.value > prev.value : curr.value < prev.value;
+    if (!ok) {
+      return {
+        ok: false,
+        reason: 'tp_wrong_order',
+        hint: isLong
+          ? `${curr.key.toUpperCase()} (${curr.value.toFixed(2)}) 必须高于 ${prev.key.toUpperCase()} (${prev.value.toFixed(2)})`
+          : `${curr.key.toUpperCase()} (${curr.value.toFixed(2)}) 必须低于 ${prev.key.toUpperCase()} (${prev.value.toFixed(2)})`,
+      };
+    }
+  }
+
+  // 2/3. 第一个未触发 TP 必须在 entry 反侧, 且 SL 必须在它的反侧
+  if (unfired.length > 0) {
+    const first = unfired[0];
+    const tpVsEntryOk = isLong ? first.value > entry : first.value < entry;
+    if (!tpVsEntryOk) {
+      return {
+        ok: false,
+        reason: 'tp_wrong_side_vs_entry',
+        hint: isLong
+          ? `${first.key.toUpperCase()} (${first.value.toFixed(2)}) 必须高于入场价 (${entry.toFixed(2)})`
+          : `${first.key.toUpperCase()} (${first.value.toFixed(2)}) 必须低于入场价 (${entry.toFixed(2)})`,
+      };
+    }
+    const slVsTpOk = isLong ? sl < first.value : sl > first.value;
+    if (!slVsTpOk) {
+      return {
+        ok: false,
+        reason: 'sl_wrong_side_vs_tp',
+        hint: isLong
+          ? `止损 (${sl.toFixed(2)}) 必须低于下一个 ${first.key.toUpperCase()} (${first.value.toFixed(2)}), 否则 SL 永远先触发`
+          : `止损 (${sl.toFixed(2)}) 必须高于下一个 ${first.key.toUpperCase()} (${first.value.toFixed(2)}), 否则 SL 永远先触发`,
+      };
+    }
+  }
+
+  // 4. SL 与 entry: 仅 TP1 未触发时强制保护本金; TP1 已触发后允许 trailing
+  if (!hit.tp1) {
+    const slOk = isLong ? sl < entry : sl > entry;
+    if (!slOk) {
+      return {
+        ok: false,
+        reason: 'sl_wrong_side_vs_entry',
+        hint: isLong
+          ? `TP1 尚未触发, 止损 (${sl.toFixed(2)}) 必须低于入场价 (${entry.toFixed(2)}) 以保护本金`
+          : `TP1 尚未触发, 止损 (${sl.toFixed(2)}) 必须高于入场价 (${entry.toFixed(2)}) 以保护本金`,
+      };
+    }
+  }
+  // 若所有 TP 都已触发 (理论上 TP3 触发即解锁, 不会走到这里), 无任何 TP 约束, 仅校验数值合法 — 已 pass
+
+  return { ok: true };
 }
 
 function requireAdmin(req, res, next) {
@@ -1259,9 +1359,19 @@ router.post('/adjust-levels', requireAdmin, (req, res) => {
     tp3: incoming.tp3 != null ? incoming.tp3 : Number(before.tp3),
     sl:  incoming.sl  != null ? incoming.sl  : Number(before.currentStopLoss),
   };
-  const v = validateManualLevels(direction, entry, merged.tp1, merged.tp2, merged.tp3, merged.sl);
+  // ⭐ 用 active 持仓专用校验 (考虑 tpHit, 修复 TP1 触发后无法上移 SL 的 bug)
+  // 与 validateManualLevels 的差别见函数注释: 关键是 TP1 已触发后 SL 可以放飞到 entry 之上
+  const v = validateAdjustActiveLevels(direction, entry, merged, before.tpHit || {});
   if (!v.ok) {
-    return res.status(400).json({ ok: false, error: 'invalid_levels:' + v.reason, target: 'active', entry, merged });
+    return res.status(400).json({
+      ok: false,
+      error: 'invalid_levels:' + v.reason,
+      hint: v.hint,         // 中文化的具体冲突说明, 前端可直接显示
+      target: 'active',
+      entry,
+      merged,
+      tpHit: before.tpHit || {},
+    });
   }
   // active 仓位不允许改 entry (改了就破坏成交价审计) — 显式提示
   if (incoming.entry != null && Number(incoming.entry) !== entry) {
@@ -1469,3 +1579,7 @@ module.exports.cancelPendingByReverseSignal = cancelPendingByReverseSignal;
 // 这样浏览器关掉, 价格触发器照样能从 WS tick 命中 → manual-open / manual-follow
 module.exports.manualOpenImpl = manualOpenImpl;
 module.exports.manualFollowImpl = manualFollowImpl;
+// 校验函数对外暴露 — 给冲烟测试 / 未来单测用. 前端不应该 import 这些, 浏览器侧
+// 在 regime.html 内有 validateAdjustLevelsClient 同算法实现 (UX 提前拦截)
+module.exports.validateManualLevels = validateManualLevels;
+module.exports.validateAdjustActiveLevels = validateAdjustActiveLevels;
