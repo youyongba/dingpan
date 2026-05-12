@@ -35,10 +35,68 @@ const { cnTime } = require('../lib/timeFmt');
 //   B) 状态前置写盘: fireTp 进入第一时间调 state.markTpHit (写 disk), fireSl 进入第一时间
 //      调 state.closeAndUnlock (active=false). 即便 _inFlight 因异常路径漏释放, 后续 tick
 //      也会被 active=false / tpHit.tpN=true 拦下来.
-//   C) recentlyFired 防抖: 同方向 1.5s 冷却, 应对极端情况下的同 tick 重入.
+//   C) recentlyFired 防抖: 同方向**短**冷却 200ms, 应对极端情况下的同 tick 重入.
+//
+// ⚠️ 历史回归 (2026-05): cooldown 曾是 1500ms, 在单根 K 线急速穿过 TP1+TP2+TP3 的行情下,
+//    导致 webhook(1-2s) + cooldown(1.5s) 共 2.5-3.5s 内整个方向 evaluate 全锁,
+//    待 cooldown 解除时价格已回落, TP2/TP3 永久错过. 现降到 200ms — 因为 markTpHit 幂等
+//    + _inFlight 闸已经挡住所有真实 race, cooldown 只是兜底防"_inFlight 异常没释放".
+//    单 fireTp 完成后还会自动 _chainEvaluate (用 priceFeed.lastPrice + skipCooldown)
+//    把 TP1→TP2→TP3 在同一帧内串起来, 杜绝漏跳级 TP.
 const _inFlight = { long: false, short: false };
 const recentlyFired = { long: 0, short: 0 };
-const FIRE_COOLDOWN_MS = 1500;
+const FIRE_COOLDOWN_MS = 200;
+
+// ---------------- near-miss 遥测 (排障可观测) ----------------
+// 价格已 hit 但被 _inFlight / cooldown 暂时拦下的事件计数 + 最近一次详情.
+// 用户在 UI 看到"TP2 没触发"时, 可以直接看这两个计数判断是不是被节流拦了.
+let _tpSkippedByInFlight = 0;
+let _tpSkippedByCooldown = 0;
+let _lastNearMiss = null;        // 最近一次 near-miss 的详情, 给 UI 红字提示
+const _NEAR_MISS_LOG_INTERVAL_MS = 1000;   // 同方向 near-miss 日志 1s 内最多一条 (rate limit)
+const _lastNearMissLogAt = { long: 0, short: 0 };
+
+/**
+ * 探测"价格当前已 hit 某个 TP/SL, 但 evaluate 被 _inFlight / cooldown 挡下"的事件.
+ * 不抛错, 仅 log + 累计计数, 给 UI 提供"为啥没触发"的可观测线索.
+ *
+ * 仅在 active 持仓且 reason 命中时计数, 避免对 pending 仓位误报 (pending fill 不算 near-miss).
+ */
+function _nearMissCheck(direction, price, reason) {
+  if (!Number.isFinite(price)) return;
+  const p = state.getPosition(direction);
+  if (!p || !p.active) return;
+  const isLong = direction === 'long';
+  // 找到当前价命中的"应该 fire 但被挡"的 level — 取优先级最高的一级 (SL > TP3 > TP2 > TP1)
+  if (p.currentStopLoss != null) {
+    const slHit = isLong ? price <= p.currentStopLoss : price >= p.currentStopLoss;
+    if (slHit) return _recordNearMiss(direction, p.protectionArmed ? 'sl_protection' : 'sl', price, reason);
+  }
+  if (!p.tpHit.tp3 && p.tp3 != null && p.tpHit.tp2) {
+    if (isLong ? price >= p.tp3 : price <= p.tp3) return _recordNearMiss(direction, 'tp_3', price, reason);
+  }
+  if (!p.tpHit.tp2 && p.tp2 != null && p.tpHit.tp1) {
+    if (isLong ? price >= p.tp2 : price <= p.tp2) return _recordNearMiss(direction, 'tp_2', price, reason);
+  }
+  if (!p.tpHit.tp1 && p.tp1 != null) {
+    if (isLong ? price >= p.tp1 : price <= p.tp1) return _recordNearMiss(direction, 'tp_1', price, reason);
+  }
+}
+
+function _recordNearMiss(direction, level, price, reason) {
+  if (reason === 'in_flight') _tpSkippedByInFlight++;
+  else if (reason === 'cooldown') _tpSkippedByCooldown++;
+  _lastNearMiss = {
+    direction, level, price,
+    reason,
+    at: new Date().toISOString(),
+  };
+  const now = Date.now();
+  if (now - _lastNearMissLogAt[direction] >= _NEAR_MISS_LOG_INTERVAL_MS) {
+    _lastNearMissLogAt[direction] = now;
+    console.warn(`[trade.risk] ⚠️ near-miss: ${direction} ${level} 价格已 hit (${price}) 但被 ${reason} 拦下 — 等待解除`);
+  }
+}
 
 // 价格触发器 (PriceTrigger) 独立的 in-flight 锁: 与 _inFlight (TP/SL/pending) 分离,
 // 因为 trigger 命中 → 调 processSignal 这一步可能很慢 (forwardOpen webhook 出站),
@@ -154,6 +212,10 @@ function getRiskTelemetry() {
     evalCount: _evalCount,
     lastFireLatencyMs: _lastFireLatencyMs,
     maxFireLatencyMs: _maxFireLatencyMs,
+    // near-miss: 价格 hit 但被节流拦下的累计计数, 帮助快速排障"TP2/TP3 价格到了没触发"
+    tpSkippedByInFlight: _tpSkippedByInFlight,
+    tpSkippedByCooldown: _tpSkippedByCooldown,
+    lastNearMiss: _lastNearMiss,
   };
 }
 
@@ -175,11 +237,30 @@ function onTick({ price, ts }) {
   _runEval(price, ts || Date.now());
 }
 
-function evaluate(direction, price, tickTs) {
-  if (_inFlight[direction]) return;          // 闸 A: webhook 还没发完, 直接拒绝再入
+/**
+ * 评估一个方向当前是否需要触发 SL / TP / pending fill.
+ *
+ * @param {'long'|'short'} direction
+ * @param {number} price        当前 tick 价 (or 链式接力时的 priceFeed.lastPrice)
+ * @param {number} tickTs       tick 时间戳 (用于 fire 延迟遥测)
+ * @param {{skipCooldown?:boolean}} [opts]
+ *   skipCooldown=true: 跳过 200ms 冷却 — 仅 fireTp 内部链式接力使用,
+ *   因为 markTpHit 幂等 + _inFlight 仍生效, 不存在重复 fire 风险, 但能保证
+ *   单帧内 TP1→TP2→TP3 能连续触发, 杜绝行情急涨时的跳级漏触发.
+ */
+function evaluate(direction, price, tickTs, opts = {}) {
+  if (_inFlight[direction]) {
+    // 闸 A: webhook 还没发完, 直接拒绝再入. 但记一笔 near-miss 计数, 帮助排障.
+    _nearMissCheck(direction, price, 'in_flight');
+    return;
+  }
   const p = state.getPosition(direction);
   if (!p) return;
-  if (Date.now() - recentlyFired[direction] < FIRE_COOLDOWN_MS) return;  // 闸 C: 防抖
+  if (!opts.skipCooldown && Date.now() - recentlyFired[direction] < FIRE_COOLDOWN_MS) {
+    // 闸 C: 200ms 防抖. near-miss 时记录, 让 UI 能展示"刚被冷却挡了 1 帧, 即将解除"
+    _nearMissCheck(direction, price, 'cooldown');
+    return;
+  }
 
   const isLong = direction === 'long';
   const above = (a, b) => a >= b;   // 多: 价格上穿 TP
@@ -488,6 +569,31 @@ async function fireTp(direction, level, triggerPrice, tickTs) {
   } finally {
     _inFlight[direction] = false;
   }
+
+  // ⭐ 链式接力 (修复"单根 K 线穿过 TP1+TP2+TP3 时 TP2/TP3 漏触发"的 bug):
+  //   - fire 完成 → _inFlight 已释放, recentlyFired=now
+  //   - 立刻读取最新价 (priceFeed.lastPrice), 跳过 200ms cooldown 重 evaluate 一次
+  //   - 如果价格仍在下一级 TP 之外, 立即接力 fireTp → 再链式 → 直到价格回落或所有 TP 都 fire
+  //   - 安全性: markTpHit 幂等 (同 level 二次返回 null) + _inFlight 闸仍在每个 fire 入口生效,
+  //     skipCooldown 只跳过 200ms 冷却, 不会破坏任何幂等语义
+  //   - level === 'tp_3' 后仓位已 closeAndUnlock, evaluate 内部 p.active=false 自动跳出, 无副作用
+  if (level !== 'tp_3') {
+    _chainEvaluate(direction);
+  }
+}
+
+/**
+ * fire 完成后, 用最新价立即重 evaluate 同方向, 单帧内串起多级 TP.
+ * 跳过 cooldown — 因为 _inFlight + markTpHit 幂等已经挡住所有 race.
+ */
+function _chainEvaluate(direction) {
+  try {
+    const lastPrice = priceFeed.lastPrice;
+    if (!Number.isFinite(lastPrice)) return;
+    evaluate(direction, lastPrice, Date.now(), { skipCooldown: true });
+  } catch (e) {
+    console.error(`[trade.risk] _chainEvaluate ${direction} 失败:`, e?.message || e);
+  }
 }
 
 /**
@@ -671,6 +777,11 @@ module.exports = {
     _lastFireLatencyMs = null;
     _maxFireLatencyMs = 0;
     _evalCount = 0;
+    _tpSkippedByInFlight = 0;
+    _tpSkippedByCooldown = 0;
+    _lastNearMiss = null;
+    _lastNearMissLogAt.long = 0;
+    _lastNearMissLogAt.short = 0;
   },
   __getInFlight: () => ({ ..._inFlight }),       // 仅测试用
 };

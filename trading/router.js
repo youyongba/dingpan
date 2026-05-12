@@ -26,6 +26,7 @@ const config = require('./config');
 const state = require('./state');
 const priceFeed = require('./priceFeed');
 const exec = require('./executor');
+const riskEngine = require('./riskEngine');
 // TG 渠道用于实际开仓成交通知 (与 regime 喊单 sendTradeSignal 互不冲突)
 const tg = require('../notifier/telegram');
 const { cnTime } = require('../lib/timeFmt');
@@ -717,6 +718,12 @@ router.get('/status', (req, res) => {
     positions: state.get(),
     // ⭐ 价格触发器 (后端 WS 监听 + disk 持久化, 浏览器关掉也会触发)
     priceTriggers: state.getPriceTriggers(),
+    // ⭐ 风控引擎遥测: fire 延迟 + near-miss (价格 hit 但被节流挡的计数 + 最近一次详情),
+    // 帮助用户在 UI 直接看到"为什么 TP2/TP3 没触发" — 如果 tpSkippedByCooldown 一直涨,
+    // 说明 cooldown 偶尔挡住, 但链式接力(_chainEvaluate)应该已经自动补触发了
+    risk: typeof riskEngine.getRiskTelemetry === 'function'
+      ? riskEngine.getRiskTelemetry()
+      : null,
   });
 });
 
