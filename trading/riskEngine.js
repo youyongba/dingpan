@@ -372,9 +372,30 @@ async function firePriceTrigger(direction, triggerId, hitPrice, tickTs) {
     const hitStr = Number(hitPrice).toFixed(2);
     const sideStr = prev.side === 'above' ? '≥' : '≤';
 
-    console.log(`[trade.risk] 🎯 priceTrigger HIT direction=${direction} id=${triggerId} side=${prev.side} trigger=${triggerStr} hit=${hitStr} action=${action}`);
+    // ⭐ 覆盖式语义 (用户硬性要求, 2026-05 修复"触发到了没按方案挂单"事故):
+    //   同方向若已有 pending 计划 → 自动取消, 让新 plan 能 arm 上去.
+    //   不影响 active 真实持仓 (active+pending 互斥, cancelPending 内部 !prev.pending 也会
+    //   返回 null; 这里再加一道 !beforePos.active 显式防御, 双保险防误清真实仓位).
+    //   监控通道同步推 fireMonitorCancel, 让独立监控端时间线对齐 (紧接着 manualOpenImpl/Follow
+    //   内部会 fireMonitorOpen 推新点位); 飞书通知里明示"已覆盖原 pending"让用户感知.
+    //   ⚠️ fire 后续若失败, 旧 pending 也不再回滚 — 触发器命中的语义就是"我要换计划",
+    //   用户在 fire 失败的飞书告警里能看到原 pending 信息, 自行决定是否重 arm.
+    let overridden = null;
+    const beforePos = state.getPosition(direction);
+    if (beforePos && beforePos.pending && !beforePos.active) {
+      overridden = state.cancelPending(direction, 'price_trigger_override');
+      if (overridden) {
+        console.log(`[trade.risk] 🔄 priceTrigger ${direction} 覆盖式生效: 取消旧 pending entry=${overridden.pendingPlan?.entry} armed=${overridden.pendingArmedAt}`);
+        try { exec.fireMonitorCancel({ direction }); } catch (_) {}
+      }
+    }
+
+    console.log(`[trade.risk] 🎯 priceTrigger HIT direction=${direction} id=${triggerId} side=${prev.side} trigger=${triggerStr} hit=${hitStr} action=${action}${overridden ? ' (覆盖旧 pending)' : ''}`);
 
     // 命中即时推一条飞书 (用户能看见"触发器命中, 即将下单"). 失败的话后面 catch 还会推一条.
+    const overrideLine = overridden
+      ? `🔄 已自动覆盖原 pending: entry=${Number(overridden.pendingPlan?.entry).toFixed(2)} · armed=${cnTime(overridden.pendingArmedAt)}`
+      : null;
     exec.notify({
       type: 'wait',
       title: `${titleEmoji} ${direction.toUpperCase()} 价格触发器命中 → ${action === 'follow' ? '🚀 立即追单' : '📋 挂单'}`,
@@ -385,7 +406,8 @@ async function firePriceTrigger(direction, triggerId, hitPrice, tickTs) {
         `命中价: ${hitStr} ${sideStr} ${triggerStr}`,
         `启用时间: ${cnTime(prev.armedAt)}`,
         `动作: ${action === 'follow' ? '🚀 立即市价追单 (ATR动态计算)' : '📋 挂单 (优先 regime plan, 无则 ATR 回退)'}`,
-      ],
+        overrideLine,
+      ].filter(Boolean),
     });
 
     // 执行 fire — 复用 router 暴露的 manualOpenImpl / manualFollowImpl (与 HTTP 端点同一实现)
@@ -406,7 +428,7 @@ async function firePriceTrigger(direction, triggerId, hitPrice, tickTs) {
       r = await fireFn({ direction, source: 'price_trigger_open' });
     }
 
-    return _finalizePriceTriggerResult(direction, prev, hitPrice, r, action);
+    return _finalizePriceTriggerResult(direction, prev, hitPrice, r, action, overridden);
   } finally {
     _ptInFlight[direction] = false;
   }
@@ -418,7 +440,7 @@ async function firePriceTrigger(direction, triggerId, hitPrice, tickTs) {
  *           推一条"同方向 N 条剩余触发器已被成交锁清除"
  *   - 失败: recordPriceTriggerError + 飞书告警, 不锁不清 (其他触发器继续监听)
  */
-function _finalizePriceTriggerResult(direction, prev, hitPrice, r, action) {
+function _finalizePriceTriggerResult(direction, prev, hitPrice, r, action, overridden) {
   const cfg = config.get();
   const titleEmoji = direction === 'long' ? '📈' : '📉';
   const triggerStr = Number(prev.triggerPrice).toFixed(2);
@@ -428,6 +450,11 @@ function _finalizePriceTriggerResult(direction, prev, hitPrice, r, action) {
   if (!ok) {
     const reason = r?.body?.error || r?.body?.hint || `http_${r?.status || 'unknown'}`;
     state.recordPriceTriggerError(direction, reason);
+    // fire 失败时的飞书告警: 把"已覆盖旧 pending"的关键信息带上, 否则用户在 lastError
+    // 红字里只看到 reason, 不知道触发器命中前已经把旧 pending 一起干掉了 (双输状态).
+    const overrideLine = overridden
+      ? `⚠️ 命中前已自动取消旧 pending: entry=${Number(overridden.pendingPlan?.entry).toFixed(2)} · armed=${cnTime(overridden.pendingArmedAt)} (此次未恢复, 如需重新挂请手动操作)`
+      : null;
     exec.notify({
       type: 'open_blocked',
       title: `❌ ${direction.toUpperCase()} 价格触发器命中但 ${action === 'follow' ? '追单' : '挂单'} 失败`,
@@ -437,10 +464,11 @@ function _finalizePriceTriggerResult(direction, prev, hitPrice, r, action) {
         `失败原因: ${reason}`,
         `状态码: ${r?.status || '--'}`,
         `该触发器已消费, 同方向其余触发器仍在监听; 如需重试请重新添加`,
-      ],
+        overrideLine,
+      ].filter(Boolean),
       isAlert: true,
     });
-    console.error(`[trade.risk] ❌ priceTrigger ${direction} fire 失败: ${reason}`);
+    console.error(`[trade.risk] ❌ priceTrigger ${direction} fire 失败: ${reason}${overridden ? ' (覆盖旧 pending 后未补回)' : ''}`);
     return;
   }
 
