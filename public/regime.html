@@ -282,6 +282,8 @@
   .auto-trade-bar .at-state { font-size: 13px; padding: 4px 10px; border-radius: 6px; font-weight: 600; transition: all 0.3s; }
   .auto-trade-bar .at-state.on  { background: rgba(63, 185, 80, 0.15); color: #3fb950; border: 1px solid rgba(63, 185, 80, 0.3); }
   .auto-trade-bar .at-state.off { background: rgba(210, 153, 34, 0.15); color: #d29922; border: 1px solid rgba(210, 153, 34, 0.3); }
+  /* 方向拦截开关启用时用红色警告色, 与"正常 (绿)"和"未启用 (黄)"形成清晰梯度 */
+  .auto-trade-bar .at-state.danger { background: rgba(248, 81, 73, 0.15); color: #f85149; border: 1px solid rgba(248, 81, 73, 0.4); }
   .auto-trade-bar .at-divider { color: #30363d; font-size: 14px; user-select: none; display: none; } /* 在新设计中隐藏分割线 */
   .auto-trade-bar .at-meta { font-size: 12px; color: #8b949e; margin-left: auto; line-height: 1.4; }
 
@@ -733,6 +735,22 @@
   </label>
   <span id="tp1ProtectionState" class="at-state off">--</span>
 
+  <span class="at-divider">|</span>
+  <span class="at-label" title="禁止做多: 所有 LONG 方向的新开仓信号都会被 409 拦截; 不影响已有 LONG 持仓 TP/SL 兜底; 已有 pending 不会自动撤">禁止做多</span>
+  <label class="switch" title="开启后 signal / pending-order / market-order / firePriceTrigger 收到的所有 long 新信号都会被拒绝">
+    <input type="checkbox" id="disableLongToggle" disabled>
+    <span class="slider"></span>
+  </label>
+  <span id="disableLongState" class="at-state off">--</span>
+
+  <span class="at-divider">|</span>
+  <span class="at-label" title="禁止做空: 所有 SHORT 方向的新开仓信号都会被 409 拦截; 不影响已有 SHORT 持仓 TP/SL 兜底; 已有 pending 不会自动撤">禁止做空</span>
+  <label class="switch" title="开启后 signal / pending-order / market-order / firePriceTrigger 收到的所有 short 新信号都会被拒绝">
+    <input type="checkbox" id="disableShortToggle" disabled>
+    <span class="slider"></span>
+  </label>
+  <span id="disableShortState" class="at-state off">--</span>
+
   <span class="at-meta">
     自动下单关闭后 TP1 保本设置不生效
     · <span id="autoTradePrice">价格源 --</span>
@@ -1107,7 +1125,7 @@
     v == null || !isFinite(v) ? '--' : Number(v).toFixed(d);
 
   // 自动交易开关全局状态
-  const autoTrade = { enabled: false, ready: false };
+  const autoTrade = { enabled: false, ready: false, disableLong: false, disableShort: false };
 
   function renderAutoTradeNote() {
     return autoTrade.enabled
@@ -1242,6 +1260,9 @@
         ? priceStream.lastPrice
         : pf.lastPrice;
       lastPositionsSnapshot = j.positions || {};   // 缓存供 SSE tick 重画距离用
+      // 方向开关从 /status 同步: 影响 updateManualActions 对"挂多/追多/挂空/追空"按钮的禁用判断
+      autoTrade.disableLong = !!j.disableLong;
+      autoTrade.disableShort = !!j.disableShort;
       renderPositions(lastPositionsSnapshot, lastPriceForCard);
       updateManualActions(lastPositionsSnapshot, autoTrade.enabled);
 
@@ -1260,10 +1281,70 @@
         tp1State.textContent = tp1On ? '已开启' : '已关闭';
         tp1State.className = 'at-state ' + (tp1On ? 'on' : 'off');
       }
+      // 方向开关 UI 同步 (开关 ON = 拦截中 = 红色 danger; OFF = 正常 = 绿色 on)
+      renderDirectionDisableState('long', autoTrade.disableLong);
+      renderDirectionDisableState('short', autoTrade.disableShort);
     } catch (e) {
       const stateEl = document.getElementById('autoTradeState');
       stateEl.textContent = '后端不可达';
       stateEl.className = 'at-state off';
+    }
+  }
+
+  /**
+   * 方向开关 UI 渲染.
+   *   开关 ON  (disabled=true)  → 红色 "拦截中" (新开仓信号会 409, 已有持仓 TP/SL 不受影响)
+   *   开关 OFF (disabled=false) → 绿色 "正常"   (放行)
+   */
+  function renderDirectionDisableState(direction, disabled) {
+    const toggle = document.getElementById(direction === 'long' ? 'disableLongToggle' : 'disableShortToggle');
+    const stateEl = document.getElementById(direction === 'long' ? 'disableLongState' : 'disableShortState');
+    if (!toggle || !stateEl) return;
+    toggle.checked = !!disabled;
+    toggle.disabled = false;
+    stateEl.textContent = disabled ? '🚫 拦截中' : '✅ 正常';
+    stateEl.className = 'at-state ' + (disabled ? 'danger' : 'on');
+  }
+
+  /**
+   * 切换某方向的禁止开关.
+   * 调用 /toggle-direction (后端接口, 不强制 admin token, 与 /toggle 同级).
+   * 成功后用返回值更新两个开关 (一次响应同时返回 disableLong / disableShort, 避免再次拉取).
+   */
+  async function setDirectionDisabled(direction, disabled) {
+    const toggle = document.getElementById(direction === 'long' ? 'disableLongToggle' : 'disableShortToggle');
+    const stateEl = document.getElementById(direction === 'long' ? 'disableLongState' : 'disableShortState');
+    if (!toggle || !stateEl) return;
+    toggle.disabled = true;
+    stateEl.textContent = '切换中...';
+    stateEl.className = 'at-state off';
+    try {
+      const r = await fetch('/api/auto-trade/toggle-direction', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ direction, disabled: !!disabled }),
+      });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+      autoTrade.disableLong = !!j.disableLong;
+      autoTrade.disableShort = !!j.disableShort;
+      renderDirectionDisableState('long', autoTrade.disableLong);
+      renderDirectionDisableState('short', autoTrade.disableShort);
+      // 立即刷新手动按钮可用态 (新开仓按钮会被同步禁用)
+      updateManualActions(lastPositionsSnapshot, autoTrade.enabled);
+      const dirZh = direction === 'long' ? '做多' : '做空';
+      showToast(disabled ? 'warn' : 'ok',
+        disabled ? `🚫 已禁止${dirZh}` : `✅ 已恢复${dirZh}`,
+        disabled
+          ? `${direction.toUpperCase()} 方向所有新开仓信号都会被 409 拦截; 已有持仓 TP/SL 仍正常触发`
+          : `${direction.toUpperCase()} 方向恢复接收新开仓信号`,
+        4500);
+    } catch (e) {
+      showToast('err', `❌ ${direction} 方向开关切换失败`, e.message || String(e), 6000);
+      // 失败时让 fetchAutoTradeStatus 把开关弹回真实值
+      await fetchAutoTradeStatus();
+    } finally {
+      toggle.disabled = false;
     }
   }
 
@@ -2365,35 +2446,50 @@
       return;
     }
 
-    longBtn.disabled = longBusy;
-    longBtn.title = longActive
-      ? '已持有多头仓位, 同方向不可重复挂单 (重置后可再挂)'
-      : longPending
-        ? '多头已有 pending 挂单待触发, 同方向不可重复挂 (取消挂单后可再挂)'
-        : '挂多单 (限价): 优先 Regime tradePlan, 无 plan 则用 0.5%~1.2% / 10%仓回退方案';
+    // 方向开关 (autoTrade.disableLong / disableShort): 与 busy 同级拦截, 但语义不同
+    //   - busy:        同方向已有持仓/pending → "重复"问题
+    //   - 方向开关:    用户主动关掉该方向 → "不希望"再做这个方向
+    //   tooltip 优先展示方向开关原因 (用户主动决策, 比 busy 更"显式")
+    const longDisabled = !!autoTrade.disableLong;
+    const shortDisabled = !!autoTrade.disableShort;
 
-    shortBtn.disabled = shortBusy;
-    shortBtn.title = shortActive
-      ? '已持有空头仓位, 同方向不可重复挂单 (重置后可再挂)'
-      : shortPending
-        ? '空头已有 pending 挂单待触发, 同方向不可重复挂 (取消挂单后可再挂)'
-        : '挂空单 (限价): 优先 Regime tradePlan, 无 plan 则用 0.5%~1.2% / 10%仓回退方案';
+    longBtn.disabled = longBusy || longDisabled;
+    longBtn.title = longDisabled
+      ? '🚫 已禁止做多: 上方"禁止做多"开关已开启, 所有新 LONG 信号都会被 409 拦截'
+      : longActive
+        ? '已持有多头仓位, 同方向不可重复挂单 (重置后可再挂)'
+        : longPending
+          ? '多头已有 pending 挂单待触发, 同方向不可重复挂 (取消挂单后可再挂)'
+          : '挂多单 (限价): 优先 Regime tradePlan, 无 plan 则用 0.5%~1.2% / 10%仓回退方案';
+
+    shortBtn.disabled = shortBusy || shortDisabled;
+    shortBtn.title = shortDisabled
+      ? '🚫 已禁止做空: 上方"禁止做空"开关已开启, 所有新 SHORT 信号都会被 409 拦截'
+      : shortActive
+        ? '已持有空头仓位, 同方向不可重复挂单 (重置后可再挂)'
+        : shortPending
+          ? '空头已有 pending 挂单待触发, 同方向不可重复挂 (取消挂单后可再挂)'
+          : '挂空单 (限价): 优先 Regime tradePlan, 无 plan 则用 0.5%~1.2% / 10%仓回退方案';
 
     if (followLongBtn) {
-      followLongBtn.disabled = longBusy;
-      followLongBtn.title = longActive
-        ? '已持有多头仓位, 同方向不可重复追单 (重置后可再追)'
-        : longPending
-          ? '多头已有 pending 挂单, 不可同方向追单 (会冲突, 取消挂单后可追)'
-          : '一键立即市价开多, 仓位由 Regime 决定, TP/SL 按 ATR 动态派生 (不参考 Regime 入场价)';
+      followLongBtn.disabled = longBusy || longDisabled;
+      followLongBtn.title = longDisabled
+        ? '🚫 已禁止做多: 上方"禁止做多"开关已开启, 所有新 LONG 信号都会被 409 拦截'
+        : longActive
+          ? '已持有多头仓位, 同方向不可重复追单 (重置后可再追)'
+          : longPending
+            ? '多头已有 pending 挂单, 不可同方向追单 (会冲突, 取消挂单后可追)'
+            : '一键立即市价开多, 仓位由 Regime 决定, TP/SL 按 ATR 动态派生 (不参考 Regime 入场价)';
     }
     if (followShortBtn) {
-      followShortBtn.disabled = shortBusy;
-      followShortBtn.title = shortActive
-        ? '已持有空头仓位, 同方向不可重复追单 (重置后可再追)'
-        : shortPending
-          ? '空头已有 pending 挂单, 不可同方向追单 (会冲突, 取消挂单后可追)'
-          : '一键立即市价开空, 仓位由 Regime 决定, TP/SL 按 ATR 动态派生 (不参考 Regime 入场价)';
+      followShortBtn.disabled = shortBusy || shortDisabled;
+      followShortBtn.title = shortDisabled
+        ? '🚫 已禁止做空: 上方"禁止做空"开关已开启, 所有新 SHORT 信号都会被 409 拦截'
+        : shortActive
+          ? '已持有空头仓位, 同方向不可重复追单 (重置后可再追)'
+          : shortPending
+            ? '空头已有 pending 挂单, 不可同方向追单 (会冲突, 取消挂单后可追)'
+            : '一键立即市价开空, 仓位由 Regime 决定, TP/SL 按 ATR 动态派生 (不参考 Regime 入场价)';
     }
 
     closeAllBtn.disabled = !anyActive;
@@ -2407,9 +2503,16 @@
       shortActive && '📉空(已开)',
       shortPending && '📉空(挂单)',
     ].filter(Boolean);
-    meta.textContent = tags.length
+    const blockTags = [
+      longDisabled && '🚫禁止做多',
+      shortDisabled && '🚫禁止做空',
+    ].filter(Boolean);
+    const baseMeta = tags.length
       ? `当前: ${tags.join(' · ')} · 重复同方向开仓/追单会被拒绝`
       : '挂单优先 Regime, 否则动态 ATR 回退; 追单一律动态 ATR (不回踩) (不参考 Regime 入场价)';
+    meta.textContent = blockTags.length
+      ? `${blockTags.join(' · ')} (新信号 409, 已有持仓 TP/SL 不受影响) · ${baseMeta}`
+      : baseMeta;
   }
 
   async function setAutoTrade(enabled) {
@@ -2901,6 +3004,13 @@
   });
   document.getElementById('tp1ProtectionToggle').addEventListener('change', (e) => {
     setTp1Protection(e.target.checked);
+  });
+  // 方向开关: 切换 → 走 /toggle-direction (后端拦新开仓信号, 已有 TP/SL 不受影响)
+  document.getElementById('disableLongToggle').addEventListener('change', (e) => {
+    setDirectionDisabled('long', e.target.checked);
+  });
+  document.getElementById('disableShortToggle').addEventListener('change', (e) => {
+    setDirectionDisabled('short', e.target.checked);
   });
   document.getElementById('resetLongBtn').addEventListener('click', () => resetDirection('long'));
   document.getElementById('resetShortBtn').addEventListener('click', () => resetDirection('short'));
