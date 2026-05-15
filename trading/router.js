@@ -6,9 +6,15 @@
  *  对外接口：
  *    POST /api/auto-trade/signal          接收外部 webhook 入仓/平仓信号 (body.token 校验)
  *    POST /api/auto-trade/pending-order   ⭐ 对外挂单交易信号 (body.direction, X-Auth-Token 鉴权)
+ *                                          - 限价挂单, 价格回踩到 entry 才真下单
  *                                          - 价位用 regime plan 优先 / ATR 回退 (与 manual-open 同源)
  *                                          - 同方向已有 pending → 默认自动覆盖 (replace=false 时拒绝)
  *                                          - 同方向已有 active 真实仓位 → 直接 409 拒绝, 不允许覆盖
+ *    POST /api/auto-trade/market-order    ⚡ 对外市价立即开仓信号 (body.direction, X-Auth-Token 鉴权)
+ *                                          - 不等回踩, 收到信号立即按当下 WS 市价 forwardOpen
+ *                                          - 价位用 regime plan 优先 / ATR 回退 (TP/SL 来自 plan, entry=市价)
+ *                                          - 同方向已有 pending → 自动取消后立即市价开仓 (覆盖式)
+ *                                          - 同方向已有 active 真实仓位 → 直接 409 拒绝
  *    POST /api/auto-trade/reset           手动重置 { direction:'long'|'short' } (鉴权)
  *    GET  /api/auto-trade/status          查询当前仓位 + WS 状态
  *    GET  /api/auto-trade/config          读取当前配置
@@ -1336,6 +1342,169 @@ router.post('/pending-order', requireAdmin, async (req, res) => {
   res.status(r.status).json(r.body);
 });
 
+// ============ POST /market-order: 对外市价立即开仓信号入口 ============
+//
+// 与 /pending-order 的差异:
+//   - /pending-order: 限价挂单 — 价格回踩到 entry 才真下单 (sig.market 不传, 走 PENDING 分支)
+//   - /market-order : ⚡ **立即市价** — 不等回踩, 收到信号就以当下 WS 市价 forwardOpen + 写 active 仓位
+//
+// 价位策略 (用户硬性要求 plan_first):
+//   1) 有 regime tradePlan 且方向匹配 → TP/SL/仓位 用 plan, entry 由 immediate 分支自动覆盖为市价
+//      (processSignal line "if (source==='regime_plan') entryPrice = marketPrice" 已处理)
+//   2) 否则 → ATR 动态回退 (computeManualFallbackLevels(direction, marketPrice, false))
+//
+// 冲突处理 (用户硬性要求 block_active_only):
+//   - 同方向 active 真实持仓 → 直接 409 (绝不在已有仓位上叠加, 防止误触发双开)
+//   - 同方向 pending → 自动取消旧 pending 后立即市价开仓 (覆盖式, 与 firePriceTrigger / pending-order 对齐)
+//
+// body: {
+//   direction: 'long' | 'short',                   // 必填
+//   source?: string,                                // 可选, 调用方标记 (sanitize 后写入飞书/日志, 长度<=32)
+//   label?: string,                                 // 可选, 描述信号源 (如 "TV-BTC-Strategy")
+//   position_size?: string|number                   // 可选, 覆盖默认 / regime 置信度仓位 (如 "20%")
+// }
+//
+// 鉴权: X-Auth-Token (CONFIG_AUTH_TOKEN), 与 /pending-order 同级 — 会真实下单, 不能裸奔.
+/**
+ * /market-order 的可复用实现.
+ *
+ * @param {object} opts
+ * @param {'long'|'short'} opts.direction
+ * @param {string} [opts.source='market_order_api']
+ * @param {string} [opts.label]
+ * @param {string|number} [opts.position_size]   覆盖默认 / regime 置信度仓位
+ * @returns {Promise<{status:number, body:object}>}
+ */
+async function marketOrderImpl(opts = {}) {
+  const direction = opts.direction;
+  if (!['long', 'short'].includes(direction)) {
+    return { status: 400, body: { ok: false, error: 'direction must be long|short' } };
+  }
+  const cfg = config.get();
+  if (!cfg.enabled) {
+    return {
+      status: 409,
+      body: { ok: false, error: 'auto_trade_disabled', hint: '请先开启「自动下单」总开关再下市价信号' },
+    };
+  }
+
+  const rawSource = typeof opts.source === 'string' ? opts.source : '';
+  const cleanedSource = rawSource.trim().replace(/[^a-zA-Z0-9_\-.]/g, '').slice(0, 32);
+  const source = cleanedSource || 'market_order_api';
+  const label = typeof opts.label === 'string' ? opts.label.slice(0, 64) : null;
+
+  // 同方向 active 真实仓位 → 绝不叠加 (会重复下单 / 改写实际持仓状态)
+  const before = state.getPosition(direction);
+  if (before && before.active) {
+    return {
+      status: 409,
+      body: {
+        ok: false,
+        error: 'already_active',
+        hint: `${direction} 已有真实持仓 (entry=${before.entryPrice}), /market-order 不允许在已有仓位上叠加; 请先 POST /api/auto-trade/close-all-positions 或 /reset 后重试`,
+        position: before,
+      },
+    };
+  }
+
+  // 同方向 pending → 自动取消 (覆盖式, 与 /pending-order / firePriceTrigger 一致)
+  let overridden = null;
+  if (before && before.pending) {
+    overridden = state.cancelPending(direction, 'market_order_override');
+    if (overridden) {
+      console.log(`[trade.router] 🔄 /market-order ${direction} 覆盖式生效: 取消旧 pending entry=${overridden.pendingPlan?.entry} armed=${overridden.pendingArmedAt} (source=${source}${label ? ` label=${label}` : ''})`);
+      try { exec.fireMonitorCancel({ direction }); } catch (_) {}
+      const titleEmoji = direction === 'long' ? '📈' : '📉';
+      exec.notify({
+        type: 'pending_cancelled',
+        title: `🔄 ${titleEmoji} ${direction.toUpperCase()} 旧 pending 被新市价信号覆盖`,
+        lines: [
+          `symbol: ${cfg.symbol}`,
+          `来源: ${source}` + (label ? ` (${label})` : ''),
+          `原 entry: ${overridden.pendingPlan?.entry}`,
+          `原 SL/TP1: ${overridden.pendingPlan?.sl} / ${overridden.pendingPlan?.tp1}`,
+          `arm 时间: ${cnTime(overridden.pendingArmedAt)}`,
+          `逻辑: 外部 API 收到新市价信号 → 自动取消旧 pending → 即将立即市价开仓`,
+        ],
+      });
+    }
+  }
+
+  // 构造信号: market=true 强制 processSignal 走 immediate 分支 (无视 PENDING_MODE 默认值)
+  // 价位策略 plan_first: 有 plan → TP/SL/仓位用 plan; 无 plan → ATR 回退
+  const sig = {
+    token: cfg.token,
+    action: direction === 'long' ? 'open_long' : 'open_short',
+    symbol: cfg.symbol,
+    market: true,
+  };
+  if (opts.position_size != null) sig.position_size = opts.position_size;
+
+  const planLv = planLevelsFromRegime(direction);
+  if (!planLv) {
+    // 无 regime plan: ATR 动态回退 (与 manualOpenImpl 同算法, 但 isPending=false 不回踩入场)
+    const marketPrice = priceFeed.getStatus().lastPrice;
+    if (!Number.isFinite(marketPrice)) {
+      return {
+        status: 503,
+        body: { ok: false, error: 'price_feed_not_ready', hint: 'WS 行情尚未就绪, 无法以市价开仓' },
+      };
+    }
+    let lv;
+    try {
+      lv = computeManualFallbackLevels(direction, marketPrice, false);
+    } catch (e) {
+      return { status: 400, body: { ok: false, error: e.message } };
+    }
+    const validate = validateManualLevels(direction, lv.entry, lv.tp1, lv.tp2, lv.tp3, lv.sl);
+    if (!validate.ok) {
+      return { status: 400, body: { ok: false, error: 'manual_levels_invalid:' + validate.reason, segments: validate.segments } };
+    }
+    sig.entry = lv.entry;
+    sig.stop_loss = lv.sl;
+    sig.tp1 = lv.tp1; sig.tp2 = lv.tp2; sig.tp3 = lv.tp3;
+    if (sig.position_size == null) {
+      let getLatestPlan;
+      try { getLatestPlan = require('../regimeModule').getLatestPlan; } catch (e) {}
+      const planInfo = getLatestPlan ? getLatestPlan() : null;
+      const posPct = planInfo?.tradePlan?.suggestedPositionPct || 50;
+      sig.position_size = `${posPct}%`;
+    }
+    sig._priceSource = 'market_order_atr';
+  } else {
+    // 有 regime plan: TP/SL/仓位 用 plan, entry 由 immediate 分支用 marketPrice 自动覆盖
+    sig._priceSource = 'market_order_plan';
+  }
+
+  const r = await processSignal(sig, { source });
+
+  if (overridden && r.body && typeof r.body === 'object') {
+    r.body.overrode = {
+      direction,
+      previousEntry: overridden.pendingPlan?.entry ?? null,
+      previousSl: overridden.pendingPlan?.sl ?? null,
+      previousTp1: overridden.pendingPlan?.tp1 ?? null,
+      previousTp2: overridden.pendingPlan?.tp2 ?? null,
+      previousTp3: overridden.pendingPlan?.tp3 ?? null,
+      armedAt: overridden.pendingArmedAt,
+    };
+  }
+  if (label && r.body && typeof r.body === 'object') {
+    r.body.label = label;
+  }
+  return r;
+}
+
+router.post('/market-order', requireAdmin, async (req, res) => {
+  const r = await marketOrderImpl({
+    direction: req.body?.direction,
+    source: req.body?.source,
+    label: req.body?.label,
+    position_size: req.body?.position_size,
+  });
+  res.status(r.status).json(r.body);
+});
+
 // ============ POST /manual-follow: 手动追单 (一键立即市价) ============
 //
 // body: { direction: 'long' | 'short' }
@@ -1728,6 +1897,10 @@ module.exports.manualFollowImpl = manualFollowImpl;
 // 但叠加了"覆盖式语义" — 同方向已有 pending 时自动取消旧 → arm 新, 与 firePriceTrigger 对齐.
 // 暴露便于未来给其他 in-process 模块直接调用 (无需绕 HTTP).
 module.exports.pendingOrderImpl = pendingOrderImpl;
+// 对外市价立即开仓 API (/market-order) 的可复用实现.
+// 价位策略 plan_first: regime plan 优先 / ATR 回退; immediate 分支让 entry 自动用当下市价.
+// 冲突处理: active 持仓 → 409; 同方向 pending → 自动取消后立即市价开仓.
+module.exports.marketOrderImpl = marketOrderImpl;
 // 校验函数对外暴露 — 给冲烟测试 / 未来单测用. 前端不应该 import 这些, 浏览器侧
 // 在 regime.html 内有 validateAdjustLevelsClient 同算法实现 (UX 提前拦截)
 module.exports.validateManualLevels = validateManualLevels;
