@@ -229,6 +229,108 @@ function _runEval(price, ts) {
   // 触发后内部调 processSignal 走 manual-open / manual-follow 的所有现有幂等链路.
   try { evaluatePriceTriggers(price, ts); }
   catch (e) { console.error('[trade.risk] evaluatePriceTriggers error:', e.message); }
+  // ⭐ 价格围栏评估 — 自动方向开关 (autoDisableLong/Short).
+  // 与一次性 priceTriggers 完全独立: 围栏是"长期监控、来回切换", 触发器是"命中即消费".
+  try { evaluateDirectionGuard(price); }
+  catch (e) { console.error('[trade.risk] evaluateDirectionGuard error:', e.message); }
+}
+
+// ---------------- 价格围栏 (自动方向开关) ----------------
+//
+// 设计:
+//   - long.threshold  (做多基准): 市价 < threshold → 自动禁多;
+//                                   市价 ≥ threshold * (1 + hysteresisPct/100) → 自动解除
+//   - short.threshold (做空基准): 市价 > threshold → 自动禁空;
+//                                   市价 ≤ threshold * (1 - hysteresisPct/100) → 自动解除
+//   - 严格不含边界: long  market < threshold 才拦  / market ≥ threshold*(1+h) 才解
+//                   short market > threshold 才拦  / market ≤ threshold*(1-h) 才解
+//   - 防抖: 最小切换间隔 (上次切换后 N ms 内不再换状态), 与滞后区间共同生效
+//   - 通知: 切换时推一条飞书 + console.log; 不切换时静默
+//   - 持久化: cfg.autoDisableLong/Short 通过 config.patch 写盘 (30s 切一次的频率, 写盘 IO 完全不是瓶颈)
+//
+// 与 cfg.disableLong/Short 是独立位 — processSignal 取或后判断是否拦截.
+const _lastGuardSwitchAt = { long: 0, short: 0 };
+
+function evaluateDirectionGuard(price) {
+  if (!Number.isFinite(price) || price <= 0) return;
+  const cfg = config.get();
+  const dg = cfg.directionGuard;
+  if (!dg) return;
+  const hpct = Number.isFinite(dg.hysteresisPct) ? dg.hysteresisPct : 0;
+  const minInterval = Number.isFinite(dg.minSwitchIntervalMs) ? dg.minSwitchIntervalMs : 0;
+  const now = Date.now();
+  const patches = {};
+
+  // ===== 做多基准 (low floor): price < threshold → 拦多; price ≥ threshold*(1+h) → 解 =====
+  const lg = dg.long;
+  if (lg && lg.enabled && Number.isFinite(lg.threshold) && lg.threshold > 0) {
+    const releaseAbove = lg.threshold * (1 + hpct / 100);
+    const currently = !!cfg.autoDisableLong;
+    let next = currently;
+    if (!currently && price < lg.threshold) next = true;        // 触发拦截
+    else if (currently && price >= releaseAbove) next = false;  // 解除
+    if (next !== currently && now - _lastGuardSwitchAt.long >= minInterval) {
+      patches.autoDisableLong = next;
+      _lastGuardSwitchAt.long = now;
+      _notifyGuardSwitch('long', next, price, lg.threshold, releaseAbove, hpct);
+    }
+  } else if (cfg.autoDisableLong) {
+    // 围栏被关掉了 (用户 disable enabled 或 threshold 清空) → 立即把 autoDisable 复位为 false,
+    // 否则会出现"围栏关了但仍在拦截"的诡异状态.
+    patches.autoDisableLong = false;
+    console.log('[trade.risk] 🔓 价格围栏(long)已禁用, autoDisableLong 自动复位 false');
+  }
+
+  // ===== 做空基准 (high cap): price > threshold → 拦空; price ≤ threshold*(1-h) → 解 =====
+  const sg = dg.short;
+  if (sg && sg.enabled && Number.isFinite(sg.threshold) && sg.threshold > 0) {
+    const releaseBelow = sg.threshold * (1 - hpct / 100);
+    const currently = !!cfg.autoDisableShort;
+    let next = currently;
+    if (!currently && price > sg.threshold) next = true;
+    else if (currently && price <= releaseBelow) next = false;
+    if (next !== currently && now - _lastGuardSwitchAt.short >= minInterval) {
+      patches.autoDisableShort = next;
+      _lastGuardSwitchAt.short = now;
+      _notifyGuardSwitch('short', next, price, sg.threshold, releaseBelow, hpct);
+    }
+  } else if (cfg.autoDisableShort) {
+    patches.autoDisableShort = false;
+    console.log('[trade.risk] 🔓 价格围栏(short)已禁用, autoDisableShort 自动复位 false');
+  }
+
+  if (Object.keys(patches).length > 0) {
+    config.patch(patches);
+  }
+}
+
+function _notifyGuardSwitch(direction, willBeDisabled, price, threshold, releaseLevel, hpct) {
+  const dirZh = direction === 'long' ? '做多' : '做空';
+  const dirEn = direction.toUpperCase();
+  const titleEmoji = willBeDisabled ? '🤖🚫' : '🤖✅';
+  const triggerExp = direction === 'long'
+    ? `市价 ${price.toFixed(2)} < 做多基准 ${threshold.toFixed(2)}`
+    : `市价 ${price.toFixed(2)} > 做空基准 ${threshold.toFixed(2)}`;
+  const releaseExp = direction === 'long'
+    ? `市价回升至 ${releaseLevel.toFixed(2)} 以上 (含 ${hpct}% 滞后缓冲)`
+    : `市价回落至 ${releaseLevel.toFixed(2)} 以下 (含 ${hpct}% 滞后缓冲)`;
+  console.log(`[trade.risk] ${titleEmoji} 价格围栏自动${willBeDisabled ? '禁止' : '恢复'}${dirZh}: ${triggerExp}`);
+  exec.notify({
+    type: willBeDisabled ? 'open_blocked' : 'unlock',
+    title: `${titleEmoji} 价格围栏自动${willBeDisabled ? '禁止' : '恢复'}${dirZh} (${dirEn})`,
+    lines: [
+      `symbol: ${config.get().symbol}`,
+      willBeDisabled
+        ? `触发条件: ${triggerExp} — 已涨/跌出围栏外, 自动拦截该方向新信号`
+        : `解除条件: ${releaseExp} — 已回到围栏内, 该方向恢复接收新信号`,
+      willBeDisabled
+        ? `cfg.autoDisable${direction === 'long' ? 'Long' : 'Short'}=true; 与手动 disable* 取或后决定是否拦`
+        : `cfg.autoDisable${direction === 'long' ? 'Long' : 'Short'}=false; 若手动 disable* 仍为 true, 仍会被拦`,
+      willBeDisabled
+        ? `已有 ${dirEn} 持仓的 TP/SL 不受影响; 已有 pending 仍会触达 entry fill`
+        : '提醒: 价格再次跨过基准会再次触发, 注意滞后缓冲',
+    ],
+  });
 }
 
 function onTick({ price, ts }) {
@@ -797,6 +899,9 @@ module.exports = {
   // tick → fire 触发延迟 (ms): 用户能看到"风控真正以多快的速度响应价格触发"
   // evalCount: 累计 evaluate 调用次数, 用于健康检查 (与 priceFeed.tickRateTps 对照)
   getRiskTelemetry,
+  // ⭐ 价格围栏: 暴露给 router /direction-guard 端点用 — 用户改了阈值/启停后,
+  // 路由立即用 priceFeed.lastPrice 调一次 evaluateDirectionGuard, 不必等下一帧 tick.
+  evaluateDirectionGuard,
   _reset: () => {
     recentlyFired.long = 0;
     recentlyFired.short = 0;
@@ -810,6 +915,8 @@ module.exports = {
     _lastNearMiss = null;
     _lastNearMissLogAt.long = 0;
     _lastNearMissLogAt.short = 0;
+    _lastGuardSwitchAt.long = 0;
+    _lastGuardSwitchAt.short = 0;
   },
   __getInFlight: () => ({ ..._inFlight }),       // 仅测试用
 };

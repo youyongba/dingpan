@@ -287,6 +287,53 @@
   .auto-trade-bar .at-divider { color: #30363d; font-size: 14px; user-select: none; display: none; } /* 在新设计中隐藏分割线 */
   .auto-trade-bar .at-meta { font-size: 12px; color: #8b949e; margin-left: auto; line-height: 1.4; }
 
+  /* 🤖 价格围栏 (自动方向开关) — 与价格触发器 .price-trigger-bar 同视觉风格但更紧凑 */
+  .direction-guard-bar {
+    padding: 12px 16px; margin-bottom: 16px; border-radius: 12px;
+    border: 1px solid #30363d; background: linear-gradient(145deg, #161b22, #0e1116);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+  }
+  .direction-guard-bar .dg-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+  .direction-guard-bar .dg-title { font-size: 15px; font-weight: 700; color: #e6edf3; }
+  .direction-guard-bar .dg-title small { font-size: 12px; font-weight: 500; color: #8b949e; margin-left: 6px; }
+  .direction-guard-bar .dg-meta { font-size: 12px; color: #8b949e; }
+  .direction-guard-bar .dg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 700px) { .direction-guard-bar .dg-grid { grid-template-columns: 1fr; } }
+  .direction-guard-bar .dg-card { border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; background: #0e1116; }
+  .direction-guard-bar .dg-card.long  { border-left: 3px solid #3fb950; }
+  .direction-guard-bar .dg-card.short { border-left: 3px solid #f85149; }
+  .direction-guard-bar .dg-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .direction-guard-bar .dg-card-title { font-size: 13px; font-weight: 700; }
+  .direction-guard-bar .dg-card-title.long  { color: #3fb950; }
+  .direction-guard-bar .dg-card-title.short { color: #f85149; }
+  .direction-guard-bar .dg-status { font-size: 11px; padding: 3px 8px; border-radius: 5px; font-weight: 600; }
+  .direction-guard-bar .dg-status.idle    { background: rgba(139, 148, 158, 0.15); color: #8b949e; border: 1px solid rgba(139, 148, 158, 0.3); }
+  .direction-guard-bar .dg-status.armed   { background: rgba(31, 111, 235, 0.15); color: #58a6ff; border: 1px solid rgba(31, 111, 235, 0.4); }
+  .direction-guard-bar .dg-status.blocking{ background: rgba(248, 81, 73, 0.15);  color: #f85149; border: 1px solid rgba(248, 81, 73, 0.4); animation: dg-pulse 1.5s ease-in-out infinite; }
+  @keyframes dg-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.65; } }
+  .direction-guard-bar .dg-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .direction-guard-bar .dg-row input[type="number"] {
+    flex: 1; min-width: 100px; padding: 6px 10px; font-size: 13px;
+    background: #161b22; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3;
+  }
+  .direction-guard-bar .dg-row input[type="number"]:focus { border-color: #58a6ff; outline: none; }
+  .direction-guard-bar .dg-btn {
+    padding: 6px 12px; font-size: 12px; font-weight: 600; cursor: pointer;
+    border: 1px solid #30363d; border-radius: 6px; background: #21262d; color: #e6edf3; transition: all 0.15s;
+  }
+  .direction-guard-bar .dg-btn:hover:not(:disabled) { background: #30363d; }
+  .direction-guard-bar .dg-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .direction-guard-bar .dg-btn.arm.long  { border-color: rgba(63, 185, 80, 0.4); color: #3fb950; }
+  .direction-guard-bar .dg-btn.arm.short { border-color: rgba(248, 81, 73, 0.4); color: #f85149; }
+  .direction-guard-bar .dg-btn.cancel    { border-color: rgba(139, 148, 158, 0.4); color: #8b949e; }
+  .direction-guard-bar .dg-info { font-size: 11px; color: #8b949e; margin-top: 6px; line-height: 1.4; }
+  .direction-guard-bar .dg-config { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-top: 10px; padding-top: 10px; border-top: 1px solid #21262d; }
+  .direction-guard-bar .dg-config-field { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #8b949e; }
+  .direction-guard-bar .dg-config-field input[type="number"] {
+    width: 80px; padding: 4px 8px; font-size: 12px;
+    background: #161b22; border: 1px solid #30363d; border-radius: 5px; color: #e6edf3;
+  }
+
   /* 手动交易操作栏 (开多 / 开空 / 全平) */
   .trade-actions-bar {
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
@@ -757,6 +804,55 @@
   </span>
 </div>
 
+<!-- 🤖 价格围栏: 自动方向开关 (基于市价 vs 基准价 + 滞后区间) -->
+<div class="direction-guard-bar" id="directionGuardBar">
+  <div class="dg-head">
+    <span class="dg-title">🤖 价格围栏 <small>自动方向开关</small></span>
+    <span class="dg-meta" id="directionGuardMeta">每帧 WS tick 评估 · 跨过基准价 → 自动拦该方向; 滞后缓冲防抖动</span>
+  </div>
+  <div class="dg-grid">
+    <!-- 做多围栏: 市价 < 基准 → 自动禁多 -->
+    <div class="dg-card long" id="dgCardLong">
+      <div class="dg-card-head">
+        <span class="dg-card-title long">📈 做多基准价</span>
+        <span class="dg-status idle" id="dgStatusLong">未启用</span>
+      </div>
+      <div class="dg-row">
+        <input type="number" step="0.01" min="0" id="dgThresholdLong" placeholder="如 70000.00" />
+        <button class="dg-btn arm long" id="dgArmLongBtn">✅ 启用</button>
+        <button class="dg-btn cancel" id="dgCancelLongBtn">⛔ 禁用</button>
+      </div>
+      <div class="dg-info" id="dgInfoLong">市价跌破基准 → 🚫 自动禁多 (回升至基准 + 滞后缓冲解除)</div>
+    </div>
+    <!-- 做空围栏: 市价 > 基准 → 自动禁空 -->
+    <div class="dg-card short" id="dgCardShort">
+      <div class="dg-card-head">
+        <span class="dg-card-title short">📉 做空基准价</span>
+        <span class="dg-status idle" id="dgStatusShort">未启用</span>
+      </div>
+      <div class="dg-row">
+        <input type="number" step="0.01" min="0" id="dgThresholdShort" placeholder="如 80000.00" />
+        <button class="dg-btn arm short" id="dgArmShortBtn">✅ 启用</button>
+        <button class="dg-btn cancel" id="dgCancelShortBtn">⛔ 禁用</button>
+      </div>
+      <div class="dg-info" id="dgInfoShort">市价涨破基准 → 🚫 自动禁空 (回落至基准 - 滞后缓冲解除)</div>
+    </div>
+  </div>
+  <div class="dg-config">
+    <label class="dg-config-field">
+      <span>滞后缓冲</span>
+      <input type="number" step="0.05" min="0" max="50" id="dgHysteresisPct" placeholder="0.2" />
+      <span>%</span>
+    </label>
+    <label class="dg-config-field">
+      <span>最小切换间隔</span>
+      <input type="number" step="1000" min="0" max="3600000" id="dgMinSwitchMs" placeholder="30000" />
+      <span>ms</span>
+    </label>
+    <button class="dg-btn config" id="dgSaveConfigBtn">💾 保存全局参数</button>
+  </div>
+</div>
+
 <!-- 手动交易操作栏: 挂单 + 一键追单 + 一键全平 -->
 <div class="trade-actions-bar">
   <span class="ta-label">手动开仓 (挂单)</span>
@@ -1125,7 +1221,12 @@
     v == null || !isFinite(v) ? '--' : Number(v).toFixed(d);
 
   // 自动交易开关全局状态
-  const autoTrade = { enabled: false, ready: false, disableLong: false, disableShort: false };
+  const autoTrade = {
+    enabled: false, ready: false,
+    disableLong: false, disableShort: false,
+    autoDisableLong: false, autoDisableShort: false,
+    directionGuard: null,
+  };
 
   function renderAutoTradeNote() {
     return autoTrade.enabled
@@ -1284,6 +1385,14 @@
       // 方向开关 UI 同步 (开关 ON = 拦截中 = 红色 danger; OFF = 正常 = 绿色 on)
       renderDirectionDisableState('long', autoTrade.disableLong);
       renderDirectionDisableState('short', autoTrade.disableShort);
+      // 价格围栏: 配置 + 实时 autoDisable* 状态都从 /status 同步
+      autoTrade.directionGuard = j.directionGuard || null;
+      autoTrade.autoDisableLong = !!j.autoDisableLong;
+      autoTrade.autoDisableShort = !!j.autoDisableShort;
+      renderDirectionGuard(autoTrade.directionGuard, {
+        long: autoTrade.autoDisableLong,
+        short: autoTrade.autoDisableShort,
+      }, lastPriceForCard);
     } catch (e) {
       const stateEl = document.getElementById('autoTradeState');
       stateEl.textContent = '后端不可达';
@@ -1345,6 +1454,174 @@
       await fetchAutoTradeStatus();
     } finally {
       toggle.disabled = false;
+    }
+  }
+
+  /**
+   * 价格围栏 UI 渲染 (从 /status 拉到的 directionGuard 配置 + autoDisable* 实时状态).
+   *
+   * 状态文案三档:
+   *   - 未启用 (idle): cfg.directionGuard.{dir}.enabled=false 或 threshold=null
+   *   - 监听中 (armed): enabled=true, 当前价仍在围栏内, 未触发拦截
+   *   - 🚫 拦截中 (blocking): autoDisable* = true, 价格已跨过基准, 该方向被自动拦截
+   *
+   * 显示当前价 + 与基准价的距离 (% 差) 帮助用户理解触发临界点.
+   */
+  function renderDirectionGuard(guardCfg, autoDisableMap, lastPrice) {
+    const dg = guardCfg || {};
+    ['long', 'short'].forEach(dir => {
+      const slot = dg[dir] || {};
+      const input = document.getElementById(dir === 'long' ? 'dgThresholdLong' : 'dgThresholdShort');
+      const status = document.getElementById(dir === 'long' ? 'dgStatusLong' : 'dgStatusShort');
+      const info = document.getElementById(dir === 'long' ? 'dgInfoLong' : 'dgInfoShort');
+      if (!input || !status || !info) return;
+
+      // 编辑中不要被自动同步覆盖 (用户输了一半阈值时 5s 轮询会冲掉)
+      if (document.activeElement !== input) {
+        input.value = (slot.threshold != null && Number.isFinite(slot.threshold)) ? Number(slot.threshold).toFixed(2) : '';
+      }
+
+      const auto = !!autoDisableMap?.[dir];
+      const enabled = !!slot.enabled && Number.isFinite(slot.threshold);
+      const dirZh = dir === 'long' ? '做多' : '做空';
+      const opSym = dir === 'long' ? '<' : '>';
+      const releaseSym = dir === 'long' ? '≥' : '≤';
+      const releasePrice = enabled
+        ? Number(slot.threshold) * (1 + (dir === 'long' ? 1 : -1) * (Number(dg.hysteresisPct) || 0) / 100)
+        : null;
+
+      if (!enabled) {
+        status.textContent = '未启用';
+        status.className = 'dg-status idle';
+        info.textContent = dir === 'long'
+          ? '市价跌破基准 → 🚫 自动禁多 (回升至基准 + 滞后缓冲解除)'
+          : '市价涨破基准 → 🚫 自动禁空 (回落至基准 - 滞后缓冲解除)';
+      } else if (auto) {
+        status.textContent = `🚫 拦截中`;
+        status.className = 'dg-status blocking';
+        const distPct = Number.isFinite(lastPrice) && slot.threshold > 0
+          ? ((lastPrice - slot.threshold) / slot.threshold * 100).toFixed(3)
+          : null;
+        info.innerHTML = `🤖 当前 ${Number.isFinite(lastPrice) ? lastPrice.toFixed(2) : '--'} ` +
+          `${opSym} 基准 ${Number(slot.threshold).toFixed(2)}` +
+          (distPct != null ? ` (${distPct}%)` : '') +
+          ` → 自动禁${dirZh.charAt(1)} · ` +
+          `回到 ${releasePrice ? releasePrice.toFixed(2) : '--'} ${releaseSym} 后解除`;
+      } else {
+        status.textContent = '监听中';
+        status.className = 'dg-status armed';
+        const distPct = Number.isFinite(lastPrice) && slot.threshold > 0
+          ? ((lastPrice - slot.threshold) / slot.threshold * 100).toFixed(3)
+          : null;
+        info.innerHTML = `✅ 当前 ${Number.isFinite(lastPrice) ? lastPrice.toFixed(2) : '--'} ` +
+          `仍在围栏内${distPct != null ? ` (距基准 ${distPct}%)` : ''} · ` +
+          `${dir === 'long' ? '跌破' : '涨破'} ${Number(slot.threshold).toFixed(2)} 将自动禁${dirZh.charAt(1)}`;
+      }
+    });
+
+    // 全局参数 (滞后缓冲 / 最小切换间隔) — 同样仅在非编辑态下同步
+    const hpInput = document.getElementById('dgHysteresisPct');
+    const msInput = document.getElementById('dgMinSwitchMs');
+    if (hpInput && document.activeElement !== hpInput && Number.isFinite(dg.hysteresisPct)) {
+      hpInput.value = dg.hysteresisPct;
+    }
+    if (msInput && document.activeElement !== msInput && Number.isFinite(dg.minSwitchIntervalMs)) {
+      msInput.value = dg.minSwitchIntervalMs;
+    }
+  }
+
+  /**
+   * 切换某方向的价格围栏 (启用/禁用 + 修改基准价).
+   * 调 /direction-guard 端点, 后端立即用最新价评估一次, 用户能立刻看到 autoDisable* 切换.
+   */
+  async function setDirectionGuard(direction, action) {
+    const input = document.getElementById(direction === 'long' ? 'dgThresholdLong' : 'dgThresholdShort');
+    const armBtn = document.getElementById(direction === 'long' ? 'dgArmLongBtn' : 'dgArmShortBtn');
+    const cancelBtn = document.getElementById(direction === 'long' ? 'dgCancelLongBtn' : 'dgCancelShortBtn');
+    const dirZh = direction === 'long' ? '做多' : '做空';
+
+    const body = { direction };
+    if (action === 'arm') {
+      const t = parseFloat(input?.value);
+      if (!Number.isFinite(t) || t <= 0) {
+        showToast('warn', '⚠️ 请输入有效的基准价', '基准价必须是大于 0 的数字', 4000);
+        return;
+      }
+      body.enabled = true;
+      body.threshold = t;
+    } else if (action === 'disable') {
+      body.enabled = false;
+    }
+    armBtn && (armBtn.disabled = true);
+    cancelBtn && (cancelBtn.disabled = true);
+    try {
+      const r = await fetch('/api/auto-trade/direction-guard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+      autoTrade.directionGuard = j.directionGuard;
+      autoTrade.autoDisableLong = !!j.autoDisableLong;
+      autoTrade.autoDisableShort = !!j.autoDisableShort;
+      const lastPrice = priceStream.alive ? priceStream.lastPrice : null;
+      renderDirectionGuard(j.directionGuard, {
+        long: j.autoDisableLong,
+        short: j.autoDisableShort,
+      }, lastPrice);
+      // 立即刷一下手动按钮可用态 (下面 updateManualActions 会用最新 autoDisable 计算)
+      updateManualActions(lastPositionsSnapshot, autoTrade.enabled);
+      showToast('ok',
+        action === 'arm'
+          ? `🤖 ${dirZh}围栏已启用`
+          : `🤖 ${dirZh}围栏已禁用`,
+        action === 'arm'
+          ? `基准价 ${body.threshold.toFixed(2)}; 市价跨过即自动${direction === 'long' ? '禁多' : '禁空'} (${j.directionGuard?.hysteresisPct ?? '--'}% 滞后缓冲)`
+          : `${dirZh}方向恢复正常 (此前 autoDisable*=true 也会被复位)`,
+        5000);
+    } catch (e) {
+      showToast('err', `❌ ${dirZh}围栏切换失败`, e.message || String(e), 6000);
+      await fetchAutoTradeStatus();
+    } finally {
+      armBtn && (armBtn.disabled = false);
+      cancelBtn && (cancelBtn.disabled = false);
+    }
+  }
+
+  /** 保存价格围栏全局参数 (滞后缓冲 + 最小切换间隔). */
+  async function saveDirectionGuardConfig() {
+    const hp = parseFloat(document.getElementById('dgHysteresisPct')?.value);
+    const ms = parseInt(document.getElementById('dgMinSwitchMs')?.value, 10);
+    const body = {};
+    if (Number.isFinite(hp) && hp >= 0 && hp <= 50) body.hysteresisPct = hp;
+    if (Number.isFinite(ms) && ms >= 0 && ms <= 3600000) body.minSwitchIntervalMs = ms;
+    if (Object.keys(body).length === 0) {
+      showToast('warn', '⚠️ 参数无效', '滞后 0~50% / 间隔 0~3600000ms', 4000);
+      return;
+    }
+    const btn = document.getElementById('dgSaveConfigBtn');
+    btn && (btn.disabled = true);
+    try {
+      const r = await fetch('/api/auto-trade/direction-guard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+      autoTrade.directionGuard = j.directionGuard;
+      const lastPrice = priceStream.alive ? priceStream.lastPrice : null;
+      renderDirectionGuard(j.directionGuard, {
+        long: autoTrade.autoDisableLong,
+        short: autoTrade.autoDisableShort,
+      }, lastPrice);
+      showToast('ok', '🤖 围栏全局参数已保存',
+        `滞后 ${j.directionGuard?.hysteresisPct ?? '--'}% · 最小切换 ${j.directionGuard?.minSwitchIntervalMs ?? '--'}ms`, 4000);
+    } catch (e) {
+      showToast('err', '❌ 全局参数保存失败', e.message || String(e), 6000);
+    } finally {
+      btn && (btn.disabled = false);
     }
   }
 
@@ -2446,16 +2723,27 @@
       return;
     }
 
-    // 方向开关 (autoTrade.disableLong / disableShort): 与 busy 同级拦截, 但语义不同
-    //   - busy:        同方向已有持仓/pending → "重复"问题
-    //   - 方向开关:    用户主动关掉该方向 → "不希望"再做这个方向
-    //   tooltip 优先展示方向开关原因 (用户主动决策, 比 busy 更"显式")
-    const longDisabled = !!autoTrade.disableLong;
-    const shortDisabled = !!autoTrade.disableShort;
+    // 方向开关 (autoTrade.disableLong / disableShort) + 价格围栏 (autoDisableLong / autoDisableShort):
+    // 任意一个 ON 都视为该方向被禁; tooltip 优先展示方向开关原因 (用户主动决策比 busy 更"显式")
+    const longManualDisabled = !!autoTrade.disableLong;
+    const shortManualDisabled = !!autoTrade.disableShort;
+    const longGuardDisabled = !!autoTrade.autoDisableLong;
+    const shortGuardDisabled = !!autoTrade.autoDisableShort;
+    const longDisabled = longManualDisabled || longGuardDisabled;
+    const shortDisabled = shortManualDisabled || shortGuardDisabled;
+    const reasonText = (manual, guard) => {
+      const reasons = [];
+      if (manual) reasons.push('🚫 手动开关');
+      if (guard)  reasons.push('🤖 价格围栏');
+      return reasons.join(' + ');
+    };
+
+    const longReason = reasonText(longManualDisabled, longGuardDisabled);
+    const shortReason = reasonText(shortManualDisabled, shortGuardDisabled);
 
     longBtn.disabled = longBusy || longDisabled;
     longBtn.title = longDisabled
-      ? '🚫 已禁止做多: 上方"禁止做多"开关已开启, 所有新 LONG 信号都会被 409 拦截'
+      ? `🚫 已禁止做多 (${longReason}): 所有新 LONG 信号都会被 409 拦截`
       : longActive
         ? '已持有多头仓位, 同方向不可重复挂单 (重置后可再挂)'
         : longPending
@@ -2464,7 +2752,7 @@
 
     shortBtn.disabled = shortBusy || shortDisabled;
     shortBtn.title = shortDisabled
-      ? '🚫 已禁止做空: 上方"禁止做空"开关已开启, 所有新 SHORT 信号都会被 409 拦截'
+      ? `🚫 已禁止做空 (${shortReason}): 所有新 SHORT 信号都会被 409 拦截`
       : shortActive
         ? '已持有空头仓位, 同方向不可重复挂单 (重置后可再挂)'
         : shortPending
@@ -2474,7 +2762,7 @@
     if (followLongBtn) {
       followLongBtn.disabled = longBusy || longDisabled;
       followLongBtn.title = longDisabled
-        ? '🚫 已禁止做多: 上方"禁止做多"开关已开启, 所有新 LONG 信号都会被 409 拦截'
+        ? `🚫 已禁止做多 (${longReason}): 所有新 LONG 信号都会被 409 拦截`
         : longActive
           ? '已持有多头仓位, 同方向不可重复追单 (重置后可再追)'
           : longPending
@@ -2484,7 +2772,7 @@
     if (followShortBtn) {
       followShortBtn.disabled = shortBusy || shortDisabled;
       followShortBtn.title = shortDisabled
-        ? '🚫 已禁止做空: 上方"禁止做空"开关已开启, 所有新 SHORT 信号都会被 409 拦截'
+        ? `🚫 已禁止做空 (${shortReason}): 所有新 SHORT 信号都会被 409 拦截`
         : shortActive
           ? '已持有空头仓位, 同方向不可重复追单 (重置后可再追)'
           : shortPending
@@ -2504,8 +2792,8 @@
       shortPending && '📉空(挂单)',
     ].filter(Boolean);
     const blockTags = [
-      longDisabled && '🚫禁止做多',
-      shortDisabled && '🚫禁止做空',
+      longDisabled && (longGuardDisabled && !longManualDisabled ? '🤖禁止做多(围栏)' : longManualDisabled && longGuardDisabled ? '🚫🤖禁止做多(双重)' : '🚫禁止做多'),
+      shortDisabled && (shortGuardDisabled && !shortManualDisabled ? '🤖禁止做空(围栏)' : shortManualDisabled && shortGuardDisabled ? '🚫🤖禁止做空(双重)' : '🚫禁止做空'),
     ].filter(Boolean);
     const baseMeta = tags.length
       ? `当前: ${tags.join(' · ')} · 重复同方向开仓/追单会被拒绝`
@@ -3012,6 +3300,13 @@
   document.getElementById('disableShortToggle').addEventListener('change', (e) => {
     setDirectionDisabled('short', e.target.checked);
   });
+  // 🤖 价格围栏按钮: 启用/禁用某方向, 后端立即用最新价评估一次 autoDisable*
+  document.getElementById('dgArmLongBtn').addEventListener('click', () => setDirectionGuard('long', 'arm'));
+  document.getElementById('dgCancelLongBtn').addEventListener('click', () => setDirectionGuard('long', 'disable'));
+  document.getElementById('dgArmShortBtn').addEventListener('click', () => setDirectionGuard('short', 'arm'));
+  document.getElementById('dgCancelShortBtn').addEventListener('click', () => setDirectionGuard('short', 'disable'));
+  // 围栏全局参数 (滞后缓冲 + 最小切换间隔)
+  document.getElementById('dgSaveConfigBtn').addEventListener('click', saveDirectionGuardConfig);
   document.getElementById('resetLongBtn').addEventListener('click', () => resetDirection('long'));
   document.getElementById('resetShortBtn').addEventListener('click', () => resetDirection('short'));
 

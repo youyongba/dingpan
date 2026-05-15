@@ -19,7 +19,11 @@
  *    POST /api/auto-trade/toggle           切换总开关 enabled (无需鉴权, 只切布尔)
  *    POST /api/auto-trade/toggle-direction 方向开关 { direction, disabled } 禁止做多/做空 (无需鉴权)
  *                                          仅拦新开仓信号; 不影响 active 持仓 TP/SL / pending 触达 fill / 平仓
- *    GET  /api/auto-trade/status          查询当前仓位 + WS 状态 + 方向开关
+ *    POST /api/auto-trade/direction-guard  ⭐ 价格围栏 (自动方向开关, 无需鉴权)
+ *                                          { direction, enabled, threshold, hysteresisPct?, minSwitchIntervalMs? }
+ *                                          riskEngine 每帧 tick 评估, 价格跨越基准时自动切换
+ *                                          autoDisable*; 与手动 disable* 取或拦截新信号
+ *    GET  /api/auto-trade/status          查询当前仓位 + WS 状态 + 方向开关 + 价格围栏
  *    GET  /api/auto-trade/config          读取当前配置
  *    POST /api/auto-trade/config          局部更新配置 (鉴权)
  *
@@ -369,35 +373,49 @@ async function processSignal(sig, opts = {}) {
     const direction = action === 'open_long' ? 'long' : 'short';
 
     // ⭐ 方向开关 (与 cfg.enabled 总开关同级, 但**仅拦新开仓信号**):
-    //   disableLong=true  → 拒绝所有 open_long  新信号 (firePriceTrigger / pending-order / market-order
-    //                       / signal / manual-open / manual-follow 全部走这条路, 自动覆盖)
-    //   disableShort=true → 拒绝所有 open_short 新信号
+    //   两条独立位取或:
+    //     a) cfg.disableLong/Short      — 用户手动开关 (UI / /toggle-direction)
+    //     b) cfg.autoDisableLong/Short  — 价格围栏自动开关 (riskEngine.evaluateDirectionGuard 写入)
+    //   任意一个 true 都拒绝该方向的 open_long/open_short 新信号.
     //   不影响 take_profit / stop_loss / close-all-positions, 也不影响已有 pending 触达 entry 的 fill
-    //   (firePendingFill 走的是 forwardOpen 而不是 processSignal, 是历史决策, 不在此处拦).
+    //   (firePendingFill 走 forwardOpen 不经 processSignal, 是历史决策).
     //   想彻底撤已有 pending 请 POST /api/auto-trade/cancel-pending. 想拦 active 仓位 TP/SL 请关 cfg.enabled.
-    const directionDisabledKey = direction === 'long' ? 'disableLong' : 'disableShort';
-    if (cfg[directionDisabledKey]) {
+    const manualKey = direction === 'long' ? 'disableLong' : 'disableShort';
+    const autoKey   = direction === 'long' ? 'autoDisableLong' : 'autoDisableShort';
+    const manualDisabled = !!cfg[manualKey];
+    const autoDisabled   = !!cfg[autoKey];
+    if (manualDisabled || autoDisabled) {
       const directionZh = direction === 'long' ? '做多' : '做空';
+      const reasons = [];
+      if (manualDisabled) reasons.push('手动开关');
+      if (autoDisabled)   reasons.push('价格围栏');
+      const reasonStr = reasons.join(' + ');
+      const guardCfg = cfg.directionGuard?.[direction];
+      const guardLine = autoDisabled && guardCfg?.enabled
+        ? `🤖 价格围栏: 基准价=${guardCfg.threshold ?? '--'}, 当前 lastPrice 已${direction === 'long' ? '跌破' : '涨破'}基准 → 自动拦截`
+        : null;
       exec.notify({
         type: 'open_blocked',
-        title: `🚫 ${direction.toUpperCase()} 开仓被「禁止${directionZh}」开关拦截`,
+        title: `🚫 ${direction.toUpperCase()} 开仓被「禁止${directionZh}」拦截 (${reasonStr})`,
         lines: [
           `symbol: ${sig.symbol || cfg.symbol}`,
           `来源: ${callerSource}`,
-          `当前 ${directionDisabledKey}=true, 该方向所有新开仓信号都会被拒绝`,
-          `想恢复: POST /api/auto-trade/toggle-direction {"direction":"${direction}","disabled":false}`,
+          manualDisabled ? `🚫 手动开关 ${manualKey}=true (POST /toggle-direction 切换)` : null,
+          guardLine,
           `已有 ${direction.toUpperCase()} 持仓的 TP/SL 不受影响; 已有 pending 不会自动撤`,
-        ],
+        ].filter(Boolean),
       });
-      console.warn(`[trade.router] 🚫 ${direction} 信号被方向开关拦截 (${directionDisabledKey}=true, source=${callerSource})`);
+      console.warn(`[trade.router] 🚫 ${direction} 信号被方向开关拦截 (manual=${manualDisabled}, auto=${autoDisabled}, source=${callerSource})`);
       return {
         status: 409,
         body: {
           ok: false,
           error: 'direction_disabled',
           direction,
-          [directionDisabledKey]: true,
-          hint: `「禁止${directionZh}」开关已开启, 该方向暂停接收新开仓信号`,
+          reason: reasonStr,
+          [manualKey]: manualDisabled,
+          [autoKey]: autoDisabled,
+          hint: `「禁止${directionZh}」拦截原因: ${reasonStr}; 手动开关请 POST /toggle-direction, 价格围栏请 POST /direction-guard 调整或禁用`,
         },
       };
     }
@@ -765,6 +783,13 @@ router.get('/status', (req, res) => {
     // 切换走 POST /toggle-direction 或 POST /config { disableLong | disableShort }
     disableLong: !!cfg.disableLong,
     disableShort: !!cfg.disableShort,
+    // ⭐ 价格围栏 (自动方向开关) — 配置 + 实时自动状态:
+    //   directionGuard:    { long:{enabled,threshold}, short:{enabled,threshold}, hysteresisPct, minSwitchIntervalMs }
+    //   autoDisableLong/Short: riskEngine 实时评估写入, 与手动 disable* 取或决定 processSignal 是否拦截
+    // UI 用这些字段渲染"价格围栏"输入框 + 实时状态标签.
+    directionGuard: cfg.directionGuard || null,
+    autoDisableLong: !!cfg.autoDisableLong,
+    autoDisableShort: !!cfg.autoDisableShort,
     priceFeed: priceFeed.getStatus(),
     positions: state.get(),
     // ⭐ 价格触发器 (后端 WS 监听 + disk 持久化, 浏览器关掉也会触发)
@@ -1959,6 +1984,115 @@ router.post('/toggle-direction', (req, res) => {
     [key]: updated[key],
     disableLong: !!updated.disableLong,
     disableShort: !!updated.disableShort,
+  });
+});
+
+// ============ POST /direction-guard: 价格围栏配置 (自动方向开关) ============
+//
+// body: {
+//   direction: 'long' | 'short',                 // 必填
+//   enabled?: boolean,                            // 可选, 启停该方向的围栏
+//   threshold?: number | null,                    // 可选, 基准价 (null = 清空)
+//   hysteresisPct?: number,                       // 可选, 滞后缓冲 % (全局, 不分方向)
+//   minSwitchIntervalMs?: number                  // 可选, 最小切换间隔 (全局)
+// }
+//
+// 行为:
+//   - patch 写盘后立即用 priceFeed.lastPrice 调一次 evaluateDirectionGuard,
+//     不必等下一帧 tick — 用户能立刻看到状态切换 (autoDisableLong/Short).
+//   - threshold 改成 null / 0 / NaN 视为清空, 该方向围栏自动禁用 (并复位 autoDisable*=false).
+//   - hysteresisPct / minSwitchIntervalMs 是全局参数, 不写 direction 也能改.
+//
+// 与 /toggle-direction 同级, 不强制 X-Auth-Token (只切布尔/数值, 不会真实下单).
+router.post('/direction-guard', (req, res) => {
+  const body = req.body || {};
+  const direction = body.direction;
+
+  // 全局参数 patch (允许仅改 hysteresisPct / minSwitchIntervalMs 不传 direction)
+  const guardPatch = {};
+  if (body.hysteresisPct != null) {
+    const v = parseFloat(body.hysteresisPct);
+    if (!Number.isFinite(v) || v < 0 || v > 50) {
+      return res.status(400).json({ ok: false, error: 'hysteresisPct must be 0~50' });
+    }
+    guardPatch.hysteresisPct = v;
+  }
+  if (body.minSwitchIntervalMs != null) {
+    const v = parseInt(body.minSwitchIntervalMs, 10);
+    if (!Number.isFinite(v) || v < 0 || v > 3600000) {
+      return res.status(400).json({ ok: false, error: 'minSwitchIntervalMs must be 0~3600000' });
+    }
+    guardPatch.minSwitchIntervalMs = v;
+  }
+
+  // 单方向参数 patch
+  if (direction != null) {
+    if (!['long', 'short'].includes(direction)) {
+      return res.status(400).json({ ok: false, error: 'direction must be long|short' });
+    }
+    const cur = config.get().directionGuard?.[direction] || {};
+    const next = { enabled: !!cur.enabled, threshold: cur.threshold ?? null };
+    if (body.enabled != null) next.enabled = !!body.enabled;
+    if ('threshold' in body) {
+      const tv = body.threshold === null || body.threshold === '' ? null : parseFloat(body.threshold);
+      if (tv === null) {
+        next.threshold = null;
+        next.enabled = false;   // 阈值清空 → 强制禁用, 否则 evaluateDirectionGuard 会跳过, 导致开关"卡 ON"
+      } else {
+        if (!Number.isFinite(tv) || tv <= 0) {
+          return res.status(400).json({ ok: false, error: 'threshold must be positive number or null' });
+        }
+        next.threshold = tv;
+      }
+    }
+    guardPatch[direction] = next;
+  }
+
+  if (Object.keys(guardPatch).length === 0) {
+    return res.status(400).json({ ok: false, error: 'no_changes', hint: '请提供 direction+enabled/threshold 或 hysteresisPct / minSwitchIntervalMs' });
+  }
+
+  const updated = config.patch({ directionGuard: guardPatch });
+
+  // 立即用最新价跑一次评估, 让 autoDisableLong/Short 立刻反映新阈值的判定结果.
+  // priceFeed 没就绪时静默跳过 (下一帧 tick 自然会评估).
+  try {
+    const lastPrice = priceFeed.lastPrice;
+    if (Number.isFinite(lastPrice)) riskEngine.evaluateDirectionGuard(lastPrice);
+  } catch (e) {
+    console.warn('[trade.router] /direction-guard 立即评估失败:', e?.message || e);
+  }
+
+  // 重新读 cfg, 拿到 evaluateDirectionGuard 可能写入的最新 autoDisable* 状态
+  const finalCfg = config.get();
+  const dg = finalCfg.directionGuard || {};
+
+  // 通知: 仅在用户改了 direction 启停/阈值时推; 改全局参数不推 (避免噪音)
+  if (direction != null) {
+    const dirZh = direction === 'long' ? '做多' : '做空';
+    const slot = dg[direction] || {};
+    const lines = [
+      `symbol: ${finalCfg.symbol}`,
+      `方向: ${direction}`,
+      `启用: ${slot.enabled ? '✅ 是' : '⛔ 否'}`,
+      slot.threshold != null ? `基准价: ${Number(slot.threshold).toFixed(2)}` : '基准价: -- (未设置)',
+      `滞后缓冲: ${dg.hysteresisPct ?? '--'}% · 最小切换间隔: ${dg.minSwitchIntervalMs ?? '--'}ms`,
+      direction === 'long'
+        ? `逻辑: 市价 < 基准 → 自动禁多, 回升至 基准 × (1+${dg.hysteresisPct ?? 0}%) → 解除`
+        : `逻辑: 市价 > 基准 → 自动禁空, 回落至 基准 × (1-${dg.hysteresisPct ?? 0}%) → 解除`,
+    ];
+    exec.notify({
+      type: slot.enabled ? 'unlock' : 'reset',
+      title: slot.enabled ? `🤖 价格围栏(${direction.toUpperCase()}) 已${slot.threshold != null ? '更新' : '启用但未设基准'}` : `🤖 价格围栏(${direction.toUpperCase()}) 已禁用`,
+      lines,
+    });
+  }
+  console.log(`[trade.router] /direction-guard updated: directionGuard=`, updated.directionGuard, 'autoDisableLong=', !!finalCfg.autoDisableLong, 'autoDisableShort=', !!finalCfg.autoDisableShort);
+  res.json({
+    ok: true,
+    directionGuard: finalCfg.directionGuard,
+    autoDisableLong: !!finalCfg.autoDisableLong,
+    autoDisableShort: !!finalCfg.autoDisableShort,
   });
 });
 

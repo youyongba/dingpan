@@ -29,6 +29,27 @@ const DEFAULT_CONFIG = {
   // 想恢复: POST /api/auto-trade/config { disableLong:false } 或 POST /toggle-direction.
   disableLong: false,
   disableShort: false,
+  // ⭐ 价格围栏 (自动方向开关) — riskEngine 每帧 tick 评估, 自动切换 autoDisableLong/Short:
+  //   long.threshold  (做多基准价): 市价 < threshold → 自动禁止做多 (跌破不追低)
+  //                                  市价 ≥ threshold * (1 + hysteresisPct/100) → 自动解除
+  //   short.threshold (做空基准价): 市价 > threshold → 自动禁止做空 (涨破不追高)
+  //                                  市价 ≤ threshold * (1 - hysteresisPct/100) → 自动解除
+  //   hysteresisPct        : 滞后缓冲百分比, 防止价格在阈值附近抖动导致开关频繁切换
+  //   minSwitchIntervalMs  : 切换一次后, 该方向 N ms 内不再换状态 (双重防抖)
+  //
+  // 与手动 disableLong/disableShort 是**独立位**, 最终拦截 = 手动 || 自动 (任意一个开都拦).
+  // UI 用两个不同视觉标记区分: 🚫 手动禁止 vs 🤖 价格围栏自动禁止.
+  directionGuard: {
+    long:  { enabled: false, threshold: null },
+    short: { enabled: false, threshold: null },
+    hysteresisPct: 0.2,
+    minSwitchIntervalMs: 30000,
+  },
+  // 由 riskEngine.evaluateDirectionGuard 自动写入, 用户不应直接 patch:
+  //   true  → 价格围栏判定该方向应被拦截 (与手动 disable* 取或)
+  //   false → 围栏判定该方向放行 (但手动 disable* 仍可独立拦)
+  autoDisableLong: false,
+  autoDisableShort: false,
   symbol: 'BTCUSDT',                          // 监听符号
   // ↓↓↓ 用户在需求里固定的两条默认配置
   webhookUrl: 'https://transpenetrable-shantel-unabortively.ngrok-free.dev/webhook/wh_d113d9b4d838dbd635d4c19c3f0c51d9',
@@ -125,8 +146,42 @@ function load() {
   if (process.env.AUTO_TRADE_DISABLE_LONG === '1') fromEnv.disableLong = true;
   if (process.env.AUTO_TRADE_DISABLE_SHORT === '1') fromEnv.disableShort = true;
 
+  // 价格围栏: .env 提供启动默认值 (disk 优先级仍然更低 — 这里 fromEnv 覆盖 fromDisk).
+  // 想 UI 热更新走 POST /direction-guard, 不要靠 .env (改 .env 要重启).
+  const guardLongThreshold  = parseFloat(process.env.AUTO_TRADE_GUARD_LONG_THRESHOLD);
+  const guardShortThreshold = parseFloat(process.env.AUTO_TRADE_GUARD_SHORT_THRESHOLD);
+  const guardHysteresisPct  = parseFloat(process.env.AUTO_TRADE_GUARD_HYSTERESIS_PCT);
+  const guardMinSwitchMs    = parseInt(process.env.AUTO_TRADE_GUARD_MIN_SWITCH_MS, 10);
+  if (Number.isFinite(guardLongThreshold) && guardLongThreshold > 0) {
+    fromEnv.directionGuard = fromEnv.directionGuard || {};
+    fromEnv.directionGuard.long = { enabled: process.env.AUTO_TRADE_GUARD_LONG_ENABLED === '1', threshold: guardLongThreshold };
+  }
+  if (Number.isFinite(guardShortThreshold) && guardShortThreshold > 0) {
+    fromEnv.directionGuard = fromEnv.directionGuard || {};
+    fromEnv.directionGuard.short = { enabled: process.env.AUTO_TRADE_GUARD_SHORT_ENABLED === '1', threshold: guardShortThreshold };
+  }
+  if (Number.isFinite(guardHysteresisPct) && guardHysteresisPct >= 0) {
+    fromEnv.directionGuard = fromEnv.directionGuard || {};
+    fromEnv.directionGuard.hysteresisPct = guardHysteresisPct;
+  }
+  if (Number.isFinite(guardMinSwitchMs) && guardMinSwitchMs >= 0) {
+    fromEnv.directionGuard = fromEnv.directionGuard || {};
+    fromEnv.directionGuard.minSwitchIntervalMs = guardMinSwitchMs;
+  }
+
   active = deepMerge(deepMerge(DEFAULT_CONFIG, fromDisk), fromEnv);
-  console.log(`[trade.config] 已加载: webhook=${active.webhookUrl?.slice(0, 60)}... enabled=${active.enabled} · disableLong=${!!active.disableLong} · disableShort=${!!active.disableShort}`);
+  // 启动时强制把 autoDisable* 重置 (避免上次运行时的"幽灵"自动拦截状态遗留下来,
+  // 重新评估应该由 riskEngine 在第一帧 tick 上重新决定).
+  active.autoDisableLong = false;
+  active.autoDisableShort = false;
+  const dg = active.directionGuard || {};
+  console.log(
+    `[trade.config] 已加载: webhook=${active.webhookUrl?.slice(0, 60)}... enabled=${active.enabled}` +
+    ` · disableLong=${!!active.disableLong} · disableShort=${!!active.disableShort}` +
+    ` · directionGuard long(${dg.long?.enabled ? 'on' : 'off'} ${dg.long?.threshold ?? '--'})` +
+    ` short(${dg.short?.enabled ? 'on' : 'off'} ${dg.short?.threshold ?? '--'})` +
+    ` hysteresis=${dg.hysteresisPct ?? '--'}% minSwitch=${dg.minSwitchIntervalMs ?? '--'}ms`
+  );
   return active;
 }
 
