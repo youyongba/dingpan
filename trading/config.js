@@ -19,6 +19,16 @@ const CONFIG_FILE = process.env.AUTO_TRADE_CONFIG_PATH
 // 内置默认（最低保险）
 const DEFAULT_CONFIG = {
   enabled: true,                              // 总开关
+  // 方向开关 (与 enabled 总开关同级, 但只拦新开仓信号):
+  //   disableLong=true  → 所有 open_long  / firePriceTrigger long  / pending-order long  / market-order long  被 409 拒绝
+  //   disableShort=true → 所有 open_short / firePriceTrigger short / pending-order short / market-order short 被 409 拒绝
+  // ⚠️ 不影响:
+  //   - 已有 active 持仓的 TP/SL 兜底 (用户开关时持仓会继续到达 TP/SL)
+  //   - 已有 pending 触达 entry 的 fill (旧决策, 想撤请显式 /cancel-pending)
+  //   - 平仓信号 (take_profit / stop_loss / close-all-positions)
+  // 想恢复: POST /api/auto-trade/config { disableLong:false } 或 POST /toggle-direction.
+  disableLong: false,
+  disableShort: false,
   symbol: 'BTCUSDT',                          // 监听符号
   // ↓↓↓ 用户在需求里固定的两条默认配置
   webhookUrl: 'https://transpenetrable-shantel-unabortively.ngrok-free.dev/webhook/wh_d113d9b4d838dbd635d4c19c3f0c51d9',
@@ -111,9 +121,12 @@ function load() {
   if (process.env.AUTO_TRADE_WEBHOOK_URL) fromEnv.webhookUrl = process.env.AUTO_TRADE_WEBHOOK_URL;
   if (process.env.AUTO_TRADE_WEBHOOK_TOKEN) fromEnv.token = process.env.AUTO_TRADE_WEBHOOK_TOKEN;
   if (process.env.AUTO_TRADE_ENABLED === '0') fromEnv.enabled = false;
+  // 方向开关: .env 设 1 → 强制禁用; 不设或 0 → 走 disk / 默认值
+  if (process.env.AUTO_TRADE_DISABLE_LONG === '1') fromEnv.disableLong = true;
+  if (process.env.AUTO_TRADE_DISABLE_SHORT === '1') fromEnv.disableShort = true;
 
   active = deepMerge(deepMerge(DEFAULT_CONFIG, fromDisk), fromEnv);
-  console.log(`[trade.config] 已加载: webhook=${active.webhookUrl?.slice(0, 60)}... enabled=${active.enabled}`);
+  console.log(`[trade.config] 已加载: webhook=${active.webhookUrl?.slice(0, 60)}... enabled=${active.enabled} · disableLong=${!!active.disableLong} · disableShort=${!!active.disableShort}`);
   return active;
 }
 

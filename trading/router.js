@@ -16,7 +16,10 @@
  *                                          - 同方向已有 pending → 自动取消后立即市价开仓 (覆盖式)
  *                                          - 同方向已有 active 真实仓位 → 直接 409 拒绝
  *    POST /api/auto-trade/reset           手动重置 { direction:'long'|'short' } (鉴权)
- *    GET  /api/auto-trade/status          查询当前仓位 + WS 状态
+ *    POST /api/auto-trade/toggle           切换总开关 enabled (无需鉴权, 只切布尔)
+ *    POST /api/auto-trade/toggle-direction 方向开关 { direction, disabled } 禁止做多/做空 (无需鉴权)
+ *                                          仅拦新开仓信号; 不影响 active 持仓 TP/SL / pending 触达 fill / 平仓
+ *    GET  /api/auto-trade/status          查询当前仓位 + WS 状态 + 方向开关
  *    GET  /api/auto-trade/config          读取当前配置
  *    POST /api/auto-trade/config          局部更新配置 (鉴权)
  *
@@ -364,6 +367,40 @@ async function processSignal(sig, opts = {}) {
 
   if (action === 'open_long' || action === 'open_short') {
     const direction = action === 'open_long' ? 'long' : 'short';
+
+    // ⭐ 方向开关 (与 cfg.enabled 总开关同级, 但**仅拦新开仓信号**):
+    //   disableLong=true  → 拒绝所有 open_long  新信号 (firePriceTrigger / pending-order / market-order
+    //                       / signal / manual-open / manual-follow 全部走这条路, 自动覆盖)
+    //   disableShort=true → 拒绝所有 open_short 新信号
+    //   不影响 take_profit / stop_loss / close-all-positions, 也不影响已有 pending 触达 entry 的 fill
+    //   (firePendingFill 走的是 forwardOpen 而不是 processSignal, 是历史决策, 不在此处拦).
+    //   想彻底撤已有 pending 请 POST /api/auto-trade/cancel-pending. 想拦 active 仓位 TP/SL 请关 cfg.enabled.
+    const directionDisabledKey = direction === 'long' ? 'disableLong' : 'disableShort';
+    if (cfg[directionDisabledKey]) {
+      const directionZh = direction === 'long' ? '做多' : '做空';
+      exec.notify({
+        type: 'open_blocked',
+        title: `🚫 ${direction.toUpperCase()} 开仓被「禁止${directionZh}」开关拦截`,
+        lines: [
+          `symbol: ${sig.symbol || cfg.symbol}`,
+          `来源: ${callerSource}`,
+          `当前 ${directionDisabledKey}=true, 该方向所有新开仓信号都会被拒绝`,
+          `想恢复: POST /api/auto-trade/toggle-direction {"direction":"${direction}","disabled":false}`,
+          `已有 ${direction.toUpperCase()} 持仓的 TP/SL 不受影响; 已有 pending 不会自动撤`,
+        ],
+      });
+      console.warn(`[trade.router] 🚫 ${direction} 信号被方向开关拦截 (${directionDisabledKey}=true, source=${callerSource})`);
+      return {
+        status: 409,
+        body: {
+          ok: false,
+          error: 'direction_disabled',
+          direction,
+          [directionDisabledKey]: true,
+          hint: `「禁止${directionZh}」开关已开启, 该方向暂停接收新开仓信号`,
+        },
+      };
+    }
 
     const gate = state.canOpen(direction);
     if (!gate.ok) {
@@ -724,6 +761,10 @@ router.get('/status', (req, res) => {
     pendingMode: PENDING_MODE,
     // 暴露给前端: TP1 保本止损是否开启 (用户可点击切换 → POST /config { tp1Protection })
     tp1Protection: cfg.tp1Protection !== false,
+    // ⭐ 方向开关: 前端 UI 用这两个字段渲染"禁止做多/禁止做空"按钮状态
+    // 切换走 POST /toggle-direction 或 POST /config { disableLong | disableShort }
+    disableLong: !!cfg.disableLong,
+    disableShort: !!cfg.disableShort,
     priceFeed: priceFeed.getStatus(),
     positions: state.get(),
     // ⭐ 价格触发器 (后端 WS 监听 + disk 持久化, 浏览器关掉也会触发)
@@ -1868,6 +1909,57 @@ router.post('/toggle', (req, res) => {
     ],
   });
   res.json({ ok: true, enabled: updated.enabled });
+});
+
+// ============ POST /toggle-direction: 方向开关 (禁止做多 / 禁止做空) ============
+// body: { direction: 'long'|'short', disabled: true|false }
+//
+// 与 /toggle 同级, 不强制 X-Auth-Token (只切单个布尔, 想切其它字段走 /config).
+// 行为见 cfg.disableLong / cfg.disableShort 注释:
+//   - 仅拦"新开仓信号" (processSignal open_long/open_short 分支前置 409)
+//   - 不影响已有 active 持仓的 TP/SL 兜底
+//   - 不影响已有 pending 的 fill (旧决策, 想撤请显式 /cancel-pending)
+//   - 不影响平仓信号 (take_profit / stop_loss)
+router.post('/toggle-direction', (req, res) => {
+  const direction = req.body?.direction;
+  if (!['long', 'short'].includes(direction)) {
+    return res.status(400).json({ ok: false, error: 'direction must be long|short' });
+  }
+  if (typeof req.body?.disabled !== 'boolean') {
+    return res.status(400).json({ ok: false, error: 'disabled must be boolean' });
+  }
+  const key = direction === 'long' ? 'disableLong' : 'disableShort';
+  const next = !!req.body.disabled;
+  const updated = config.patch({ [key]: next });
+  const directionZh = direction === 'long' ? '做多' : '做空';
+
+  // 给用户一个清晰的提示: 这个开关有什么影响, 同方向已有 pending/active 怎么办
+  const before = state.getPosition(direction);
+  const lines = [
+    next
+      ? `⛔ ${direction.toUpperCase()} 方向所有新开仓信号都会被拦截 (signal / pending-order / market-order / firePriceTrigger 全部覆盖)`
+      : `✅ ${direction.toUpperCase()} 方向恢复接收新开仓信号`,
+    `不影响: 已有 ${direction.toUpperCase()} 持仓的 TP/SL 兜底, 已有 pending 触达 entry 的 fill, 平仓信号`,
+  ];
+  if (next && before?.active) {
+    lines.push(`⚠️ 当前 ${direction.toUpperCase()} 已有 active 持仓 (entry=${before.entryPrice}), TP/SL 仍会正常触发, 仅拦新信号`);
+  }
+  if (next && before?.pending) {
+    lines.push(`⚠️ 当前 ${direction.toUpperCase()} 已有 pending 计划 (entry=${before.pendingPlan?.entry}), 不会自动撤; 想撤请 POST /api/auto-trade/cancel-pending`);
+  }
+  exec.notify({
+    type: next ? 'reset' : 'unlock',
+    title: next ? `⛔ 已禁止${directionZh}` : `✅ 已恢复${directionZh}`,
+    lines,
+  });
+  console.log(`[trade.router] 方向开关切换: ${key}=${next} (${directionZh})`);
+  res.json({
+    ok: true,
+    direction,
+    [key]: updated[key],
+    disableLong: !!updated.disableLong,
+    disableShort: !!updated.disableShort,
+  });
 });
 
 // ============ GET /config ============
