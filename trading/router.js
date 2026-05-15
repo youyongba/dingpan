@@ -4,11 +4,15 @@
  *  自动平仓引擎 - Express 路由
  *
  *  对外接口：
- *    POST /api/auto-trade/signal      接收外部 webhook 入仓/平仓信号 (token 校验)
- *    POST /api/auto-trade/reset       手动重置 { direction:'long'|'short' } (鉴权)
- *    GET  /api/auto-trade/status      查询当前仓位 + WS 状态
- *    GET  /api/auto-trade/config      读取当前配置
- *    POST /api/auto-trade/config      局部更新配置 (鉴权)
+ *    POST /api/auto-trade/signal          接收外部 webhook 入仓/平仓信号 (body.token 校验)
+ *    POST /api/auto-trade/pending-order   ⭐ 对外挂单交易信号 (body.direction, X-Auth-Token 鉴权)
+ *                                          - 价位用 regime plan 优先 / ATR 回退 (与 manual-open 同源)
+ *                                          - 同方向已有 pending → 默认自动覆盖 (replace=false 时拒绝)
+ *                                          - 同方向已有 active 真实仓位 → 直接 409 拒绝, 不允许覆盖
+ *    POST /api/auto-trade/reset           手动重置 { direction:'long'|'short' } (鉴权)
+ *    GET  /api/auto-trade/status          查询当前仓位 + WS 状态
+ *    GET  /api/auto-trade/config          读取当前配置
+ *    POST /api/auto-trade/config          局部更新配置 (鉴权)
  *
  *  鉴权：通过请求头 X-Auth-Token, 与 process.env.CONFIG_AUTH_TOKEN 比对
  *
@@ -1198,6 +1202,140 @@ router.post('/manual-open', requireAdmin, async (req, res) => {
   res.status(r.status).json(r.body);
 });
 
+// ============ POST /pending-order: 对外挂单交易信号入口 ============
+//
+// 与 /manual-open 的关系:
+//   - /manual-open  : 给前端 UI 按钮用 (source='manual_ui'), 同方向已有 pending 时直接 409 拒绝
+//   - /pending-order: 对外暴露给第三方策略源/TradingView/N8N 等 (source='pending_order_api'),
+//                     同方向已有 pending 时**默认自动覆盖** (取消旧 → arm 新), 与 firePriceTrigger
+//                     覆盖式语义对齐, 让外部策略每轮推新信号都能成功落单, 不会因为上一轮的旧
+//                     pending 没成交而被静默拦掉.
+//
+// body: {
+//   direction: 'long' | 'short',                   // 必填
+//   source?: string,                                // 可选, 调用方标记 (写入飞书/日志, 长度<=32)
+//   label?: string,                                 // 可选, 描述信号源 (如 "TV-BTC-Strategy")
+//   replace?: boolean (默认 true)                   // false 时, 同方向有 pending → 409 拒绝, 不覆盖
+// }
+//
+// 价位策略 (与 manual-open 完全一致):
+//   1) 有 regime tradePlan 且方向匹配 → 用 plan (entry/SL/TP/置信度仓位 全部锁定)
+//   2) 否则 → 用 ATR 动态回退 (回踩 0.5×ATR 入场, 1.5×ATR 止损步长)
+//
+// 安全:
+//   - X-Auth-Token (CONFIG_AUTH_TOKEN) 鉴权, 与 /manual-open 同级 (会真实下单, 不能裸奔)
+//   - 同方向已有 active 真实持仓 → **绝不覆盖** (语义太危险), 直接 409, 让调用方先 close-all 再下
+//
+// 返回 body 在覆盖发生时会附加 `overrode: {...}` 字段, 让调用方能感知到旧 pending 被替换.
+/**
+ * /pending-order 的可复用实现.
+ *
+ * @param {object} opts
+ * @param {'long'|'short'} opts.direction
+ * @param {string} [opts.source='pending_order_api']
+ * @param {string} [opts.label]
+ * @param {boolean} [opts.replace=true]   false 时同方向有 pending 直接 409, 不自动覆盖
+ * @returns {Promise<{status:number, body:object}>}
+ */
+async function pendingOrderImpl(opts = {}) {
+  const direction = opts.direction;
+  if (!['long', 'short'].includes(direction)) {
+    return { status: 400, body: { ok: false, error: 'direction must be long|short' } };
+  }
+  const cfg = config.get();
+  if (!cfg.enabled) {
+    return {
+      status: 409,
+      body: { ok: false, error: 'auto_trade_disabled', hint: '请先开启「自动下单」总开关再下挂单信号' },
+    };
+  }
+
+  // 来源标记 sanitize: 防外部传特殊字符破坏飞书/日志, 仅留 [a-zA-Z0-9_\-.], 长度上限 32
+  const rawSource = typeof opts.source === 'string' ? opts.source : '';
+  const cleanedSource = rawSource.trim().replace(/[^a-zA-Z0-9_\-.]/g, '').slice(0, 32);
+  const source = cleanedSource || 'pending_order_api';
+  const label = typeof opts.label === 'string' ? opts.label.slice(0, 64) : null;
+  const replace = opts.replace !== false;   // 默认 true
+
+  // 同方向 active 真实仓位 → 绝不覆盖 (会重复下单 / 改写实际持仓状态)
+  const before = state.getPosition(direction);
+  if (before && before.active) {
+    return {
+      status: 409,
+      body: {
+        ok: false,
+        error: 'already_active',
+        hint: `${direction} 已有真实持仓 (entry=${before.entryPrice}), /pending-order 不允许覆盖真实仓位; 请先 POST /api/auto-trade/close-all-positions 或 /reset 后重试`,
+        position: before,
+      },
+    };
+  }
+
+  // 同方向 pending → 按 replace 决定: 默认覆盖, false 时 409 拒绝
+  let overridden = null;
+  if (before && before.pending) {
+    if (!replace) {
+      return {
+        status: 409,
+        body: {
+          ok: false,
+          error: 'already_pending',
+          hint: `${direction} 已有 pending 计划 (entry=${before.pendingPlan?.entry}); 想覆盖请去掉 replace=false 或先 POST /cancel-pending`,
+          position: before,
+        },
+      };
+    }
+    overridden = state.cancelPending(direction, 'pending_order_override');
+    if (overridden) {
+      console.log(`[trade.router] 🔄 /pending-order ${direction} 覆盖式生效: 取消旧 pending entry=${overridden.pendingPlan?.entry} armed=${overridden.pendingArmedAt} (source=${source}${label ? ` label=${label}` : ''})`);
+      try { exec.fireMonitorCancel({ direction }); } catch (_) {}
+      const titleEmoji = direction === 'long' ? '📈' : '📉';
+      exec.notify({
+        type: 'pending_cancelled',
+        title: `🔄 ${titleEmoji} ${direction.toUpperCase()} 旧 pending 被新挂单信号覆盖`,
+        lines: [
+          `symbol: ${cfg.symbol}`,
+          `来源: ${source}` + (label ? ` (${label})` : ''),
+          `原 entry: ${overridden.pendingPlan?.entry}`,
+          `原 SL/TP1: ${overridden.pendingPlan?.sl} / ${overridden.pendingPlan?.tp1}`,
+          `arm 时间: ${cnTime(overridden.pendingArmedAt)}`,
+          `逻辑: 外部 API 收到新挂单信号 → 自动取消旧 pending → 即将按新 plan arm`,
+        ],
+      });
+    }
+  }
+
+  // 真正的下单逻辑: 与 manual-open 同源, 走 regime plan 优先 / ATR 回退 → processSignal arm pending
+  const r = await manualOpenImpl({ direction, source });
+
+  // 把 override 信息回传给调用方 (上游策略源能感知"上一笔 pending 被这条信号替换掉了")
+  if (overridden && r.body && typeof r.body === 'object') {
+    r.body.overrode = {
+      direction,
+      previousEntry: overridden.pendingPlan?.entry ?? null,
+      previousSl: overridden.pendingPlan?.sl ?? null,
+      previousTp1: overridden.pendingPlan?.tp1 ?? null,
+      previousTp2: overridden.pendingPlan?.tp2 ?? null,
+      previousTp3: overridden.pendingPlan?.tp3 ?? null,
+      armedAt: overridden.pendingArmedAt,
+    };
+  }
+  if (label && r.body && typeof r.body === 'object') {
+    r.body.label = label;
+  }
+  return r;
+}
+
+router.post('/pending-order', requireAdmin, async (req, res) => {
+  const r = await pendingOrderImpl({
+    direction: req.body?.direction,
+    source: req.body?.source,
+    label: req.body?.label,
+    replace: req.body?.replace,
+  });
+  res.status(r.status).json(r.body);
+});
+
 // ============ POST /manual-follow: 手动追单 (一键立即市价) ============
 //
 // body: { direction: 'long' | 'short' }
@@ -1586,6 +1724,10 @@ module.exports.cancelPendingByReverseSignal = cancelPendingByReverseSignal;
 // 这样浏览器关掉, 价格触发器照样能从 WS tick 命中 → manual-open / manual-follow
 module.exports.manualOpenImpl = manualOpenImpl;
 module.exports.manualFollowImpl = manualFollowImpl;
+// 对外挂单 API (/pending-order) 的可复用实现, 与 manualOpenImpl 同源
+// 但叠加了"覆盖式语义" — 同方向已有 pending 时自动取消旧 → arm 新, 与 firePriceTrigger 对齐.
+// 暴露便于未来给其他 in-process 模块直接调用 (无需绕 HTTP).
+module.exports.pendingOrderImpl = pendingOrderImpl;
 // 校验函数对外暴露 — 给冲烟测试 / 未来单测用. 前端不应该 import 这些, 浏览器侧
 // 在 regime.html 内有 validateAdjustLevelsClient 同算法实现 (UX 提前拦截)
 module.exports.validateManualLevels = validateManualLevels;
