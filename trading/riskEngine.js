@@ -184,6 +184,19 @@ function start() {
     });
   });
   console.log('[trade.risk] 风控引擎已挂载');
+
+  // ⭐ Regime 守卫定时器: 与 priceFeed tick 解耦 (regime 数据本身 5min 才更新一次,
+  // 高频评估无意义; 跟着 tick 跑反而会因为 require 绕圈拖慢风控热路径).
+  // 30s 一轮 + 守卫内部 60s 最小切换间隔 = 趋势变化能在 30~90s 内反映到拦截开关.
+  if (_regimeGuardTimer) clearInterval(_regimeGuardTimer);
+  _regimeGuardTimer = setInterval(() => {
+    try { evaluateRegimeGuard(); }
+    catch (e) { console.error('[trade.risk] evaluateRegimeGuard error:', e?.message || e); }
+  }, 30000);
+  // 启动后立即评估一次 (regimeModule 需要先暖机, 第一次大概率拿不到 snapshot, 静默)
+  setTimeout(() => {
+    try { evaluateRegimeGuard(); } catch (_) {}
+  }, 5000);
 }
 
 // ⚠️ 安全核心: onTick 不做任何节流. 每一帧 priceFeed tick 都立即 evaluate.
@@ -302,6 +315,135 @@ function evaluateDirectionGuard(price) {
   if (Object.keys(patches).length > 0) {
     config.patch(patches);
   }
+}
+
+// ---------------- Regime 守卫 (基于 1H Regime/subRegime 自动控制方向开关) ----------------
+//
+// 与价格围栏并行的第二个"自动方向开关":
+//   - 价格围栏 → 看市价 vs 用户配的基准价 (短期纯价格逻辑)
+//   - Regime 守卫 → 看 regimeModule 的 subRegime (中期趋势状态)
+// 两者写入不同的 cfg 字段, 由 router.processSignal 三重取或决定是否拦截:
+//   manual disableLong/Short || priceGuard autoDisableLong/Short || regimeGuard regimeAutoDisableLong/Short
+//
+// 评估频率: 每 30s 一次 (regime 数据本身 5min 才更新一次, 高频评估无意义).
+// 切换防抖: minSwitchIntervalMs 默认 60s — Regime 偶尔抖动也不要立即翻转开关.
+//
+// 数据来源: regimeModule.getLatestPlan() 返回 { regime: { subRegime, confidence, ... } }
+// 置信度门槛: minConfidence='low'/'medium'/'high', 低于门槛时不应用 Regime 决策.
+
+const _confidenceLevels = { low: 1, medium: 2, high: 3 };
+const _lastRegimeGuardSwitchAt = { long: 0, short: 0 };
+let _regimeGuardTimer = null;
+
+function evaluateRegimeGuard() {
+  const cfg = config.get();
+  const rg = cfg.regimeGuard;
+  // 守卫总开关关闭 → 把 regimeAutoDisable* 复位为 false (避免幽灵状态)
+  if (!rg || !rg.enabled) {
+    if (cfg.regimeAutoDisableLong || cfg.regimeAutoDisableShort) {
+      console.log('[trade.risk] 🔓 Regime 守卫已禁用, regimeAutoDisable* 自动复位 false');
+      config.patch({
+        regimeAutoDisableLong: false,
+        regimeAutoDisableShort: false,
+        regimeAutoLastSubRegime: null,
+        regimeAutoLastConfidence: null,
+        regimeAutoLastEvalAt: Date.now(),
+      });
+    }
+    return;
+  }
+
+  // 拉 regime 快照 (regimeModule 可能还没暖机完, 此时 regime 为空 — 跳过本轮)
+  let snapshot;
+  try {
+    const mod = require('../regimeModule');
+    snapshot = mod.getLatestPlan && mod.getLatestPlan();
+  } catch (e) {
+    console.warn('[trade.risk] regimeGuard: 拉取 regimeModule 失败 (可能未启动):', e?.message || e);
+    return;
+  }
+  const regime = snapshot && snapshot.regime;
+  if (!regime || !regime.subRegime) {
+    // 还没暖机完 — 静默, 等下一轮
+    return;
+  }
+
+  // 置信度门槛检查 (regime.confidence 是 'low'/'medium'/'high', 与 cfg.minConfidence 同枚举)
+  const minConfNum = _confidenceLevels[rg.minConfidence] || 1;
+  const curConfNum = _confidenceLevels[regime.confidence] || 1;
+  const confidenceOk = curConfNum >= minConfNum;
+
+  // 根据 subRegime 决定本轮的"应该拦截"标志:
+  //   STRONG_BULL  → 拦空  (强多头中前高做空必死)
+  //   STRONG_BEAR  → 拦多  (强空头中接刀子必死)
+  //   PANIC        → 双向拦 (高 HV 低 ADX, 不开新仓最安全)
+  //   UNCLEAR      → 双向拦 (信号互相冲突, 默认 off)
+  //   其他状态     → 不拦 (WEAK_BULL/BEAR/RANGE 等, Regime 守卫不干涉)
+  const sub = regime.subRegime;
+  let shouldBlockLong = false;
+  let shouldBlockShort = false;
+  let reason = null;
+  if (confidenceOk) {
+    if (sub === 'STRONG_BULL' && rg.blockShortOnStrongBull) {
+      shouldBlockShort = true;
+      reason = 'STRONG_BULL → 拦空';
+    } else if (sub === 'STRONG_BEAR' && rg.blockLongOnStrongBear) {
+      shouldBlockLong = true;
+      reason = 'STRONG_BEAR → 拦多';
+    } else if (sub === 'PANIC' && rg.blockBothOnPanic) {
+      shouldBlockLong = true;
+      shouldBlockShort = true;
+      reason = 'PANIC → 双向禁';
+    } else if (sub === 'UNCLEAR' && rg.blockBothOnUnclear) {
+      shouldBlockLong = true;
+      shouldBlockShort = true;
+      reason = 'UNCLEAR → 双向禁';
+    }
+  }
+
+  // 切换 + 防抖 + 通知 (long / short 各自独立判断与切换)
+  const now = Date.now();
+  const minInterval = Number.isFinite(rg.minSwitchIntervalMs) ? rg.minSwitchIntervalMs : 0;
+  const patches = { regimeAutoLastSubRegime: sub, regimeAutoLastConfidence: regime.confidence || null, regimeAutoLastEvalAt: now };
+  let changed = false;
+
+  ['long', 'short'].forEach(dir => {
+    const key = dir === 'long' ? 'regimeAutoDisableLong' : 'regimeAutoDisableShort';
+    const currently = !!cfg[key];
+    const next = dir === 'long' ? shouldBlockLong : shouldBlockShort;
+    if (next !== currently && now - _lastRegimeGuardSwitchAt[dir] >= minInterval) {
+      patches[key] = next;
+      _lastRegimeGuardSwitchAt[dir] = now;
+      _notifyRegimeGuardSwitch(dir, next, sub, regime, reason);
+      changed = true;
+    }
+  });
+
+  if (changed || patches.regimeAutoLastSubRegime !== cfg.regimeAutoLastSubRegime) {
+    config.patch(patches);
+  }
+}
+
+function _notifyRegimeGuardSwitch(direction, willBeDisabled, subRegime, regime, reason) {
+  const dirZh = direction === 'long' ? '做多' : '做空';
+  const dirEn = direction.toUpperCase();
+  const titleEmoji = willBeDisabled ? '📊🚫' : '📊✅';
+  console.log(`[trade.risk] ${titleEmoji} Regime 守卫自动${willBeDisabled ? '禁止' : '恢复'}${dirZh}: subRegime=${subRegime} reason=${reason || '状态变化'}`);
+  exec.notify({
+    type: willBeDisabled ? 'open_blocked' : 'unlock',
+    title: `${titleEmoji} Regime 守卫自动${willBeDisabled ? '禁止' : '恢复'}${dirZh} (${dirEn})`,
+    lines: [
+      `symbol: ${config.get().symbol}`,
+      `Regime 状态: ${regime.label || '?'} / ${regime.subLabel || subRegime} (置信度 ${regime.confidenceLabel || regime.confidence || '?'})`,
+      willBeDisabled
+        ? `触发逻辑: ${reason} — 拦截该方向所有新信号 (仅拦 processSignal, 不影响已有持仓)`
+        : `解除原因: Regime 离开了"应禁止"区间, 该方向恢复接收新信号`,
+      `cfg.regimeAutoDisable${direction === 'long' ? 'Long' : 'Short'}=${willBeDisabled}; 与手动 disable* + 价格围栏 取或后决定是否拦`,
+      willBeDisabled
+        ? `已有 ${dirEn} 持仓的 TP/SL 不受影响; 已有 pending 仍会触达 entry fill`
+        : '提醒: Regime 是 1H 级别, 状态切换通常意味着趋势反转, 留意确认',
+    ],
+  });
 }
 
 function _notifyGuardSwitch(direction, willBeDisabled, price, threshold, releaseLevel, hpct) {
@@ -902,6 +1044,9 @@ module.exports = {
   // ⭐ 价格围栏: 暴露给 router /direction-guard 端点用 — 用户改了阈值/启停后,
   // 路由立即用 priceFeed.lastPrice 调一次 evaluateDirectionGuard, 不必等下一帧 tick.
   evaluateDirectionGuard,
+  // ⭐ Regime 守卫: 暴露给 router /regime-guard 端点 — 用户改了规则/启停后,
+  // 路由立即评估一次, 不必等下一轮 30s 定时器.
+  evaluateRegimeGuard,
   _reset: () => {
     recentlyFired.long = 0;
     recentlyFired.short = 0;
@@ -917,6 +1062,9 @@ module.exports = {
     _lastNearMissLogAt.short = 0;
     _lastGuardSwitchAt.long = 0;
     _lastGuardSwitchAt.short = 0;
+    _lastRegimeGuardSwitchAt.long = 0;
+    _lastRegimeGuardSwitchAt.short = 0;
+    if (_regimeGuardTimer) { clearInterval(_regimeGuardTimer); _regimeGuardTimer = null; }
   },
   __getInFlight: () => ({ ..._inFlight }),       // 仅测试用
 };

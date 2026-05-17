@@ -23,7 +23,13 @@
  *                                          { direction, enabled, threshold, hysteresisPct?, minSwitchIntervalMs? }
  *                                          riskEngine 每帧 tick 评估, 价格跨越基准时自动切换
  *                                          autoDisable*; 与手动 disable* 取或拦截新信号
- *    GET  /api/auto-trade/status          查询当前仓位 + WS 状态 + 方向开关 + 价格围栏
+ *    POST /api/auto-trade/regime-guard     ⭐ Regime 守卫 (基于 1H 趋势状态自动方向开关, 无需鉴权)
+ *                                          { enabled, blockLongOnStrongBear?, blockShortOnStrongBull?,
+ *                                            blockBothOnPanic?, blockBothOnUnclear?, minConfidence? }
+ *                                          riskEngine 每 30s 评估 regimeModule.subRegime,
+ *                                          STRONG_BULL→拦空 / STRONG_BEAR→拦多 / PANIC→双向禁
+ *                                          → 写 regimeAutoDisable*; 与 manual + priceGuard 三重取或
+ *    GET  /api/auto-trade/status          查询当前仓位 + WS 状态 + 方向开关 + 价格围栏 + Regime 守卫
  *    GET  /api/auto-trade/config          读取当前配置
  *    POST /api/auto-trade/config          局部更新配置 (鉴权)
  *
@@ -373,26 +379,31 @@ async function processSignal(sig, opts = {}) {
     const direction = action === 'open_long' ? 'long' : 'short';
 
     // ⭐ 方向开关 (与 cfg.enabled 总开关同级, 但**仅拦新开仓信号**):
-    //   两条独立位取或:
-    //     a) cfg.disableLong/Short      — 用户手动开关 (UI / /toggle-direction)
-    //     b) cfg.autoDisableLong/Short  — 价格围栏自动开关 (riskEngine.evaluateDirectionGuard 写入)
-    //   任意一个 true 都拒绝该方向的 open_long/open_short 新信号.
-    //   不影响 take_profit / stop_loss / close-all-positions, 也不影响已有 pending 触达 entry 的 fill
-    //   (firePendingFill 走 forwardOpen 不经 processSignal, 是历史决策).
+    //   三条独立位取或 — 任意一个 true 都拒绝该方向的 open_long/open_short 新信号:
+    //     a) cfg.disableLong/Short          — 用户手动开关 (UI / /toggle-direction)
+    //     b) cfg.autoDisableLong/Short      — 价格围栏自动 (riskEngine.evaluateDirectionGuard)
+    //     c) cfg.regimeAutoDisableLong/Short — 📊 Regime 守卫自动 (riskEngine.evaluateRegimeGuard)
+    //   不影响 take_profit / stop_loss / close-all-positions, 也不影响已有 pending 触达 entry 的 fill.
     //   想彻底撤已有 pending 请 POST /api/auto-trade/cancel-pending. 想拦 active 仓位 TP/SL 请关 cfg.enabled.
-    const manualKey = direction === 'long' ? 'disableLong' : 'disableShort';
-    const autoKey   = direction === 'long' ? 'autoDisableLong' : 'autoDisableShort';
+    const manualKey   = direction === 'long' ? 'disableLong' : 'disableShort';
+    const priceKey    = direction === 'long' ? 'autoDisableLong' : 'autoDisableShort';
+    const regimeKey   = direction === 'long' ? 'regimeAutoDisableLong' : 'regimeAutoDisableShort';
     const manualDisabled = !!cfg[manualKey];
-    const autoDisabled   = !!cfg[autoKey];
-    if (manualDisabled || autoDisabled) {
+    const priceDisabled  = !!cfg[priceKey];
+    const regimeDisabled = !!cfg[regimeKey];
+    if (manualDisabled || priceDisabled || regimeDisabled) {
       const directionZh = direction === 'long' ? '做多' : '做空';
       const reasons = [];
       if (manualDisabled) reasons.push('手动开关');
-      if (autoDisabled)   reasons.push('价格围栏');
+      if (priceDisabled)  reasons.push('价格围栏');
+      if (regimeDisabled) reasons.push('Regime 守卫');
       const reasonStr = reasons.join(' + ');
       const guardCfg = cfg.directionGuard?.[direction];
-      const guardLine = autoDisabled && guardCfg?.enabled
+      const priceLine = priceDisabled && guardCfg?.enabled
         ? `🤖 价格围栏: 基准价=${guardCfg.threshold ?? '--'}, 当前 lastPrice 已${direction === 'long' ? '跌破' : '涨破'}基准 → 自动拦截`
+        : null;
+      const regimeLine = regimeDisabled
+        ? `📊 Regime 守卫: subRegime=${cfg.regimeAutoLastSubRegime || '?'} (置信度 ${cfg.regimeAutoLastConfidence || '?'}) → 该方向被趋势状态拦截`
         : null;
       exec.notify({
         type: 'open_blocked',
@@ -401,11 +412,12 @@ async function processSignal(sig, opts = {}) {
           `symbol: ${sig.symbol || cfg.symbol}`,
           `来源: ${callerSource}`,
           manualDisabled ? `🚫 手动开关 ${manualKey}=true (POST /toggle-direction 切换)` : null,
-          guardLine,
+          priceLine,
+          regimeLine,
           `已有 ${direction.toUpperCase()} 持仓的 TP/SL 不受影响; 已有 pending 不会自动撤`,
         ].filter(Boolean),
       });
-      console.warn(`[trade.router] 🚫 ${direction} 信号被方向开关拦截 (manual=${manualDisabled}, auto=${autoDisabled}, source=${callerSource})`);
+      console.warn(`[trade.router] 🚫 ${direction} 信号被方向开关拦截 (manual=${manualDisabled}, price=${priceDisabled}, regime=${regimeDisabled}, source=${callerSource})`);
       return {
         status: 409,
         body: {
@@ -414,8 +426,10 @@ async function processSignal(sig, opts = {}) {
           direction,
           reason: reasonStr,
           [manualKey]: manualDisabled,
-          [autoKey]: autoDisabled,
-          hint: `「禁止${directionZh}」拦截原因: ${reasonStr}; 手动开关请 POST /toggle-direction, 价格围栏请 POST /direction-guard 调整或禁用`,
+          [priceKey]: priceDisabled,
+          [regimeKey]: regimeDisabled,
+          regimeAutoLastSubRegime: cfg.regimeAutoLastSubRegime || null,
+          hint: `「禁止${directionZh}」拦截原因: ${reasonStr}; 手动→/toggle-direction, 价格围栏→/direction-guard, Regime→/regime-guard`,
         },
       };
     }
@@ -790,6 +804,18 @@ router.get('/status', (req, res) => {
     directionGuard: cfg.directionGuard || null,
     autoDisableLong: !!cfg.autoDisableLong,
     autoDisableShort: !!cfg.autoDisableShort,
+    // ⭐ Regime 守卫 — 配置 + 实时趋势状态 + 实时拦截标志:
+    //   regimeGuard:                 { enabled, blockLongOnStrongBear, blockShortOnStrongBull, blockBothOnPanic, blockBothOnUnclear, minConfidence, minSwitchIntervalMs }
+    //   regimeAutoDisableLong/Short: riskEngine.evaluateRegimeGuard 写入, 与 manual + price 三重取或
+    //   regimeAutoLastSubRegime:     最近一次评估到的 subRegime 状态
+    //   regimeAutoLastConfidence:    最近一次评估到的置信度
+    //   regimeAutoLastEvalAt:        最近一次评估时间 (ms)
+    regimeGuard: cfg.regimeGuard || null,
+    regimeAutoDisableLong: !!cfg.regimeAutoDisableLong,
+    regimeAutoDisableShort: !!cfg.regimeAutoDisableShort,
+    regimeAutoLastSubRegime: cfg.regimeAutoLastSubRegime || null,
+    regimeAutoLastConfidence: cfg.regimeAutoLastConfidence || null,
+    regimeAutoLastEvalAt: cfg.regimeAutoLastEvalAt || null,
     priceFeed: priceFeed.getStatus(),
     positions: state.get(),
     // ⭐ 价格触发器 (后端 WS 监听 + disk 持久化, 浏览器关掉也会触发)
@@ -2093,6 +2119,78 @@ router.post('/direction-guard', (req, res) => {
     directionGuard: finalCfg.directionGuard,
     autoDisableLong: !!finalCfg.autoDisableLong,
     autoDisableShort: !!finalCfg.autoDisableShort,
+  });
+});
+
+// ============ POST /regime-guard: Regime 守卫配置 (基于 1H 趋势状态自动方向开关) ============
+//
+// body 字段 (全部可选, 至少一个非空):
+//   enabled?:                 boolean   总开关
+//   blockLongOnStrongBear?:   boolean   STRONG_BEAR 时是否禁多
+//   blockShortOnStrongBull?:  boolean   STRONG_BULL 时是否禁空
+//   blockBothOnPanic?:        boolean   PANIC 时是否双向禁
+//   blockBothOnUnclear?:      boolean   UNCLEAR 时是否双向禁 (默认 off, 太严)
+//   minConfidence?:           'low' | 'medium' | 'high'
+//   minSwitchIntervalMs?:     number    最小切换间隔
+//
+// 行为:
+//   - patch 写盘后立即调一次 evaluateRegimeGuard, 不必等下一轮 30s 定时器
+//   - 总开关 enabled=false → regimeAutoDisable* 自动复位为 false (在 evaluateRegimeGuard 里实现)
+//   - 与 /toggle-direction、/direction-guard 同级, 不强制 X-Auth-Token
+router.post('/regime-guard', (req, res) => {
+  const body = req.body || {};
+  const patch = {};
+  if (body.enabled != null)                  patch.enabled = !!body.enabled;
+  if (body.blockLongOnStrongBear != null)    patch.blockLongOnStrongBear = !!body.blockLongOnStrongBear;
+  if (body.blockShortOnStrongBull != null)   patch.blockShortOnStrongBull = !!body.blockShortOnStrongBull;
+  if (body.blockBothOnPanic != null)         patch.blockBothOnPanic = !!body.blockBothOnPanic;
+  if (body.blockBothOnUnclear != null)       patch.blockBothOnUnclear = !!body.blockBothOnUnclear;
+  if (body.minConfidence != null) {
+    if (!['low', 'medium', 'high'].includes(body.minConfidence)) {
+      return res.status(400).json({ ok: false, error: 'minConfidence must be low|medium|high' });
+    }
+    patch.minConfidence = body.minConfidence;
+  }
+  if (body.minSwitchIntervalMs != null) {
+    const v = parseInt(body.minSwitchIntervalMs, 10);
+    if (!Number.isFinite(v) || v < 0 || v > 3600000) {
+      return res.status(400).json({ ok: false, error: 'minSwitchIntervalMs must be 0~3600000' });
+    }
+    patch.minSwitchIntervalMs = v;
+  }
+  if (Object.keys(patch).length === 0) {
+    return res.status(400).json({ ok: false, error: 'no_changes', hint: '请提供 enabled / blockLong* / blockShort* / blockBoth* / minConfidence / minSwitchIntervalMs 中至少一个' });
+  }
+
+  const updated = config.patch({ regimeGuard: patch });
+  // 立即重新评估一次 — 让 regimeAutoDisable* 立刻反映新规则
+  try { riskEngine.evaluateRegimeGuard(); }
+  catch (e) { console.warn('[trade.router] /regime-guard 立即评估失败:', e?.message || e); }
+
+  const finalCfg = config.get();
+  // 通知: 仅在 enabled 切换时推 (避免改 minConfidence 等小调整也刷屏)
+  if (body.enabled != null) {
+    exec.notify({
+      type: body.enabled ? 'unlock' : 'reset',
+      title: body.enabled ? `📊 Regime 守卫已启用` : `📊 Regime 守卫已禁用`,
+      lines: [
+        `symbol: ${finalCfg.symbol}`,
+        `规则: STRONG_BEAR→${finalCfg.regimeGuard?.blockLongOnStrongBear ? '拦多' : '不拦'} · STRONG_BULL→${finalCfg.regimeGuard?.blockShortOnStrongBull ? '拦空' : '不拦'}`,
+        `      PANIC→${finalCfg.regimeGuard?.blockBothOnPanic ? '双向禁' : '不拦'} · UNCLEAR→${finalCfg.regimeGuard?.blockBothOnUnclear ? '双向禁' : '不拦'}`,
+        `置信度门槛: ${finalCfg.regimeGuard?.minConfidence || '?'}`,
+        `当前 subRegime=${finalCfg.regimeAutoLastSubRegime || '? (暖机中)'}, regimeAutoDisableLong=${!!finalCfg.regimeAutoDisableLong}, regimeAutoDisableShort=${!!finalCfg.regimeAutoDisableShort}`,
+      ],
+    });
+  }
+  console.log(`[trade.router] /regime-guard updated:`, updated.regimeGuard, 'regimeAutoDisableLong=', !!finalCfg.regimeAutoDisableLong, 'regimeAutoDisableShort=', !!finalCfg.regimeAutoDisableShort);
+  res.json({
+    ok: true,
+    regimeGuard: finalCfg.regimeGuard,
+    regimeAutoDisableLong: !!finalCfg.regimeAutoDisableLong,
+    regimeAutoDisableShort: !!finalCfg.regimeAutoDisableShort,
+    regimeAutoLastSubRegime: finalCfg.regimeAutoLastSubRegime || null,
+    regimeAutoLastConfidence: finalCfg.regimeAutoLastConfidence || null,
+    regimeAutoLastEvalAt: finalCfg.regimeAutoLastEvalAt || null,
   });
 });
 

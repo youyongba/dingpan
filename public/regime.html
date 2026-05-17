@@ -334,6 +334,59 @@
     background: #161b22; border: 1px solid #30363d; border-radius: 5px; color: #e6edf3;
   }
 
+  /* 📊 Regime 守卫 — 与价格围栏视觉风格一致, 但用蓝色边框区分 */
+  .regime-guard-bar {
+    padding: 12px 16px; margin-bottom: 16px; border-radius: 12px;
+    border: 1px solid #30363d; background: linear-gradient(145deg, #161b22, #0e1116);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    border-left: 3px solid #58a6ff;
+  }
+  .regime-guard-bar .rg-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .regime-guard-bar .rg-title { font-size: 15px; font-weight: 700; color: #e6edf3; }
+  .regime-guard-bar .rg-title small { font-size: 12px; font-weight: 500; color: #8b949e; margin-left: 6px; }
+  .regime-guard-bar .rg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 700px) { .regime-guard-bar .rg-grid { grid-template-columns: 1fr; } }
+  .regime-guard-bar .rg-rule { padding: 8px 10px; border: 1px solid #21262d; border-radius: 6px; background: #0e1116; }
+  .regime-guard-bar .rg-check { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; color: #e6edf3; }
+  .regime-guard-bar .rg-check input { cursor: pointer; }
+  .regime-guard-bar .rg-rule small { display: block; margin-top: 4px; margin-left: 22px; font-size: 11px; color: #8b949e; }
+  .regime-guard-bar .rg-config { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-top: 12px; padding-top: 10px; border-top: 1px solid #21262d; }
+  .regime-guard-bar .rg-config-field { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #8b949e; }
+  .regime-guard-bar .rg-config-field select,
+  .regime-guard-bar .rg-config-field input[type="number"] {
+    padding: 4px 8px; font-size: 12px;
+    background: #161b22; border: 1px solid #30363d; border-radius: 5px; color: #e6edf3;
+  }
+  .regime-guard-bar .rg-config-field select { min-width: 200px; }
+  .regime-guard-bar .rg-config-field input[type="number"] { width: 90px; }
+  .regime-guard-bar .rg-btn {
+    padding: 6px 12px; font-size: 12px; font-weight: 600; cursor: pointer;
+    border: 1px solid #30363d; border-radius: 6px; background: #21262d; color: #e6edf3; transition: all 0.15s;
+  }
+  .regime-guard-bar .rg-btn:hover:not(:disabled) { background: #30363d; }
+  .regime-guard-bar .rg-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .regime-guard-bar .rg-btn.save { border-color: rgba(88, 166, 255, 0.4); color: #58a6ff; }
+  .regime-guard-bar .rg-status {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    margin-top: 10px; padding: 8px 12px;
+    background: #0e1116; border-radius: 6px; border: 1px solid #21262d;
+    font-size: 12px;
+  }
+  .regime-guard-bar .rg-status-label { color: #8b949e; font-weight: 600; }
+  .regime-guard-bar .rg-sep { color: #30363d; }
+  .regime-guard-bar .rg-state {
+    padding: 3px 8px; border-radius: 4px; font-weight: 600;
+  }
+  .regime-guard-bar .rg-state.idle { background: rgba(139, 148, 158, 0.15); color: #8b949e; border: 1px solid rgba(139, 148, 158, 0.3); }
+  .regime-guard-bar .rg-state.bull { background: rgba(63, 185, 80, 0.15); color: #3fb950; border: 1px solid rgba(63, 185, 80, 0.4); }
+  .regime-guard-bar .rg-state.bear { background: rgba(248, 81, 73, 0.15); color: #f85149; border: 1px solid rgba(248, 81, 73, 0.4); }
+  .regime-guard-bar .rg-state.panic { background: rgba(210, 153, 34, 0.15); color: #d29922; border: 1px solid rgba(210, 153, 34, 0.4); animation: dg-pulse 1.5s ease-in-out infinite; }
+  .regime-guard-bar .rg-state.range { background: rgba(31, 111, 235, 0.15); color: #58a6ff; border: 1px solid rgba(31, 111, 235, 0.4); }
+  .regime-guard-bar .rg-dir-state { font-weight: 600; }
+  .regime-guard-bar .rg-dir-state.ok { color: #3fb950; }
+  .regime-guard-bar .rg-dir-state.blocked { color: #f85149; }
+  .regime-guard-bar .rg-meta { color: #8b949e; font-size: 11px; margin-left: auto; }
+
   /* 手动交易操作栏 (开多 / 开空 / 全平) */
   .trade-actions-bar {
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
@@ -853,6 +906,73 @@
   </div>
 </div>
 
+<!-- 📊 Regime 守卫: 基于 1H 趋势状态自动方向开关 -->
+<div class="regime-guard-bar" id="regimeGuardBar">
+  <div class="rg-head">
+    <span class="rg-title">📊 Regime 守卫 <small>基于 1H 趋势状态自动方向开关</small></span>
+    <label class="switch rg-master">
+      <input type="checkbox" id="regimeGuardEnabled" />
+      <span class="slider"></span>
+    </label>
+  </div>
+  <div class="rg-grid">
+    <div class="rg-rule">
+      <label class="rg-check">
+        <input type="checkbox" id="rgBlockLongOnSB" />
+        <span><b style="color:#f85149">STRONG_BEAR</b> → 自动禁多</span>
+      </label>
+      <small>强空头中接刀子必死, 拦多最安全</small>
+    </div>
+    <div class="rg-rule">
+      <label class="rg-check">
+        <input type="checkbox" id="rgBlockShortOnSB" />
+        <span><b style="color:#3fb950">STRONG_BULL</b> → 自动禁空</span>
+      </label>
+      <small>强多头中前高做空必死, 拦空最安全</small>
+    </div>
+    <div class="rg-rule">
+      <label class="rg-check">
+        <input type="checkbox" id="rgBlockBothOnPanic" />
+        <span><b style="color:#d29922">PANIC</b> → 自动双向禁</span>
+      </label>
+      <small>高 HV 低 ADX, 不开新仓最安全</small>
+    </div>
+    <div class="rg-rule">
+      <label class="rg-check">
+        <input type="checkbox" id="rgBlockBothOnUnclear" />
+        <span><b style="color:#8b949e">UNCLEAR</b> → 自动双向禁</span>
+      </label>
+      <small>信号互相冲突, 默认 off (太严)</small>
+    </div>
+  </div>
+  <div class="rg-config">
+    <label class="rg-config-field">
+      <span>置信度门槛</span>
+      <select id="rgMinConfidence">
+        <option value="low">low (任意置信度都生效)</option>
+        <option value="medium">medium (中以上才生效)</option>
+        <option value="high">high (仅高置信度生效)</option>
+      </select>
+    </label>
+    <label class="rg-config-field">
+      <span>最小切换间隔</span>
+      <input type="number" step="1000" min="0" max="3600000" id="rgMinSwitchMs" placeholder="60000" />
+      <span>ms</span>
+    </label>
+    <button class="rg-btn save" id="rgSaveBtn">💾 保存规则</button>
+  </div>
+  <div class="rg-status" id="rgStatusLine">
+    <span class="rg-status-label">当前状态:</span>
+    <span id="rgCurSubRegime" class="rg-state idle">--</span>
+    <span class="rg-sep">·</span>
+    <span id="rgCurLong" class="rg-dir-state ok">📈 多头: 放行</span>
+    <span class="rg-sep">·</span>
+    <span id="rgCurShort" class="rg-dir-state ok">📉 空头: 放行</span>
+    <span class="rg-sep">·</span>
+    <span id="rgLastEval" class="rg-meta">--</span>
+  </div>
+</div>
+
 <!-- 手动交易操作栏: 挂单 + 一键追单 + 一键全平 -->
 <div class="trade-actions-bar">
   <span class="ta-label">手动开仓 (挂单)</span>
@@ -1226,6 +1346,12 @@
     disableLong: false, disableShort: false,
     autoDisableLong: false, autoDisableShort: false,
     directionGuard: null,
+    // Regime 守卫
+    regimeGuard: null,
+    regimeAutoDisableLong: false, regimeAutoDisableShort: false,
+    regimeAutoLastSubRegime: null,
+    regimeAutoLastConfidence: null,
+    regimeAutoLastEvalAt: null,
   };
 
   function renderAutoTradeNote() {
@@ -1393,6 +1519,17 @@
         long: autoTrade.autoDisableLong,
         short: autoTrade.autoDisableShort,
       }, lastPriceForCard);
+      // Regime 守卫: 配置 + 实时 subRegime + 实时 regimeAutoDisable* 状态
+      autoTrade.regimeGuard = j.regimeGuard || null;
+      autoTrade.regimeAutoDisableLong = !!j.regimeAutoDisableLong;
+      autoTrade.regimeAutoDisableShort = !!j.regimeAutoDisableShort;
+      autoTrade.regimeAutoLastSubRegime = j.regimeAutoLastSubRegime || null;
+      autoTrade.regimeAutoLastConfidence = j.regimeAutoLastConfidence || null;
+      autoTrade.regimeAutoLastEvalAt = j.regimeAutoLastEvalAt || null;
+      renderRegimeGuard(autoTrade.regimeGuard, {
+        long: autoTrade.regimeAutoDisableLong,
+        short: autoTrade.regimeAutoDisableShort,
+      }, autoTrade.regimeAutoLastSubRegime, autoTrade.regimeAutoLastConfidence, autoTrade.regimeAutoLastEvalAt);
     } catch (e) {
       const stateEl = document.getElementById('autoTradeState');
       stateEl.textContent = '后端不可达';
@@ -1620,6 +1757,137 @@
         `滞后 ${j.directionGuard?.hysteresisPct ?? '--'}% · 最小切换 ${j.directionGuard?.minSwitchIntervalMs ?? '--'}ms`, 4000);
     } catch (e) {
       showToast('err', '❌ 全局参数保存失败', e.message || String(e), 6000);
+    } finally {
+      btn && (btn.disabled = false);
+    }
+  }
+
+  /**
+   * 📊 Regime 守卫 UI 渲染 (从 /status 拉到的 regimeGuard 配置 + 实时 regimeAutoDisable* + 当前 subRegime).
+   *
+   * 视觉:
+   *   - 总开关 enabled → 控制是否启用 (off 时, 4 个规则勾选无效, 状态显示 "已停用")
+   *   - 4 个规则勾选 → 同步 cfg.regimeGuard 4 个 block* 字段
+   *   - 状态行: 当前 subRegime + 多/空方向是否被 Regime 守卫拦
+   */
+  function renderRegimeGuard(rgCfg, autoDisableMap, subRegime, confidence, lastEvalAt) {
+    const cfg = rgCfg || {};
+    const enabled = !!cfg.enabled;
+
+    // 编辑保护: 用户正在改时不要被自动同步覆盖
+    const enabledToggle = document.getElementById('regimeGuardEnabled');
+    if (enabledToggle && document.activeElement !== enabledToggle) enabledToggle.checked = enabled;
+    const blockLongOnSB = document.getElementById('rgBlockLongOnSB');
+    if (blockLongOnSB && document.activeElement !== blockLongOnSB) blockLongOnSB.checked = !!cfg.blockLongOnStrongBear;
+    const blockShortOnSB = document.getElementById('rgBlockShortOnSB');
+    if (blockShortOnSB && document.activeElement !== blockShortOnSB) blockShortOnSB.checked = !!cfg.blockShortOnStrongBull;
+    const blockBothOnPanic = document.getElementById('rgBlockBothOnPanic');
+    if (blockBothOnPanic && document.activeElement !== blockBothOnPanic) blockBothOnPanic.checked = !!cfg.blockBothOnPanic;
+    const blockBothOnUnclear = document.getElementById('rgBlockBothOnUnclear');
+    if (blockBothOnUnclear && document.activeElement !== blockBothOnUnclear) blockBothOnUnclear.checked = !!cfg.blockBothOnUnclear;
+    const minConf = document.getElementById('rgMinConfidence');
+    if (minConf && document.activeElement !== minConf && cfg.minConfidence) minConf.value = cfg.minConfidence;
+    const minSwitchMs = document.getElementById('rgMinSwitchMs');
+    if (minSwitchMs && document.activeElement !== minSwitchMs && Number.isFinite(cfg.minSwitchIntervalMs)) {
+      minSwitchMs.value = cfg.minSwitchIntervalMs;
+    }
+
+    // 当前 subRegime 状态标签
+    const subRegimeEl = document.getElementById('rgCurSubRegime');
+    if (subRegimeEl) {
+      const subZh = {
+        STRONG_BULL: '🚀 强多头',
+        WEAK_BULL: '📈 弱多头',
+        RANGE_NEUTRAL: '⚖️ 震荡',
+        WEAK_BEAR: '📉 弱空头',
+        STRONG_BEAR: '🔻 强空头',
+        PANIC: '⚠️ 恐慌',
+        UNCLEAR: '❓ 未明',
+      }[subRegime] || (subRegime || '⏳ 暖机中');
+      subRegimeEl.textContent = subZh + (confidence ? ` · 置信度 ${confidence}` : '');
+      subRegimeEl.className = 'rg-state ' + (
+        !subRegime ? 'idle' :
+        subRegime === 'STRONG_BULL' ? 'bull' :
+        subRegime === 'STRONG_BEAR' ? 'bear' :
+        subRegime === 'PANIC' ? 'panic' :
+        subRegime === 'RANGE_NEUTRAL' ? 'range' : 'idle'
+      );
+    }
+
+    // 多空方向状态
+    const longEl = document.getElementById('rgCurLong');
+    const shortEl = document.getElementById('rgCurShort');
+    if (longEl) {
+      const blocked = !!autoDisableMap?.long;
+      longEl.textContent = blocked ? '📈 多头: 🚫 已拦' : '📈 多头: ✅ 放行';
+      longEl.className = 'rg-dir-state ' + (blocked ? 'blocked' : 'ok');
+    }
+    if (shortEl) {
+      const blocked = !!autoDisableMap?.short;
+      shortEl.textContent = blocked ? '📉 空头: 🚫 已拦' : '📉 空头: ✅ 放行';
+      shortEl.className = 'rg-dir-state ' + (blocked ? 'blocked' : 'ok');
+    }
+
+    // 上次评估时间
+    const lastEvalEl = document.getElementById('rgLastEval');
+    if (lastEvalEl) {
+      if (!enabled) {
+        lastEvalEl.textContent = '⛔ 守卫已停用';
+      } else if (lastEvalAt) {
+        const ago = Math.floor((Date.now() - lastEvalAt) / 1000);
+        lastEvalEl.textContent = `上次评估: ${ago}s 前`;
+      } else {
+        lastEvalEl.textContent = '⏳ 等待第一次评估';
+      }
+    }
+  }
+
+  /**
+   * 调 /regime-guard 端点更新配置. action='enable'|'disable'|'rules' 决定提交什么.
+   * 后端会立即用最新 regime 评估一次, 用户能立刻看到拦截状态切换.
+   */
+  async function saveRegimeGuardRules() {
+    const body = {
+      enabled: !!document.getElementById('regimeGuardEnabled')?.checked,
+      blockLongOnStrongBear: !!document.getElementById('rgBlockLongOnSB')?.checked,
+      blockShortOnStrongBull: !!document.getElementById('rgBlockShortOnSB')?.checked,
+      blockBothOnPanic: !!document.getElementById('rgBlockBothOnPanic')?.checked,
+      blockBothOnUnclear: !!document.getElementById('rgBlockBothOnUnclear')?.checked,
+      minConfidence: document.getElementById('rgMinConfidence')?.value || 'low',
+    };
+    const ms = parseInt(document.getElementById('rgMinSwitchMs')?.value, 10);
+    if (Number.isFinite(ms) && ms >= 0 && ms <= 3600000) body.minSwitchIntervalMs = ms;
+
+    const btn = document.getElementById('rgSaveBtn');
+    btn && (btn.disabled = true);
+    try {
+      const r = await fetch('/api/auto-trade/regime-guard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+      autoTrade.regimeGuard = j.regimeGuard;
+      autoTrade.regimeAutoDisableLong = !!j.regimeAutoDisableLong;
+      autoTrade.regimeAutoDisableShort = !!j.regimeAutoDisableShort;
+      autoTrade.regimeAutoLastSubRegime = j.regimeAutoLastSubRegime || null;
+      autoTrade.regimeAutoLastConfidence = j.regimeAutoLastConfidence || null;
+      autoTrade.regimeAutoLastEvalAt = j.regimeAutoLastEvalAt || Date.now();
+      renderRegimeGuard(j.regimeGuard, {
+        long: !!j.regimeAutoDisableLong,
+        short: !!j.regimeAutoDisableShort,
+      }, j.regimeAutoLastSubRegime, j.regimeAutoLastConfidence, j.regimeAutoLastEvalAt);
+      updateManualActions(lastPositionsSnapshot, autoTrade.enabled);
+      showToast('ok',
+        body.enabled ? '📊 Regime 守卫已启用' : '📊 Regime 守卫已停用',
+        body.enabled
+          ? `当前 subRegime=${j.regimeAutoLastSubRegime || '暖机中'} · 多头=${j.regimeAutoDisableLong ? '已拦' : '放行'} · 空头=${j.regimeAutoDisableShort ? '已拦' : '放行'}`
+          : 'Regime 守卫已关闭, regimeAutoDisable* 已自动复位',
+        5000);
+    } catch (e) {
+      showToast('err', '❌ Regime 守卫保存失败', e.message || String(e), 6000);
+      await fetchAutoTradeStatus();
     } finally {
       btn && (btn.disabled = false);
     }
@@ -2723,23 +2991,26 @@
       return;
     }
 
-    // 方向开关 (autoTrade.disableLong / disableShort) + 价格围栏 (autoDisableLong / autoDisableShort):
-    // 任意一个 ON 都视为该方向被禁; tooltip 优先展示方向开关原因 (用户主动决策比 busy 更"显式")
-    const longManualDisabled = !!autoTrade.disableLong;
+    // 方向开关三重取或: 手动 disable* || 价格围栏 autoDisable* || Regime 守卫 regimeAutoDisable*
+    // 任意一个 ON 都视为该方向被禁; tooltip 列出全部原因
+    const longManualDisabled  = !!autoTrade.disableLong;
     const shortManualDisabled = !!autoTrade.disableShort;
-    const longGuardDisabled = !!autoTrade.autoDisableLong;
-    const shortGuardDisabled = !!autoTrade.autoDisableShort;
-    const longDisabled = longManualDisabled || longGuardDisabled;
-    const shortDisabled = shortManualDisabled || shortGuardDisabled;
-    const reasonText = (manual, guard) => {
+    const longPriceDisabled   = !!autoTrade.autoDisableLong;
+    const shortPriceDisabled  = !!autoTrade.autoDisableShort;
+    const longRegimeDisabled  = !!autoTrade.regimeAutoDisableLong;
+    const shortRegimeDisabled = !!autoTrade.regimeAutoDisableShort;
+    const longDisabled  = longManualDisabled  || longPriceDisabled  || longRegimeDisabled;
+    const shortDisabled = shortManualDisabled || shortPriceDisabled || shortRegimeDisabled;
+    const reasonText = (manual, price, regime) => {
       const reasons = [];
       if (manual) reasons.push('🚫 手动开关');
-      if (guard)  reasons.push('🤖 价格围栏');
+      if (price)  reasons.push('🤖 价格围栏');
+      if (regime) reasons.push('📊 Regime 守卫');
       return reasons.join(' + ');
     };
 
-    const longReason = reasonText(longManualDisabled, longGuardDisabled);
-    const shortReason = reasonText(shortManualDisabled, shortGuardDisabled);
+    const longReason = reasonText(longManualDisabled, longPriceDisabled, longRegimeDisabled);
+    const shortReason = reasonText(shortManualDisabled, shortPriceDisabled, shortRegimeDisabled);
 
     longBtn.disabled = longBusy || longDisabled;
     longBtn.title = longDisabled
@@ -2791,9 +3062,17 @@
       shortActive && '📉空(已开)',
       shortPending && '📉空(挂单)',
     ].filter(Boolean);
+    // 标签策略: 列出全部触发的原因, 让用户一眼看出"被几重拦截"
+    const buildBlockTag = (dirZh, manual, price, regime) => {
+      const icons = [];
+      if (manual) icons.push('🚫');
+      if (price)  icons.push('🤖');
+      if (regime) icons.push('📊');
+      return `${icons.join('')}禁止${dirZh}`;
+    };
     const blockTags = [
-      longDisabled && (longGuardDisabled && !longManualDisabled ? '🤖禁止做多(围栏)' : longManualDisabled && longGuardDisabled ? '🚫🤖禁止做多(双重)' : '🚫禁止做多'),
-      shortDisabled && (shortGuardDisabled && !shortManualDisabled ? '🤖禁止做空(围栏)' : shortManualDisabled && shortGuardDisabled ? '🚫🤖禁止做空(双重)' : '🚫禁止做空'),
+      longDisabled  && buildBlockTag('做多', longManualDisabled,  longPriceDisabled,  longRegimeDisabled),
+      shortDisabled && buildBlockTag('做空', shortManualDisabled, shortPriceDisabled, shortRegimeDisabled),
     ].filter(Boolean);
     const baseMeta = tags.length
       ? `当前: ${tags.join(' · ')} · 重复同方向开仓/追单会被拒绝`
@@ -3307,6 +3586,17 @@
   document.getElementById('dgCancelShortBtn').addEventListener('click', () => setDirectionGuard('short', 'disable'));
   // 围栏全局参数 (滞后缓冲 + 最小切换间隔)
   document.getElementById('dgSaveConfigBtn').addEventListener('click', saveDirectionGuardConfig);
+  // 📊 Regime 守卫: 总开关 / 4 个规则勾选 / minConfidence / minSwitchMs 任意改动 → 立即保存
+  // 总开关单独捕获 (change 立即生效, 不需要点保存按钮)
+  document.getElementById('regimeGuardEnabled').addEventListener('change', saveRegimeGuardRules);
+  // 4 个规则勾选 + 配置项 → 也立即生效, 让用户体验"勾选即生效"
+  ['rgBlockLongOnSB', 'rgBlockShortOnSB', 'rgBlockBothOnPanic', 'rgBlockBothOnUnclear', 'rgMinConfidence'].forEach(id => {
+    document.getElementById(id).addEventListener('change', saveRegimeGuardRules);
+  });
+  // minSwitchMs 是数字输入, 失焦或回车后保存 (避免每输入一个数字就调一次)
+  document.getElementById('rgMinSwitchMs').addEventListener('change', saveRegimeGuardRules);
+  // 显式保存按钮 (备用入口, 强制保存全部当前 UI 状态)
+  document.getElementById('rgSaveBtn').addEventListener('click', saveRegimeGuardRules);
   document.getElementById('resetLongBtn').addEventListener('click', () => resetDirection('long'));
   document.getElementById('resetShortBtn').addEventListener('click', () => resetDirection('short'));
 

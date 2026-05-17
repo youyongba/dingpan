@@ -50,6 +50,36 @@ const DEFAULT_CONFIG = {
   //   false → 围栏判定该方向放行 (但手动 disable* 仍可独立拦)
   autoDisableLong: false,
   autoDisableShort: false,
+  // ⭐ Regime 守卫 (自动方向开关 — 基于 1H Regime/subRegime 的趋势状态):
+  //   STRONG_BULL  (强多头) → blockShortOnStrongBull=true 时, 自动禁止做空
+  //                            (强趋势中"前高做空"必死, 用 Regime 拦掉所有空头新信号)
+  //   STRONG_BEAR  (强空头) → blockLongOnStrongBear=true 时, 自动禁止做多
+  //                            (强趋势中"接刀子"必死, 拦掉所有多头新信号)
+  //   PANIC        (恐慌)   → blockBothOnPanic=true     时, 自动双向禁
+  //   UNCLEAR      (未明)   → blockBothOnUnclear=true   时, 自动双向禁 (默认 off, 太严)
+  //   minConfidence         → 'low' | 'medium' | 'high', 低于这个置信度时不参考
+  //                            confidenceLabel 在 enhancedJudge 里返回 '低/中/高',
+  //                            这里映射为 low/medium/high.
+  //
+  // 与 manual disableLong/Short + priceGuard autoDisableLong/Short 是**独立位**:
+  //   最终拦截 = manual || priceGuard || regimeGuard (任意一个 true 都拦).
+  // UI 用三种不同视觉区分: 🚫 手动 / 🤖 价格围栏 / 📊 Regime 守卫.
+  regimeGuard: {
+    enabled: false,                          // 总开关 (默认 off, 用户主动启用)
+    blockLongOnStrongBear: true,             // STRONG_BEAR → 拦多 (默认 on, 最有共识)
+    blockShortOnStrongBull: true,            // STRONG_BULL → 拦空 (默认 on)
+    blockBothOnPanic: true,                  // PANIC → 双向禁 (默认 on, 安全)
+    blockBothOnUnclear: false,               // UNCLEAR → 双向禁 (默认 off, 太严)
+    minConfidence: 'low',                    // low/medium/high — 低于此置信度不应用
+    minSwitchIntervalMs: 60000,              // 最小切换间隔 (1H Regime 本身就慢, 60s 防误切)
+  },
+  // 由 riskEngine.evaluateRegimeGuard 自动写入, 用户不应直接 patch:
+  regimeAutoDisableLong: false,
+  regimeAutoDisableShort: false,
+  // 当前评估到的 Regime 状态快照 (供 /status 暴露给 UI 用, 不参与决策):
+  regimeAutoLastSubRegime: null,             // 'STRONG_BULL' / 'STRONG_BEAR' / 'PANIC' / ...
+  regimeAutoLastConfidence: null,            // 'low' / 'medium' / 'high'
+  regimeAutoLastEvalAt: null,                // 上次评估时间 (ms)
   symbol: 'BTCUSDT',                          // 监听符号
   // ↓↓↓ 用户在需求里固定的两条默认配置
   webhookUrl: 'https://transpenetrable-shantel-unabortively.ngrok-free.dev/webhook/wh_d113d9b4d838dbd635d4c19c3f0c51d9',
@@ -169,18 +199,58 @@ function load() {
     fromEnv.directionGuard.minSwitchIntervalMs = guardMinSwitchMs;
   }
 
+  // Regime 守卫: .env 提供启动默认值 (UI 热更新走 POST /regime-guard).
+  if (process.env.AUTO_TRADE_REGIME_GUARD_ENABLED === '1') {
+    fromEnv.regimeGuard = fromEnv.regimeGuard || {};
+    fromEnv.regimeGuard.enabled = true;
+  } else if (process.env.AUTO_TRADE_REGIME_GUARD_ENABLED === '0') {
+    fromEnv.regimeGuard = fromEnv.regimeGuard || {};
+    fromEnv.regimeGuard.enabled = false;
+  }
+  if (process.env.AUTO_TRADE_REGIME_GUARD_BLOCK_LONG_ON_STRONG_BEAR != null) {
+    fromEnv.regimeGuard = fromEnv.regimeGuard || {};
+    fromEnv.regimeGuard.blockLongOnStrongBear = process.env.AUTO_TRADE_REGIME_GUARD_BLOCK_LONG_ON_STRONG_BEAR === '1';
+  }
+  if (process.env.AUTO_TRADE_REGIME_GUARD_BLOCK_SHORT_ON_STRONG_BULL != null) {
+    fromEnv.regimeGuard = fromEnv.regimeGuard || {};
+    fromEnv.regimeGuard.blockShortOnStrongBull = process.env.AUTO_TRADE_REGIME_GUARD_BLOCK_SHORT_ON_STRONG_BULL === '1';
+  }
+  if (process.env.AUTO_TRADE_REGIME_GUARD_BLOCK_BOTH_ON_PANIC != null) {
+    fromEnv.regimeGuard = fromEnv.regimeGuard || {};
+    fromEnv.regimeGuard.blockBothOnPanic = process.env.AUTO_TRADE_REGIME_GUARD_BLOCK_BOTH_ON_PANIC === '1';
+  }
+  if (process.env.AUTO_TRADE_REGIME_GUARD_BLOCK_BOTH_ON_UNCLEAR != null) {
+    fromEnv.regimeGuard = fromEnv.regimeGuard || {};
+    fromEnv.regimeGuard.blockBothOnUnclear = process.env.AUTO_TRADE_REGIME_GUARD_BLOCK_BOTH_ON_UNCLEAR === '1';
+  }
+  const minConf = process.env.AUTO_TRADE_REGIME_GUARD_MIN_CONFIDENCE;
+  if (minConf && ['low', 'medium', 'high'].includes(minConf)) {
+    fromEnv.regimeGuard = fromEnv.regimeGuard || {};
+    fromEnv.regimeGuard.minConfidence = minConf;
+  }
+
   active = deepMerge(deepMerge(DEFAULT_CONFIG, fromDisk), fromEnv);
   // 启动时强制把 autoDisable* 重置 (避免上次运行时的"幽灵"自动拦截状态遗留下来,
   // 重新评估应该由 riskEngine 在第一帧 tick 上重新决定).
   active.autoDisableLong = false;
   active.autoDisableShort = false;
+  // Regime 守卫的状态字段也重置 — 启动后由 riskEngine 第一次 evaluateRegimeGuard 重新填.
+  active.regimeAutoDisableLong = false;
+  active.regimeAutoDisableShort = false;
+  active.regimeAutoLastSubRegime = null;
+  active.regimeAutoLastConfidence = null;
+  active.regimeAutoLastEvalAt = null;
   const dg = active.directionGuard || {};
+  const rg = active.regimeGuard || {};
   console.log(
     `[trade.config] 已加载: webhook=${active.webhookUrl?.slice(0, 60)}... enabled=${active.enabled}` +
     ` · disableLong=${!!active.disableLong} · disableShort=${!!active.disableShort}` +
     ` · directionGuard long(${dg.long?.enabled ? 'on' : 'off'} ${dg.long?.threshold ?? '--'})` +
     ` short(${dg.short?.enabled ? 'on' : 'off'} ${dg.short?.threshold ?? '--'})` +
-    ` hysteresis=${dg.hysteresisPct ?? '--'}% minSwitch=${dg.minSwitchIntervalMs ?? '--'}ms`
+    ` hysteresis=${dg.hysteresisPct ?? '--'}% minSwitch=${dg.minSwitchIntervalMs ?? '--'}ms` +
+    ` · regimeGuard ${rg.enabled ? 'on' : 'off'}` +
+    ` (LongOnSB=${rg.blockLongOnStrongBear ? '1' : '0'} ShortOnSB=${rg.blockShortOnStrongBull ? '1' : '0'}` +
+    ` PANIC=${rg.blockBothOnPanic ? '1' : '0'} UNCLEAR=${rg.blockBothOnUnclear ? '1' : '0'} minConf=${rg.minConfidence})`
   );
   return active;
 }
