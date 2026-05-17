@@ -47,6 +47,35 @@ const _inFlight = { long: false, short: false };
 const recentlyFired = { long: 0, short: 0 };
 const FIRE_COOLDOWN_MS = 200;
 
+// ---------------- 风控套件运行时缓存 ----------------
+// 跟仓位绑定的 per-position 状态 (bestFavorablePrice / protectArmed) — 这些是
+// 高频轮询的瞬时变量, 不写盘也不需要持久化 (重启时新仓重新跟踪即可).
+//
+// key = direction ('long' / 'short'), value = {
+//   bestFavorablePrice: number,    // 已达到的最有利价 (long 取最高, short 取最低)
+//   protectArmed: boolean,         // 价格走我方向 ≥ protectAfterTouchPct% 后置 true
+//                                   // 同步把 currentStopLoss 上移到 entryPrice (保本)
+//   trailingArmed: boolean,        // TP1 触发后置 true, 启用 trailing
+//   trailingHighWater: number,     // trailing 用的 SL 上移基准 (随价格更新)
+//   timeExitNotifiedTp1: boolean,  // 已对该仓推过一次 "time_exit_tp1" 通知, 防重复
+//   timeExitNotifiedTp2: boolean,
+// }
+//
+// 仓位关闭后由 _resetRiskGuardCache 清掉. fireSl 链路里调.
+const _riskGuardCache = {
+  long:  { bestFavorablePrice: null, protectArmed: false, trailingArmed: false, trailingHighWater: null },
+  short: { bestFavorablePrice: null, protectArmed: false, trailingArmed: false, trailingHighWater: null },
+};
+
+function _resetRiskGuardCache(direction) {
+  _riskGuardCache[direction] = {
+    bestFavorablePrice: null,
+    protectArmed: false,
+    trailingArmed: false,
+    trailingHighWater: null,
+  };
+}
+
 // ---------------- near-miss 遥测 (排障可观测) ----------------
 // 价格已 hit 但被 _inFlight / cooldown 暂时拦下的事件计数 + 最近一次详情.
 // 用户在 UI 看到"TP2 没触发"时, 可以直接看这两个计数判断是不是被节流拦了.
@@ -232,8 +261,45 @@ function getRiskTelemetry() {
   };
 }
 
+/**
+ * ⭐ 风控套件: 每帧 tick 检查 pausedUntilMs 是否到了, 到了就自动恢复 enabled.
+ * 这样用户不用手动恢复, 8h 暂停期一过就自动开机.
+ *
+ * 注意: 如果 pausedReason 是 'balance_guard_below_min', 必须用户手动恢复 (pausedUntilMs=null),
+ * 此处不会自动解除. 这是设计上的安全约束.
+ */
+function _checkPauseExpiry() {
+  const cfg = config.get();
+  if (!cfg.pausedUntilMs || !Number.isFinite(cfg.pausedUntilMs)) return;
+  if (Date.now() < cfg.pausedUntilMs) return;
+  // 到点 → 自动恢复
+  const wasReason = cfg.pausedReason;
+  try {
+    config.patch({
+      enabled: true,
+      pausedUntilMs: null,
+      pausedReason: null,
+      lossStreak: 0,
+    });
+    console.log(`[trade.risk] ⏰ 暂停期已到 (${wasReason}), 自动恢复 enabled=true, lossStreak=0`);
+    exec.notify({
+      type: 'tp',
+      title: `✅ 自动恢复: 暂停期已到`,
+      lines: [
+        `先前暂停原因: ${wasReason || '--'}`,
+        `状态: enabled=true 已恢复, lossStreak 已重置为 0`,
+        `继续接收交易信号`,
+      ],
+    });
+  } catch (e) {
+    console.error('[trade.risk] _checkPauseExpiry 恢复失败:', e?.message || e);
+  }
+}
+
 function _runEval(price, ts) {
   _evalCount++;
+  // ⭐ 暂停期检查 — 每帧都跑, 成本极低
+  _checkPauseExpiry();
   ['long', 'short'].forEach(dir => {
     try { evaluate(dir, price, ts); }
     catch (e) { console.error('[trade.risk] evaluate error:', e.message); }
@@ -492,6 +558,143 @@ function onTick({ price, ts }) {
  *   因为 markTpHit 幂等 + _inFlight 仍生效, 不存在重复 fire 风险, 但能保证
  *   单帧内 TP1→TP2→TP3 能连续触发, 杜绝行情急涨时的跳级漏触发.
  */
+/**
+ * ⭐ 风控套件评估: 在 active 持仓上做"软止损 / 保本触发 / trailing / 时间退出".
+ * 优先级高于标准 SL/TP 判定 — 在 evaluate 的 active 分支最前面调.
+ *
+ * 返回 true 表示已触发某种"主动平仓"动作 (fireSl in flight),
+ *   evaluate 后续不应再走标准 SL/TP 判定.
+ * 返回 false 表示没触发任何保护, evaluate 继续往下.
+ *
+ * 副作用:
+ *   - 可能修改 position.currentStopLoss (保本触发 / trailing) 写盘
+ *   - 可能调 fireSl(direction, price, 'soft_sl_*' / 'time_exit_*') 主动平仓
+ */
+function _evaluateRiskGuard(direction, price, tickTs) {
+  const cfg = config.get();
+  const p = state.getPosition(direction);
+  if (!p || !p.active) return false;
+  if (!Number.isFinite(price) || price <= 0) return false;
+
+  const isLong = direction === 'long';
+  const entry = p.entryPrice;
+  if (!Number.isFinite(entry) || entry <= 0) return false;
+
+  const cache = _riskGuardCache[direction];
+  const entryAtMs = p.entryAt ? new Date(p.entryAt).getTime() : null;
+  const heldMs = (entryAtMs && Number.isFinite(entryAtMs)) ? Date.now() - entryAtMs : 0;
+
+  // 反向幅度 (%): 多头 = (entry - price) / entry; 空头 = (price - entry) / entry
+  // 顺势幅度 = -adversePct (正值表示 price 走我方向)
+  const adversePct = isLong
+    ? ((entry - price) / entry) * 100
+    : ((price - entry) / entry) * 100;
+  const favorablePct = -adversePct;
+
+  // 更新 bestFavorablePrice (用于 trailing 上移基准)
+  if (cache.bestFavorablePrice == null) {
+    cache.bestFavorablePrice = price;
+  } else {
+    if (isLong && price > cache.bestFavorablePrice) cache.bestFavorablePrice = price;
+    if (!isLong && price < cache.bestFavorablePrice) cache.bestFavorablePrice = price;
+  }
+
+  // ============ 1. 时间退出 (优先级最高 — 卡死的烂单优先释放保证金) ============
+  const te = cfg.timeExit;
+  if (te && te.enabled && entryAtMs) {
+    const lossingOk = te.onlyIfLossingPct == null || adversePct >= te.onlyIfLossingPct;
+    if (!p.tpHit.tp1 && heldMs >= te.beforeTp1Ms && lossingOk) {
+      console.log(`[trade.risk] ⏰ time_exit_tp1: ${direction} 持仓 ${heldMs}ms ≥ ${te.beforeTp1Ms}ms 未触 TP1 (adverse=${adversePct.toFixed(3)}%), 主动平仓`);
+      fireSl(direction, price, 'time_exit_tp1', tickTs);
+      return true;
+    }
+    if (p.tpHit.tp1 && !p.tpHit.tp2 && heldMs >= te.beforeTp2Ms) {
+      console.log(`[trade.risk] ⏰ time_exit_tp2: ${direction} 持仓 ${heldMs}ms ≥ ${te.beforeTp2Ms}ms 未触 TP2, 平剩余仓位`);
+      fireSl(direction, price, 'time_exit_tp2', tickTs);
+      return true;
+    }
+  }
+
+  // ============ 2. 软止损 (假插针保护 + 标准止损) ============
+  // 仅在 tp1 未触发时启用 — tp1 已触发后由 trailing 接管 (currentStopLoss 已上移到 entry+),
+  //                             标准 SL 判定会先于软止损触发, 软止损就没意义了.
+  const ssl = cfg.softStopLoss;
+  if (ssl && ssl.enabled && !p.tpHit.tp1) {
+    if (heldMs < ssl.fastWindowMs && adversePct >= ssl.fastPct) {
+      console.log(`[trade.risk] 🚨 soft_sl_fast: ${direction} held=${heldMs}ms<${ssl.fastWindowMs}ms adverse=${adversePct.toFixed(3)}%≥${ssl.fastPct}%, 主动平仓`);
+      fireSl(direction, price, 'soft_sl_fast', tickTs);
+      return true;
+    }
+    if (heldMs >= ssl.fastWindowMs && adversePct >= ssl.normalPct) {
+      console.log(`[trade.risk] 🛑 soft_sl_normal: ${direction} held=${heldMs}ms adverse=${adversePct.toFixed(3)}%≥${ssl.normalPct}%, 主动平仓`);
+      fireSl(direction, price, 'soft_sl_normal', tickTs);
+      return true;
+    }
+  }
+
+  // ============ 3. 保本触发 (TP1 未触发, 价格走我方向 ≥ protectAfterTouchPct% → SL 上移到 entry) ============
+  // 仅 tp1 未触发时有效 (tp1 触发后已被 fireTp 自动设保本).
+  // protectArmed 为 true 后不再重复设, 避免每帧 tick 都 patch state 写盘.
+  if (ssl && ssl.enabled && !p.tpHit.tp1 && !cache.protectArmed) {
+    if (favorablePct >= ssl.protectAfterTouchPct) {
+      cache.protectArmed = true;
+      const updated = state.setRiskGuardSl(direction, entry, { reason: 'protect_after_touch' });
+      if (updated) {
+        console.log(`[trade.risk] 🛡 protect_after_touch: ${direction} favor=${favorablePct.toFixed(3)}%≥${ssl.protectAfterTouchPct}%, SL 上移到 entry=${entry}`);
+        const titleEmoji = isLong ? '📈' : '📉';
+        exec.notify({
+          type: 'tp',
+          title: `🛡 ${titleEmoji} ${direction.toUpperCase()} 保本止损已自动启用`,
+          lines: [
+            `symbol: ${cfg.symbol}`,
+            `入场价: ${Number(entry).toFixed(2)}`,
+            `当前价: ${Number(price).toFixed(2)} (顺势 ${favorablePct.toFixed(3)}%)`,
+            `逻辑: 价格走我方向 ≥ ${ssl.protectAfterTouchPct}% → currentStopLoss 上移到入场价`,
+            `效果: 后续若回踩 entry, 工具主动平仓, 不会亏本金 (仅手续费)`,
+          ],
+        });
+      }
+    }
+  }
+
+  // ============ 4. trailing (TP1 已触发, 价格每多走 stepPct% SL 跟着上移 stepPct%) ============
+  if (ssl && ssl.enabled && ssl.trailingAfterTp1?.enabled && p.tpHit.tp1 && !p.tpHit.tp3) {
+    const stepPct = ssl.trailingAfterTp1.stepPct;
+    if (Number.isFinite(stepPct) && stepPct > 0) {
+      // 初始化 trailingHighWater (TP1 触发后第一次进入 trailing)
+      if (cache.trailingHighWater == null) {
+        cache.trailingHighWater = entry;   // 起点 = 保本止损位
+        cache.trailingArmed = true;
+      }
+      // bestFavorablePrice 已经在前面更新好, 直接用它推算应有的 SL
+      const best = cache.bestFavorablePrice;
+      // 以 entry 为基准的最大顺势幅度 (%)
+      const bestFavorPct = isLong
+        ? ((best - entry) / entry) * 100
+        : ((entry - best) / entry) * 100;
+      // 应放置的 SL 距 entry 的顺势幅度 = floor(bestFavorPct / stepPct) * stepPct
+      // 即每多走一个 stepPct, SL 跟上一个 stepPct
+      const trailingPct = Math.floor(bestFavorPct / stepPct) * stepPct;
+      if (trailingPct > 0) {
+        const newSl = isLong
+          ? entry * (1 + trailingPct / 100)
+          : entry * (1 - trailingPct / 100);
+        // 仅在新 SL 比当前 SL 更接近顺势方向时才更新 (单向上移, 不回退)
+        const currentSl = p.currentStopLoss;
+        const shouldUpdate = isLong
+          ? (currentSl == null || newSl > currentSl)
+          : (currentSl == null || newSl < currentSl);
+        if (shouldUpdate) {
+          state.setRiskGuardSl(direction, newSl, { reason: 'trailing_after_tp1' });
+          console.log(`[trade.risk] 📈 trailing: ${direction} bestFavor=${bestFavorPct.toFixed(3)}% → SL 上移到 ${newSl.toFixed(2)} (距 entry +${trailingPct}%顺势)`);
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
 function evaluate(direction, price, tickTs, opts = {}) {
   if (_inFlight[direction]) {
     // 闸 A: webhook 还没发完, 直接拒绝再入. 但记一笔 near-miss 计数, 帮助排障.
@@ -512,6 +715,9 @@ function evaluate(direction, price, tickTs, opts = {}) {
 
   // ============ 优先处理 active 持仓的 TP / SL ============
   if (p.active) {
+    // ⭐ 风控套件优先 — 软止损/保本/trailing/时间退出. 触发了就跳出.
+    if (_evaluateRiskGuard(direction, price, tickTs)) return;
+
     if (p.currentStopLoss != null) {
       const slHit = isLong ? below(price, p.currentStopLoss) : above(price, p.currentStopLoss);
       if (slHit) {
@@ -836,7 +1042,25 @@ async function fireTp(direction, level, triggerPrice, tickTs) {
           title: `🔓 ${direction.toUpperCase()} 已自动解锁 (TP3 全部止盈)`,
           lines: [`方向 ${direction} 现可重新接收开仓信号`],
         });
+        // ⭐ 风控套件收尾: TP3 全平 = 完整盈利一笔, lossStreak 重置, 检查提利润
+        _onPositionClosed(direction, 'tp_3', {
+          entryPrice: pBefore.entryPrice,
+          tp1: pBefore.tp1,
+          tp2: pBefore.tp2,
+          tp3: pBefore.tp3,
+        });
       }
+    } else if (level === 'tp_1') {
+      // ⭐ TP1 命中 = 已锁 50% 利润, lossStreak 立即重置 (即便 TP2/TP3 没到, 这一笔也算赢)
+      // 这里不调 _onPositionClosed (仓位还 active, 不能清 cache; 也不查 balanceGuard).
+      // 仅 patch lossStreak=0.
+      try {
+        const cfg = config.get();
+        if ((cfg.lossStreak || 0) > 0) {
+          config.patch({ lossStreak: 0 });
+          console.log(`[trade.risk] ✅ TP1 命中 → lossStreak 重置为 0 (前值 ${cfg.lossStreak})`);
+        }
+      } catch (_) {}
     }
   } finally {
     _inFlight[direction] = false;
@@ -966,6 +1190,118 @@ async function firePendingFill(direction, fillPrice, tickTs) {
   }
 }
 
+/**
+ * ⭐ 仓位关闭后的统一收尾 — fireTp(tp_3) / fireSl 都调.
+ *
+ * 职责:
+ *   1. 清 _riskGuardCache[direction] (释放 protectArmed/trailing 内存状态)
+ *   2. 更新 lossStreak (亏损 +1; 任意 TP 命中 = 0)
+ *   3. 检查 lossStreakBrake → 达到阈值 → cfg.enabled=false + pausedUntilMs
+ *   4. 检查 balanceGuard → 余额 < minUSD → cfg.enabled=false (需手动恢复)
+ *   5. 检查 profitWithdraw → 余额 > baseline + threshold → 推飞书提醒提利润
+ *
+ * 副作用:
+ *   - config.patch({ lossStreak, enabled, pausedUntilMs, pausedReason })
+ *   - exec.notify (告警 / 提利润提醒)
+ *
+ * @param {'long'|'short'} direction
+ * @param {string} closeReason   'tp_3' | 'sl' | 'sl_protection' | 'soft_sl_fast' | 'soft_sl_normal' | 'time_exit_tp1' | 'time_exit_tp2' | ...
+ * @param {object} snapshot      关单时的仓位快照 (entry/sl/tp/closePrice 等)
+ */
+function _onPositionClosed(direction, closeReason, snapshot = {}) {
+  _resetRiskGuardCache(direction);
+
+  const cfg = config.get();
+  // 分类: 哪些 closeReason 算"亏损一笔" (用于 lossStreak)
+  // - sl / sl_protection: 标准止损 / 保本止损
+  // - soft_sl_fast / soft_sl_normal: 风控套件主动平仓 (软止损)
+  // - time_exit_tp1: 时间退出且 tp1 未触发, 一定是浮亏中平的
+  // - 其他 (tp_3 / time_exit_tp2): 算赢笔 (tp_3 是完整盈利; time_exit_tp2 是 tp1 已锁利后的平仓)
+  const lossReasons = ['sl', 'sl_protection', 'soft_sl_fast', 'soft_sl_normal', 'time_exit_tp1'];
+  const winReasons = ['tp_3', 'time_exit_tp2'];
+  const isLoss = lossReasons.includes(closeReason);
+  const isWin = winReasons.includes(closeReason);
+
+  let newStreak = cfg.lossStreak || 0;
+  if (isLoss) newStreak += 1;
+  else if (isWin) newStreak = 0;
+
+  const patches = {};
+  if (newStreak !== cfg.lossStreak) patches.lossStreak = newStreak;
+
+  // ============ 连亏熔断 ============
+  const lsb = cfg.lossStreakBrake;
+  if (lsb && lsb.enabled && isLoss && newStreak > 0) {
+    const pauseMs = lsb.thresholds && lsb.thresholds[String(newStreak)];
+    if (pauseMs != null) {
+      patches.enabled = false;
+      patches.pausedReason = `loss_streak_${newStreak}`;
+      patches.pausedUntilMs = pauseMs === -1 ? null : Date.now() + pauseMs;
+      const stateLine = pauseMs === -1
+        ? '状态: 暂停到手动恢复 (POST /api/auto-trade/risk-guard/resume)'
+        : `状态: 暂停 ${(pauseMs / 60000).toFixed(0)} 分钟 (到 ${new Date(Date.now() + pauseMs).toLocaleString('zh-CN', { hour12: false })})`;
+      exec.notify({
+        type: 'error',
+        title: `🛑 连亏熔断触发: 连续 ${newStreak} 次亏损 → 自动暂停交易`,
+        lines: [
+          `本次平仓原因: ${closeReason}`,
+          `连续亏损次数: ${newStreak}`,
+          stateLine,
+          `逻辑: 防止"亏了想翻本"的人性弱点 — 强制冷静期`,
+          `重置: 任意一次 TP 命中 → lossStreak 自动归零`,
+        ],
+        isAlert: true,
+      });
+    }
+  }
+
+  // ============ 本金保护 ============
+  const bg = cfg.balanceGuard;
+  const balance = cfg.accountBalanceUSD;
+  if (bg && bg.enabled && Number.isFinite(balance) && balance < bg.minUSD) {
+    patches.enabled = false;
+    patches.pausedReason = 'balance_guard_below_min';
+    patches.pausedUntilMs = null;  // 需手动恢复
+    exec.notify({
+      type: 'error',
+      title: `🛑 本金保护触发: 余额 ${balance.toFixed(2)} USDT < ${bg.minUSD} USDT`,
+      lines: [
+        `当前余额: ${balance.toFixed(2)} USDT`,
+        `保护下限: ${bg.minUSD} USDT`,
+        `状态: 自动暂停, 必须手动恢复 (POST /api/auto-trade/risk-guard/resume)`,
+        `建议: 复盘策略 / 检查信号源 / 是否需要重充本金或调整方案`,
+      ],
+      isAlert: true,
+    });
+  }
+
+  // ============ 半滚提利润提醒 ============
+  const pw = cfg.profitWithdraw;
+  if (pw && pw.enabled && Number.isFinite(balance)) {
+    const threshold = Number.isFinite(pw.thresholdUSD) ? pw.thresholdUSD : 0.5;
+    if (balance > pw.baselineUSD + threshold) {
+      const recommend = balance - pw.baselineUSD;
+      exec.notify({
+        type: 'tp',
+        title: `💰 半滚提利润提醒 (${direction.toUpperCase()} 平仓后)`,
+        lines: [
+          `本次结算: ${closeReason}`,
+          `当前余额: ${balance.toFixed(2)} USDT`,
+          `留场基线: ${pw.baselineUSD} USDT`,
+          `建议提走: ${recommend.toFixed(2)} USDT 到现货钱包 (锁住盈利)`,
+          `留场: ${pw.baselineUSD} USDT 继续滚仓`,
+          `逻辑: 把"几何含 0 的纯滚仓"改成"固定本金累积法"`,
+          `如何更新余额: POST /api/auto-trade/risk-guard/balance { balance: <number> }`,
+        ],
+      });
+    }
+  }
+
+  if (Object.keys(patches).length > 0) {
+    try { config.patch(patches); } catch (e) { console.error('[trade.risk] _onPositionClosed config.patch 失败:', e?.message || e); }
+  }
+}
+
 async function fireSl(direction, triggerPrice, triggerTag = 'sl', tickTs) {
   if (_inFlight[direction]) return;
   _inFlight[direction] = true;
@@ -993,10 +1329,26 @@ async function fireSl(direction, triggerPrice, triggerTag = 'sl', tickTs) {
 
     const { res, payload } = await exec.fireStopLoss(direction, { trigger: triggerTag });
 
-    const titleEmoji = triggerTag === 'sl_protection' ? '🛡️' : '🔻';
-    const titleText = triggerTag === 'sl_protection'
-      ? `${direction.toUpperCase()} 保本止损触发 (100% 全平)`
-      : `${direction.toUpperCase()} 止损触发 (100% 全平)`;
+    const titleEmoji = (() => {
+      switch (triggerTag) {
+        case 'sl_protection':  return '🛡️';
+        case 'soft_sl_fast':   return '🚨';
+        case 'soft_sl_normal': return '🛑';
+        case 'time_exit_tp1':
+        case 'time_exit_tp2':  return '⏰';
+        default:               return '🔻';
+      }
+    })();
+    const titleText = (() => {
+      switch (triggerTag) {
+        case 'sl_protection':  return `${direction.toUpperCase()} 保本止损触发 (100% 全平)`;
+        case 'soft_sl_fast':   return `${direction.toUpperCase()} 软止损-假插针保护触发 (100% 全平 · 前 3min 极紧 SL)`;
+        case 'soft_sl_normal': return `${direction.toUpperCase()} 软止损-标准窗口触发 (100% 全平 · 反向 ≥ 0.30%)`;
+        case 'time_exit_tp1':  return `${direction.toUpperCase()} 时间退出 (TP1 未达 · 100% 全平 · 释放保证金给下个信号)`;
+        case 'time_exit_tp2':  return `${direction.toUpperCase()} 时间退出 (TP2 未达 · 平剩余仓位)`;
+        default:               return `${direction.toUpperCase()} 止损触发 (100% 全平)`;
+      }
+    })();
     exec.notify({
       type: 'sl',
       title: `${titleEmoji} ${titleText}`,
@@ -1019,6 +1371,16 @@ async function fireSl(direction, triggerPrice, triggerTag = 'sl', tickTs) {
 
     // 推送「交易点位监控系统」: SL 触发 = 完整 payload, comment 标识
     if (Number.isFinite(snapshot.entryPrice)) {
+      const commentPrefix = (() => {
+        switch (triggerTag) {
+          case 'sl_protection': return '保本止损';
+          case 'soft_sl_fast':  return '🚨 软止损(假插针保护)';
+          case 'soft_sl_normal': return '🛑 软止损(标准窗口)';
+          case 'time_exit_tp1': return '⏰ 时间退出(TP1未达)';
+          case 'time_exit_tp2': return '⏰ 时间退出(TP2未达)';
+          default:              return '止损';
+        }
+      })();
       exec.fireMonitorOpen({
         direction,
         entry: snapshot.entryPrice,
@@ -1026,9 +1388,12 @@ async function fireSl(direction, triggerPrice, triggerTag = 'sl', tickTs) {
         tp2: snapshot.tp2,
         tp3: snapshot.tp3,
         sl: snapshot.currentStopLoss,
-        comment: `${triggerTag === 'sl_protection' ? '保本止损' : '止损'} 触发 · auto · 100% 全平`,
+        comment: `${commentPrefix} 触发 · auto · 100% 全平`,
       });
     }
+
+    // ⭐ 风控套件收尾: 清缓存 + 更新 lossStreak + 检查熔断/余额/提利润
+    _onPositionClosed(direction, triggerTag, snapshot);
   } finally {
     _inFlight[direction] = false;
   }
@@ -1047,6 +1412,11 @@ module.exports = {
   // ⭐ Regime 守卫: 暴露给 router /regime-guard 端点 — 用户改了规则/启停后,
   // 路由立即评估一次, 不必等下一轮 30s 定时器.
   evaluateRegimeGuard,
+  // ⭐ 风控套件: 暴露给冒烟测试 / 单元测试用 (业务代码不应直接调)
+  _evaluateRiskGuard,
+  _onPositionClosed,
+  _resetRiskGuardCache,
+  __getRiskGuardCache: (direction) => ({ ..._riskGuardCache[direction] }),
   _reset: () => {
     recentlyFired.long = 0;
     recentlyFired.short = 0;
@@ -1064,6 +1434,8 @@ module.exports = {
     _lastGuardSwitchAt.short = 0;
     _lastRegimeGuardSwitchAt.long = 0;
     _lastRegimeGuardSwitchAt.short = 0;
+    _resetRiskGuardCache('long');
+    _resetRiskGuardCache('short');
     if (_regimeGuardTimer) { clearInterval(_regimeGuardTimer); _regimeGuardTimer = null; }
   },
   __getInFlight: () => ({ ..._inFlight }),       // 仅测试用

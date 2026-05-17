@@ -355,6 +355,40 @@ function closeAndUnlock(direction, reason) {
   return closed;
 }
 
+/**
+ * ⭐ 风控套件专用: 直接改 active 持仓的 currentStopLoss (不做方向校验).
+ *
+ * 与 updateActiveLevels 的区别:
+ *   - updateActiveLevels 会校验 SL 必须严格在第一个未触发 TP 反侧, TP1 未触发时强制 sl < entry,
+ *     适用于"用户手动改价位"场景, 避免误操作.
+ *   - setRiskGuardSl 是 riskEngine 的"保本触发"和"trailing"专用 — 这两个场景需要把 SL 上移到
+ *     entry (TP1 未触发时, sl 不再 < entry) 或 trailing 后超过 entry (TP1 触发后允许).
+ *     这是工具内部精确计算后的合规调整, 不能被通用校验阻拦.
+ *
+ * 安全约束:
+ *   - 仓位非 active → 返回 null
+ *   - newSl 必须是有限正数 → 否则返回 null
+ *   - 不会改 initialStopLoss (保留审计原始值)
+ *
+ * @param {'long'|'short'} direction
+ * @param {number} newSl  新的 currentStopLoss 价格
+ * @param {object} [opts]
+ * @param {string} [opts.reason]  审计标签 ('protect_after_touch' / 'trailing' / etc.)
+ * @returns {object|null}  返回更新后的 position, 或 null
+ */
+function setRiskGuardSl(direction, newSl, opts = {}) {
+  if (!state) load();
+  const p = state[direction];
+  if (!p || !p.active) return null;
+  if (!Number.isFinite(newSl) || newSl <= 0) return null;
+  p.currentStopLoss = newSl;
+  // 在仓位上记一条审计字段, 便于 UI/日志区分 SL 是怎么变到当前值的
+  p.lastSlAdjustReason = opts.reason || 'risk_guard';
+  p.lastSlAdjustAt = new Date().toISOString();
+  save();
+  return p;
+}
+
 /** 手动重置：清空 + 解锁 + 取消所有待触发 TP/SL */
 function manualReset(direction) {
   if (!state) load();
@@ -666,6 +700,7 @@ module.exports = {
   get, getPosition,
   canOpen, openPosition,
   markTpHit, closeAndUnlock, manualReset,
+  setRiskGuardSl,
   // pending 限价待触发
   armPending, cancelPending, markPendingFilled,
   // 手动调整止盈止损

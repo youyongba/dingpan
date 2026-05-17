@@ -973,6 +973,126 @@
   </div>
 </div>
 
+<!-- 🛡 风控套件: 100x × 50% 滚仓 + 24H/4H 清算密集区策略专用保护 -->
+<!-- 复用 regime-guard-bar 的 CSS 类 (.rg-head/.rg-grid/.rg-rule/.rg-config 等) -->
+<div class="regime-guard-bar" id="riskGuardBar" style="margin-top: 14px;">
+  <div class="rg-head">
+    <span class="rg-title">🛡 风控套件 <small>三阶段软SL · 时间退出 · 连亏熔断 · 本金保护 · 半滚提利润</small></span>
+    <span id="riskGuardPauseBadge" style="display:none; padding:4px 10px; border-radius:4px; background:#3d1416; color:#f85149; font-weight:700; font-size:12px;">
+      ⏸ 已暂停 <span id="riskGuardPauseCountdown"></span>
+    </span>
+  </div>
+
+  <!-- 实时状态 -->
+  <div class="rg-status" id="riskGuardStatusLine" style="margin-bottom: 12px;">
+    <span class="rg-status-label">实时:</span>
+    <span class="rg-state idle">连亏: <b id="rgLossStreak" style="color:#e6edf3">0</b></span>
+    <span class="rg-sep">·</span>
+    <span class="rg-state idle">余额: <b id="rgAccountBalance" style="color:#e6edf3">--</b> USDT</span>
+    <span class="rg-sep">·</span>
+    <span id="rgPauseReason" class="rg-meta">未暂停</span>
+  </div>
+
+  <!-- 三阶段软止损配置 -->
+  <div class="rg-grid" style="grid-template-columns: 1fr 1fr 1fr;">
+    <div class="rg-rule">
+      <label class="rg-check">
+        <input type="checkbox" id="rgSoftSlEnabled" />
+        <span><b style="color:#f85149">阶段 1</b>: 假插针软SL (前 N min)</span>
+      </label>
+      <small>fastWindow <input type="number" min="0" max="600000" step="1000" id="rgFastWindowMs" style="width:90px;background:#0d1117;border:1px solid #21262d;color:#e6edf3;padding:2px 4px;border-radius:3px;" /> ms · 反向 ≥
+        <input type="number" min="0.01" max="5" step="0.01" id="rgFastPct" style="width:60px;background:#0d1117;border:1px solid #21262d;color:#e6edf3;padding:2px 4px;border-radius:3px;" /> %
+        触发主动平仓
+      </small>
+    </div>
+    <div class="rg-rule">
+      <label class="rg-check">
+        <span><b style="color:#d29922">阶段 2</b>: 标准软SL (fastWindow 后)</span>
+      </label>
+      <small>反向 ≥
+        <input type="number" min="0.01" max="5" step="0.01" id="rgNormalPct" style="width:60px;background:#0d1117;border:1px solid #21262d;color:#e6edf3;padding:2px 4px;border-radius:3px;" /> %
+        触发主动平仓
+      </small>
+    </div>
+    <div class="rg-rule">
+      <label class="rg-check">
+        <span><b style="color:#3fb950">阶段 3</b>: 保本触发 + trailing</span>
+      </label>
+      <small>顺势 ≥
+        <input type="number" min="0.01" max="5" step="0.01" id="rgProtectPct" style="width:60px;background:#0d1117;border:1px solid #21262d;color:#e6edf3;padding:2px 4px;border-radius:3px;" /> %
+        SL 上移 entry · TP1 后 trailing 步长
+        <input type="number" min="0.01" max="5" step="0.01" id="rgTrailingStepPct" style="width:60px;background:#0d1117;border:1px solid #21262d;color:#e6edf3;padding:2px 4px;border-radius:3px;" /> %
+      </small>
+    </div>
+  </div>
+
+  <!-- 时间退出 / 硬 SL 上限 / 半滚提利润 -->
+  <div class="rg-grid" style="grid-template-columns: 1fr 1fr 1fr; margin-top: 10px;">
+    <div class="rg-rule">
+      <label class="rg-check">
+        <input type="checkbox" id="rgTimeExitEnabled" />
+        <span>⏰ 时间退出</span>
+      </label>
+      <small>
+        TP1 超时 <input type="number" min="60000" max="86400000" step="60000" id="rgTimeExitTp1Ms" style="width:100px;background:#0d1117;border:1px solid #21262d;color:#e6edf3;padding:2px 4px;border-radius:3px;" /> ms ·
+        TP2 超时 <input type="number" min="60000" max="86400000" step="60000" id="rgTimeExitTp2Ms" style="width:100px;background:#0d1117;border:1px solid #21262d;color:#e6edf3;padding:2px 4px;border-radius:3px;" /> ms
+      </small>
+    </div>
+    <div class="rg-rule">
+      <label class="rg-check">
+        <input type="checkbox" id="rgHardSlEnabled" />
+        <span>🛡 硬 SL 上限</span>
+      </label>
+      <small>SL 距离 ≤
+        <input type="number" min="0.01" max="5" step="0.01" id="rgHardSlMaxPct" style="width:60px;background:#0d1117;border:1px solid #21262d;color:#e6edf3;padding:2px 4px;border-radius:3px;" /> %
+        (爆仓距离 0.50% 留 0.10% buffer)
+      </small>
+    </div>
+    <div class="rg-rule">
+      <label class="rg-check">
+        <input type="checkbox" id="rgProfitWithdrawEnabled" />
+        <span>💰 半滚提利润提醒</span>
+      </label>
+      <small>留场基线
+        <input type="number" min="0" max="100000" step="0.5" id="rgProfitBaseline" style="width:80px;background:#0d1117;border:1px solid #21262d;color:#e6edf3;padding:2px 4px;border-radius:3px;" /> USDT
+        · 超过 +0.5U 即推送
+      </small>
+    </div>
+  </div>
+
+  <!-- 连亏熔断 / 本金保护 -->
+  <div class="rg-grid" style="grid-template-columns: 1fr 1fr; margin-top: 10px;">
+    <div class="rg-rule">
+      <label class="rg-check">
+        <input type="checkbox" id="rgLossStreakEnabled" />
+        <span>🚨 连亏熔断</span>
+      </label>
+      <small>连亏 2 次 → 暂停 8h · 连亏 3 次 → 暂停 24h · 连亏 4 次 → 暂停到手动恢复 · 任意 TP 命中重置</small>
+    </div>
+    <div class="rg-rule">
+      <label class="rg-check">
+        <input type="checkbox" id="rgBalanceGuardEnabled" />
+        <span>🛑 本金保护线</span>
+      </label>
+      <small>余额 &lt;
+        <input type="number" min="0" max="100000" step="0.5" id="rgBalanceMinUsd" style="width:80px;background:#0d1117;border:1px solid #21262d;color:#e6edf3;padding:2px 4px;border-radius:3px;" /> USDT
+        → 自动暂停, 必须手动恢复
+      </small>
+    </div>
+  </div>
+
+  <!-- 操作按钮 -->
+  <div class="rg-config" style="gap: 10px;">
+    <label class="rg-config-field">
+      <span>📡 同步余额</span>
+      <input type="number" min="0" max="100000" step="0.01" id="rgBalanceInput" placeholder="USDT" style="width:120px;" />
+      <button class="rg-btn save" id="rgSyncBalanceBtn" style="font-size:12px;">📡 上报</button>
+    </label>
+    <button class="rg-btn save" id="rgSaveRiskBtn" style="font-size:12px;">💾 保存风控配置</button>
+    <button class="rg-btn save" id="rgResumeBtn" style="font-size:12px; display:none;">✅ 手动恢复</button>
+  </div>
+</div>
+
 <!-- 手动交易操作栏: 挂单 + 一键追单 + 一键全平 -->
 <div class="trade-actions-bar">
   <span class="ta-label">手动开仓 (挂单)</span>
@@ -1530,6 +1650,12 @@
         long: autoTrade.regimeAutoDisableLong,
         short: autoTrade.regimeAutoDisableShort,
       }, autoTrade.regimeAutoLastSubRegime, autoTrade.regimeAutoLastConfidence, autoTrade.regimeAutoLastEvalAt);
+
+      // ⭐ 风控套件: 实时状态 + 配置渲染
+      if (j.riskGuard) {
+        autoTrade.riskGuard = j.riskGuard;
+        renderRiskGuard(j.riskGuard);
+      }
     } catch (e) {
       const stateEl = document.getElementById('autoTradeState');
       stateEl.textContent = '后端不可达';
@@ -1888,6 +2014,196 @@
     } catch (e) {
       showToast('err', '❌ Regime 守卫保存失败', e.message || String(e), 6000);
       await fetchAutoTradeStatus();
+    } finally {
+      btn && (btn.disabled = false);
+    }
+  }
+
+  /**
+   * ⭐ 风控套件 UI 渲染.
+   *   入参 = /status 返回的 j.riskGuard:
+   *     { softStopLoss, timeExit, hardSlCap, profitWithdraw, lossStreakBrake, balanceGuard,
+   *       lossStreak, pausedUntilMs, pausedReason, accountBalanceUSD }
+   *
+   *   职责:
+   *     1. 把所有 input/checkbox 的当前值同步到 DOM (用户没在编辑时刷新)
+   *     2. 实时状态行: lossStreak / accountBalance / pausedReason
+   *     3. 暂停徽章 + 倒计时 (pausedUntilMs - now)
+   *     4. "✅ 手动恢复" 按钮的 show/hide
+   */
+  let _rgRenderEditing = false;   // 用户正在编辑输入框时, 暂停 input 值刷新 (避免覆盖用户输入)
+  function renderRiskGuard(rg) {
+    if (!rg) return;
+    const ssl = rg.softStopLoss || {};
+    const te = rg.timeExit || {};
+    const hsl = rg.hardSlCap || {};
+    const pw = rg.profitWithdraw || {};
+    const lsb = rg.lossStreakBrake || {};
+    const bg = rg.balanceGuard || {};
+
+    const setIfNotEditing = (id, val) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      if (document.activeElement === el) return;   // 用户正在编辑这个 input, 不覆盖
+      if (el.type === 'checkbox') el.checked = !!val;
+      else el.value = val == null ? '' : val;
+    };
+
+    setIfNotEditing('rgSoftSlEnabled', ssl.enabled);
+    setIfNotEditing('rgFastWindowMs', ssl.fastWindowMs);
+    setIfNotEditing('rgFastPct', ssl.fastPct);
+    setIfNotEditing('rgNormalPct', ssl.normalPct);
+    setIfNotEditing('rgProtectPct', ssl.protectAfterTouchPct);
+    setIfNotEditing('rgTrailingStepPct', ssl.trailingAfterTp1?.stepPct);
+
+    setIfNotEditing('rgTimeExitEnabled', te.enabled);
+    setIfNotEditing('rgTimeExitTp1Ms', te.beforeTp1Ms);
+    setIfNotEditing('rgTimeExitTp2Ms', te.beforeTp2Ms);
+
+    setIfNotEditing('rgHardSlEnabled', hsl.enabled);
+    setIfNotEditing('rgHardSlMaxPct', hsl.maxDistancePct);
+
+    setIfNotEditing('rgProfitWithdrawEnabled', pw.enabled);
+    setIfNotEditing('rgProfitBaseline', pw.baselineUSD);
+
+    setIfNotEditing('rgLossStreakEnabled', lsb.enabled);
+
+    setIfNotEditing('rgBalanceGuardEnabled', bg.enabled);
+    setIfNotEditing('rgBalanceMinUsd', bg.minUSD);
+
+    // 实时状态
+    const lossEl = document.getElementById('rgLossStreak');
+    if (lossEl) {
+      lossEl.textContent = rg.lossStreak || 0;
+      lossEl.style.color = (rg.lossStreak || 0) >= 2 ? '#f85149' : '#e6edf3';
+    }
+    const balEl = document.getElementById('rgAccountBalance');
+    if (balEl) {
+      const bal = rg.accountBalanceUSD;
+      if (Number.isFinite(bal)) {
+        balEl.textContent = bal.toFixed(2);
+        balEl.style.color = bal < (bg.minUSD || 0) ? '#f85149' : (bal > (pw.baselineUSD || 0) + 0.5 ? '#3fb950' : '#e6edf3');
+      } else {
+        balEl.textContent = '--';
+        balEl.style.color = '#8b949e';
+      }
+    }
+
+    const pauseEl = document.getElementById('rgPauseReason');
+    const pauseBadge = document.getElementById('riskGuardPauseBadge');
+    const resumeBtn = document.getElementById('rgResumeBtn');
+    const countdownEl = document.getElementById('riskGuardPauseCountdown');
+    const isPaused = !!rg.pausedReason;
+    if (isPaused) {
+      const reasonZh = ({
+        'loss_streak_2': '连亏 2 次',
+        'loss_streak_3': '连亏 3 次',
+        'loss_streak_4': '连亏 4 次 (需手动恢复)',
+        'balance_guard_below_min': `余额 < ${bg.minUSD}U (本金保护)`,
+      })[rg.pausedReason] || rg.pausedReason;
+      pauseEl.textContent = `🛑 已暂停: ${reasonZh}`;
+      pauseEl.style.color = '#f85149';
+      pauseBadge.style.display = 'inline-block';
+      resumeBtn.style.display = 'inline-block';
+      // 倒计时
+      if (Number.isFinite(rg.pausedUntilMs) && rg.pausedUntilMs > Date.now()) {
+        const remainMs = rg.pausedUntilMs - Date.now();
+        const h = Math.floor(remainMs / 3600000);
+        const m = Math.floor((remainMs % 3600000) / 60000);
+        countdownEl.textContent = `${h}h${m}m 后自动恢复`;
+      } else if (rg.pausedUntilMs == null) {
+        countdownEl.textContent = '需手动恢复';
+      } else {
+        countdownEl.textContent = '即将自动恢复';
+      }
+    } else {
+      pauseEl.textContent = '✅ 未暂停';
+      pauseEl.style.color = '#3fb950';
+      pauseBadge.style.display = 'none';
+      resumeBtn.style.display = 'none';
+    }
+  }
+
+  /** ⭐ 保存风控套件配置 (POST /risk-guard, admin token). */
+  async function saveRiskGuardConfig() {
+    const body = {
+      softStopLoss: {
+        enabled: !!document.getElementById('rgSoftSlEnabled')?.checked,
+        fastWindowMs: parseInt(document.getElementById('rgFastWindowMs')?.value, 10),
+        fastPct: parseFloat(document.getElementById('rgFastPct')?.value),
+        normalPct: parseFloat(document.getElementById('rgNormalPct')?.value),
+        protectAfterTouchPct: parseFloat(document.getElementById('rgProtectPct')?.value),
+        trailingAfterTp1: {
+          enabled: true,
+          stepPct: parseFloat(document.getElementById('rgTrailingStepPct')?.value),
+        },
+      },
+      timeExit: {
+        enabled: !!document.getElementById('rgTimeExitEnabled')?.checked,
+        beforeTp1Ms: parseInt(document.getElementById('rgTimeExitTp1Ms')?.value, 10),
+        beforeTp2Ms: parseInt(document.getElementById('rgTimeExitTp2Ms')?.value, 10),
+      },
+      hardSlCap: {
+        enabled: !!document.getElementById('rgHardSlEnabled')?.checked,
+        maxDistancePct: parseFloat(document.getElementById('rgHardSlMaxPct')?.value),
+      },
+      profitWithdraw: {
+        enabled: !!document.getElementById('rgProfitWithdrawEnabled')?.checked,
+        baselineUSD: parseFloat(document.getElementById('rgProfitBaseline')?.value),
+      },
+      lossStreakBrake: {
+        enabled: !!document.getElementById('rgLossStreakEnabled')?.checked,
+      },
+      balanceGuard: {
+        enabled: !!document.getElementById('rgBalanceGuardEnabled')?.checked,
+        minUSD: parseFloat(document.getElementById('rgBalanceMinUsd')?.value),
+      },
+    };
+    const btn = document.getElementById('rgSaveRiskBtn');
+    btn && (btn.disabled = true);
+    try {
+      const j = await callAdminApi('/api/auto-trade/risk-guard', body);
+      if (j.riskGuard) renderRiskGuard(j.riskGuard);
+      showToast('ok', '🛡 风控套件配置已保存', '所有参数已写盘, 立即生效', 4000);
+    } catch (e) {
+      showToast('err', '❌ 风控配置保存失败', e.message || String(e), 6000);
+      await fetchAutoTradeStatus();
+    } finally {
+      btn && (btn.disabled = false);
+    }
+  }
+
+  /** ⭐ 上报当前账户余额 (USDT, 用于 balanceGuard / profitWithdraw 判定). */
+  async function syncRiskGuardBalance() {
+    const v = parseFloat(document.getElementById('rgBalanceInput')?.value);
+    if (!Number.isFinite(v) || v < 0) {
+      showToast('err', '❌ 余额输入无效', '请输入 ≥ 0 的数字 (USDT)', 4000);
+      return;
+    }
+    const btn = document.getElementById('rgSyncBalanceBtn');
+    btn && (btn.disabled = true);
+    try {
+      const j = await callAdminApi('/api/auto-trade/risk-guard/balance', { balance: v });
+      showToast('ok', '📡 余额已上报', `accountBalanceUSD = ${j.accountBalanceUSD?.toFixed?.(2)} USDT`, 4000);
+      await fetchAutoTradeStatus();
+    } catch (e) {
+      showToast('err', '❌ 余额上报失败', e.message || String(e), 6000);
+    } finally {
+      btn && (btn.disabled = false);
+    }
+  }
+
+  /** ⭐ 手动恢复风控暂停状态. */
+  async function resumeRiskGuard() {
+    if (!confirm('确认手动恢复风控暂停? 这会清空 lossStreak 计数, enabled 重设为 true.')) return;
+    const btn = document.getElementById('rgResumeBtn');
+    btn && (btn.disabled = true);
+    try {
+      const j = await callAdminApi('/api/auto-trade/risk-guard/resume', { resetLossStreak: true });
+      showToast('ok', '✅ 风控套件已手动恢复', `enabled=${j.enabled} · lossStreak=${j.lossStreak}`, 5000);
+      await fetchAutoTradeStatus();
+    } catch (e) {
+      showToast('err', '❌ 恢复失败', e.message || String(e), 6000);
     } finally {
       btn && (btn.disabled = false);
     }
@@ -3597,6 +3913,15 @@
   document.getElementById('rgMinSwitchMs').addEventListener('change', saveRegimeGuardRules);
   // 显式保存按钮 (备用入口, 强制保存全部当前 UI 状态)
   document.getElementById('rgSaveBtn').addEventListener('click', saveRegimeGuardRules);
+
+  // ⭐ 风控套件按钮绑定
+  const rgSaveRiskBtn = document.getElementById('rgSaveRiskBtn');
+  if (rgSaveRiskBtn) rgSaveRiskBtn.addEventListener('click', saveRiskGuardConfig);
+  const rgSyncBalanceBtn = document.getElementById('rgSyncBalanceBtn');
+  if (rgSyncBalanceBtn) rgSyncBalanceBtn.addEventListener('click', syncRiskGuardBalance);
+  const rgResumeBtn = document.getElementById('rgResumeBtn');
+  if (rgResumeBtn) rgResumeBtn.addEventListener('click', resumeRiskGuard);
+
   document.getElementById('resetLongBtn').addEventListener('click', () => resetDirection('long'));
   document.getElementById('resetShortBtn').addEventListener('click', () => resetDirection('short'));
 

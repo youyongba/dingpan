@@ -275,6 +275,43 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+/**
+ * ⭐ 风控套件: 入场前强制 SL 距离上限.
+ *
+ * 100x × 50% 下爆仓距离 ≈ 0.50%, 若 ATR 算的 SL 距离 > 0.40% (留 0.10% buffer),
+ * 必爆仓在前 SL 在后 — SL 等于失效. 此函数把 SL 强制收紧到 maxDistancePct% 内,
+ * 让外部交易所那边的 SL 永远早于爆仓触发.
+ *
+ * 工具内部的"软止损"会先于这个硬 SL 触发 (软SL 0.15%/0.30% < 0.40%),
+ * 这层是兜底 — 万一软SL 因网络延迟漏触发, 这层兜住.
+ *
+ * @param {string} direction
+ * @param {number} entry
+ * @param {number} sl       原 SL (ATR 算的)
+ * @param {number} maxDistancePct  上限百分比 (例如 0.40)
+ * @returns {{capped: boolean, sl: number, originalSl: number, distancePct: number}}
+ */
+function applyHardSlCap(direction, entry, sl, maxDistancePct) {
+  if (!Number.isFinite(entry) || entry <= 0 || !Number.isFinite(sl) || sl <= 0) {
+    return { capped: false, sl, originalSl: sl, distancePct: null };
+  }
+  if (!Number.isFinite(maxDistancePct) || maxDistancePct <= 0) {
+    return { capped: false, sl, originalSl: sl, distancePct: null };
+  }
+  const isLong = direction === 'long';
+  const distancePct = Math.abs((entry - sl) / entry) * 100;
+  if (distancePct <= maxDistancePct) {
+    return { capped: false, sl, originalSl: sl, distancePct };
+  }
+  // 收紧 SL 到 maxDistancePct% 内
+  const newSl = isLong
+    ? entry * (1 - maxDistancePct / 100)
+    : entry * (1 + maxDistancePct / 100);
+  // 数值精度: 与 computeManualFallbackLevels 的 round2 保持一致
+  const round2 = (n) => Math.round(n * 100) / 100;
+  return { capped: true, sl: round2(newSl), originalSl: sl, distancePct };
+}
+
 /** 解析 "1%" → 1, 1 → 1 */
 function parsePercent(v) {
   if (v == null) return null;
@@ -481,6 +518,23 @@ async function processSignal(sig, opts = {}) {
     // 手动追单 / 手动开仓回退方案显式标记, 便于 UI/TG/飞书 区分价位来源
     if (sig._priceSource) source = sig._priceSource;
 
+    // ⭐ 风控套件: hardSlCap — 入场前强制 SL 距离 ≤ maxDistancePct%
+    //   对 100x × 50% 滚仓, 爆仓距离 ≈ 0.50%, ATR 算的 SL 距离 0.6%+ 就必爆仓在前.
+    //   此处把 SL 收紧到 0.40% (留 0.10% buffer), 让外部交易所 SL 早于爆仓触发.
+    //   pending 模式: 用 planEntry 应用一次, 直接落到 plan.sl
+    //   immediate 模式: 由于 entryPrice 后续会变成 marketPrice, 还会在 line ~634 之后再应用一次
+    let hardSlCapApplied = null;
+    if (cfg.hardSlCap?.enabled && Number.isFinite(sl) && Number.isFinite(entryPrice)) {
+      const cap = applyHardSlCap(direction, entryPrice, sl, cfg.hardSlCap.maxDistancePct);
+      if (cap.capped) {
+        console.log(`[trade.router] 🛡 hardSlCap (pending phase): ${direction} entry=${entryPrice} 原SL=${cap.originalSl}(距${cap.distancePct.toFixed(3)}%) → 收紧到 SL=${cap.sl}(距${cfg.hardSlCap.maxDistancePct}%)`);
+        sl = cap.sl;
+        // sig.stop_loss 同步收紧, 让 plan.raw 与 plan.sl 一致, firePendingFill 时 webhook 推出去的 SL 也是收紧后的
+        sig.stop_loss = sl;
+        hardSlCapApplied = cap;
+      }
+    }
+
     const isLong = direction === 'long';
     const slOk = isLong ? sl < entryPrice : sl > entryPrice;
     const tpOk = isLong
@@ -595,6 +649,21 @@ async function processSignal(sig, opts = {}) {
     // ============ immediate 模式 (旧行为, 完整保留) ============
     // 此模式下 entry 用当下市价, 立即推 forwardOpen webhook + 写 active 仓位.
     if (source === 'regime_plan') entryPrice = marketPrice;  // immediate 走市价
+
+    // ⭐ 风控套件: hardSlCap (immediate phase) — entryPrice 已变成 marketPrice,
+    //   plan 的 sl 是基于 planEntry (回踩 0.5×ATR 后) 算的, 距离 marketPrice 实际 = 2.0×ATR,
+    //   往往超过 maxDistancePct%. 这里再应用一次, 用真实入场价收紧 sl.
+    if (cfg.hardSlCap?.enabled && Number.isFinite(sl) && Number.isFinite(entryPrice)) {
+      const cap = applyHardSlCap(direction, entryPrice, sl, cfg.hardSlCap.maxDistancePct);
+      if (cap.capped) {
+        console.log(`[trade.router] 🛡 hardSlCap (immediate phase): ${direction} entry=${entryPrice} 原SL=${cap.originalSl}(距${cap.distancePct.toFixed(3)}%) → 收紧到 SL=${cap.sl}(距${cfg.hardSlCap.maxDistancePct}%)`);
+        sl = cap.sl;
+        hardSlCapApplied = cap;
+      }
+    }
+
+    // sig.stop_loss 也要同步, 这样 forwardOpen webhook 推给外部下单端的 SL 是收紧后的
+    if (hardSlCapApplied) sig.stop_loss = sl;
 
     const pos = state.openPosition(direction, {
       entryPrice,
@@ -816,6 +885,23 @@ router.get('/status', (req, res) => {
     regimeAutoLastSubRegime: cfg.regimeAutoLastSubRegime || null,
     regimeAutoLastConfidence: cfg.regimeAutoLastConfidence || null,
     regimeAutoLastEvalAt: cfg.regimeAutoLastEvalAt || null,
+    // ⭐ 风控套件 — 配置 + 实时状态:
+    //   softStopLoss / timeExit / hardSlCap / profitWithdraw / lossStreakBrake / balanceGuard 配置
+    //   lossStreak / pausedUntilMs / pausedReason / accountBalanceUSD 实时状态
+    //   UI 用这些字段渲染"风控套件"卡片 + 输入框热更新.
+    riskGuard: {
+      softStopLoss: cfg.softStopLoss || null,
+      timeExit: cfg.timeExit || null,
+      hardSlCap: cfg.hardSlCap || null,
+      profitWithdraw: cfg.profitWithdraw || null,
+      lossStreakBrake: cfg.lossStreakBrake || null,
+      balanceGuard: cfg.balanceGuard || null,
+      // 实时状态 (riskEngine 自动写入)
+      lossStreak: cfg.lossStreak || 0,
+      pausedUntilMs: cfg.pausedUntilMs || null,
+      pausedReason: cfg.pausedReason || null,
+      accountBalanceUSD: Number.isFinite(cfg.accountBalanceUSD) ? cfg.accountBalanceUSD : null,
+    },
     priceFeed: priceFeed.getStatus(),
     positions: state.get(),
     // ⭐ 价格触发器 (后端 WS 监听 + disk 持久化, 浏览器关掉也会触发)
@@ -2191,6 +2277,247 @@ router.post('/regime-guard', (req, res) => {
     regimeAutoLastSubRegime: finalCfg.regimeAutoLastSubRegime || null,
     regimeAutoLastConfidence: finalCfg.regimeAutoLastConfidence || null,
     regimeAutoLastEvalAt: finalCfg.regimeAutoLastEvalAt || null,
+  });
+});
+
+// ============ POST /risk-guard ============
+//
+// 配置风控套件 — UI 热更新入口. body 任意子段都允许部分更新:
+//   {
+//     softStopLoss: { enabled?, fastWindowMs?, fastPct?, normalPct?, protectAfterTouchPct?,
+//                     trailingAfterTp1: { enabled?, stepPct? } },
+//     timeExit: { enabled?, beforeTp1Ms?, beforeTp2Ms?, onlyIfLossingPct? },
+//     hardSlCap: { enabled?, maxDistancePct? },
+//     profitWithdraw: { enabled?, baselineUSD?, thresholdUSD? },
+//     lossStreakBrake: { enabled?, thresholds? },
+//     balanceGuard: { enabled?, minUSD? },
+//   }
+//
+// 校验关键: 数值字段必须正数, ms 字段必须是合理时长, 否则 400.
+// 走 config.patch (deepMerge), 不会清空未提供的子字段.
+router.post('/risk-guard', requireAdmin, (req, res) => {
+  const body = req.body || {};
+  const patch = {};
+  const issues = [];
+
+  // ---------- softStopLoss ----------
+  if (body.softStopLoss && typeof body.softStopLoss === 'object') {
+    const ssl = {};
+    const s = body.softStopLoss;
+    if (s.enabled != null) ssl.enabled = !!s.enabled;
+    if (s.fastWindowMs != null) {
+      const v = parseInt(s.fastWindowMs, 10);
+      if (!Number.isFinite(v) || v < 0 || v > 600000) {
+        issues.push('softStopLoss.fastWindowMs must be 0~600000');
+      } else { ssl.fastWindowMs = v; }
+    }
+    if (s.fastPct != null) {
+      const v = parseFloat(s.fastPct);
+      if (!Number.isFinite(v) || v <= 0 || v > 5) {
+        issues.push('softStopLoss.fastPct must be 0~5');
+      } else { ssl.fastPct = v; }
+    }
+    if (s.normalPct != null) {
+      const v = parseFloat(s.normalPct);
+      if (!Number.isFinite(v) || v <= 0 || v > 5) {
+        issues.push('softStopLoss.normalPct must be 0~5');
+      } else { ssl.normalPct = v; }
+    }
+    if (s.protectAfterTouchPct != null) {
+      const v = parseFloat(s.protectAfterTouchPct);
+      if (!Number.isFinite(v) || v <= 0 || v > 5) {
+        issues.push('softStopLoss.protectAfterTouchPct must be 0~5');
+      } else { ssl.protectAfterTouchPct = v; }
+    }
+    if (s.trailingAfterTp1 && typeof s.trailingAfterTp1 === 'object') {
+      const t = {};
+      if (s.trailingAfterTp1.enabled != null) t.enabled = !!s.trailingAfterTp1.enabled;
+      if (s.trailingAfterTp1.stepPct != null) {
+        const v = parseFloat(s.trailingAfterTp1.stepPct);
+        if (!Number.isFinite(v) || v <= 0 || v > 5) {
+          issues.push('softStopLoss.trailingAfterTp1.stepPct must be 0~5');
+        } else { t.stepPct = v; }
+      }
+      if (Object.keys(t).length > 0) ssl.trailingAfterTp1 = t;
+    }
+    if (Object.keys(ssl).length > 0) patch.softStopLoss = ssl;
+  }
+
+  // ---------- timeExit ----------
+  if (body.timeExit && typeof body.timeExit === 'object') {
+    const te = {};
+    const t = body.timeExit;
+    if (t.enabled != null) te.enabled = !!t.enabled;
+    if (t.beforeTp1Ms != null) {
+      const v = parseInt(t.beforeTp1Ms, 10);
+      if (!Number.isFinite(v) || v < 60000 || v > 86400000) {
+        issues.push('timeExit.beforeTp1Ms must be 60000~86400000');
+      } else { te.beforeTp1Ms = v; }
+    }
+    if (t.beforeTp2Ms != null) {
+      const v = parseInt(t.beforeTp2Ms, 10);
+      if (!Number.isFinite(v) || v < 60000 || v > 86400000) {
+        issues.push('timeExit.beforeTp2Ms must be 60000~86400000');
+      } else { te.beforeTp2Ms = v; }
+    }
+    if (t.onlyIfLossingPct !== undefined) {
+      if (t.onlyIfLossingPct === null) te.onlyIfLossingPct = null;
+      else {
+        const v = parseFloat(t.onlyIfLossingPct);
+        if (!Number.isFinite(v) || v < 0 || v > 5) {
+          issues.push('timeExit.onlyIfLossingPct must be null or 0~5');
+        } else { te.onlyIfLossingPct = v; }
+      }
+    }
+    if (Object.keys(te).length > 0) patch.timeExit = te;
+  }
+
+  // ---------- hardSlCap ----------
+  if (body.hardSlCap && typeof body.hardSlCap === 'object') {
+    const h = {};
+    if (body.hardSlCap.enabled != null) h.enabled = !!body.hardSlCap.enabled;
+    if (body.hardSlCap.maxDistancePct != null) {
+      const v = parseFloat(body.hardSlCap.maxDistancePct);
+      if (!Number.isFinite(v) || v <= 0 || v > 5) {
+        issues.push('hardSlCap.maxDistancePct must be 0~5');
+      } else { h.maxDistancePct = v; }
+    }
+    if (Object.keys(h).length > 0) patch.hardSlCap = h;
+  }
+
+  // ---------- profitWithdraw ----------
+  if (body.profitWithdraw && typeof body.profitWithdraw === 'object') {
+    const p = {};
+    if (body.profitWithdraw.enabled != null) p.enabled = !!body.profitWithdraw.enabled;
+    if (body.profitWithdraw.baselineUSD != null) {
+      const v = parseFloat(body.profitWithdraw.baselineUSD);
+      if (!Number.isFinite(v) || v <= 0 || v > 1e9) {
+        issues.push('profitWithdraw.baselineUSD must be 0~1e9');
+      } else { p.baselineUSD = v; }
+    }
+    if (body.profitWithdraw.thresholdUSD != null) {
+      const v = parseFloat(body.profitWithdraw.thresholdUSD);
+      if (!Number.isFinite(v) || v <= 0 || v > 1e9) {
+        issues.push('profitWithdraw.thresholdUSD must be 0~1e9');
+      } else { p.thresholdUSD = v; }
+    }
+    if (Object.keys(p).length > 0) patch.profitWithdraw = p;
+  }
+
+  // ---------- lossStreakBrake ----------
+  if (body.lossStreakBrake && typeof body.lossStreakBrake === 'object') {
+    const l = {};
+    if (body.lossStreakBrake.enabled != null) l.enabled = !!body.lossStreakBrake.enabled;
+    if (body.lossStreakBrake.thresholds && typeof body.lossStreakBrake.thresholds === 'object') {
+      // 校验每个 key/value
+      const cleaned = {};
+      let bad = false;
+      for (const k of Object.keys(body.lossStreakBrake.thresholds)) {
+        if (!/^\d+$/.test(k) || parseInt(k, 10) < 1 || parseInt(k, 10) > 100) { bad = true; break; }
+        const v = body.lossStreakBrake.thresholds[k];
+        const vNum = parseInt(v, 10);
+        if (!Number.isFinite(vNum) || (vNum !== -1 && (vNum < 0 || vNum > 30 * 86400000))) { bad = true; break; }
+        cleaned[k] = vNum;
+      }
+      if (bad) issues.push('lossStreakBrake.thresholds keys must be "1"~"100", values -1 or 0~30days(ms)');
+      else l.thresholds = cleaned;
+    }
+    if (Object.keys(l).length > 0) patch.lossStreakBrake = l;
+  }
+
+  // ---------- balanceGuard ----------
+  if (body.balanceGuard && typeof body.balanceGuard === 'object') {
+    const b = {};
+    if (body.balanceGuard.enabled != null) b.enabled = !!body.balanceGuard.enabled;
+    if (body.balanceGuard.minUSD != null) {
+      const v = parseFloat(body.balanceGuard.minUSD);
+      if (!Number.isFinite(v) || v < 0 || v > 1e9) {
+        issues.push('balanceGuard.minUSD must be 0~1e9');
+      } else { b.minUSD = v; }
+    }
+    if (Object.keys(b).length > 0) patch.balanceGuard = b;
+  }
+
+  if (issues.length > 0) {
+    return res.status(400).json({ ok: false, errors: issues });
+  }
+  if (Object.keys(patch).length === 0) {
+    return res.status(400).json({ ok: false, error: 'no_changes' });
+  }
+
+  config.patch(patch);
+  const finalCfg = config.get();
+  console.log('[trade.router] /risk-guard updated:', JSON.stringify(patch));
+  res.json({
+    ok: true,
+    riskGuard: {
+      softStopLoss: finalCfg.softStopLoss,
+      timeExit: finalCfg.timeExit,
+      hardSlCap: finalCfg.hardSlCap,
+      profitWithdraw: finalCfg.profitWithdraw,
+      lossStreakBrake: finalCfg.lossStreakBrake,
+      balanceGuard: finalCfg.balanceGuard,
+      lossStreak: finalCfg.lossStreak || 0,
+      pausedUntilMs: finalCfg.pausedUntilMs || null,
+      pausedReason: finalCfg.pausedReason || null,
+      accountBalanceUSD: Number.isFinite(finalCfg.accountBalanceUSD) ? finalCfg.accountBalanceUSD : null,
+    },
+  });
+});
+
+// ============ POST /risk-guard/balance ============
+//
+// 用户上报当前账户余额 (USDT). 用于 balanceGuard / profitWithdraw 判定.
+//
+// body: { balance: <number> }
+//
+// ⚠️ 工具不会自动从交易所 API 拉余额 — 用户需要主动 POST 这个端点 (UI 上有"同步余额"按钮),
+//   或者每次 fill/close 后自己估算. 工具内部不维护"自动估算余额", 因为接收方协议不一致,
+//   工具不知道实际成交价/手续费. 让用户做 source of truth, 工具只用它做判定.
+router.post('/risk-guard/balance', requireAdmin, (req, res) => {
+  const v = parseFloat(req.body?.balance);
+  if (!Number.isFinite(v) || v < 0 || v > 1e9) {
+    return res.status(400).json({ ok: false, error: 'balance must be 0~1e9 (USDT)' });
+  }
+  config.patch({ accountBalanceUSD: v });
+  console.log(`[trade.router] /risk-guard/balance updated: accountBalanceUSD=${v}`);
+  res.json({ ok: true, accountBalanceUSD: v });
+});
+
+// ============ POST /risk-guard/resume ============
+//
+// 手动恢复风控暂停. 用于 lossStreakBrake -1 (手动暂停) 或 balanceGuard 触发后的恢复.
+// body: { resetLossStreak?: boolean (默认 true) }
+router.post('/risk-guard/resume', requireAdmin, (req, res) => {
+  const cfg = config.get();
+  if (cfg.enabled && !cfg.pausedUntilMs && !cfg.pausedReason) {
+    return res.json({ ok: true, message: '已经处于运行状态, 无需恢复', enabled: true });
+  }
+  const resetLossStreak = req.body?.resetLossStreak !== false;
+  const patch = {
+    enabled: true,
+    pausedUntilMs: null,
+    pausedReason: null,
+  };
+  if (resetLossStreak) patch.lossStreak = 0;
+  config.patch(patch);
+  console.log(`[trade.router] /risk-guard/resume: enabled=true, lossStreak ${resetLossStreak ? 'reset' : 'kept'}`);
+  exec.notify({
+    type: 'unlock',
+    title: `✅ 风控套件已手动恢复`,
+    lines: [
+      `先前暂停原因: ${cfg.pausedReason || '--'}`,
+      `状态: enabled=true · lossStreak=${resetLossStreak ? 0 : (cfg.lossStreak || 0)}`,
+      `继续接收交易信号`,
+    ],
+  });
+  const finalCfg = config.get();
+  res.json({
+    ok: true,
+    enabled: finalCfg.enabled,
+    lossStreak: finalCfg.lossStreak || 0,
+    pausedUntilMs: finalCfg.pausedUntilMs || null,
+    pausedReason: finalCfg.pausedReason || null,
   });
 });
 

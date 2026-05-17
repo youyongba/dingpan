@@ -80,6 +80,76 @@ const DEFAULT_CONFIG = {
   regimeAutoLastSubRegime: null,             // 'STRONG_BULL' / 'STRONG_BEAR' / 'PANIC' / ...
   regimeAutoLastConfidence: null,            // 'low' / 'medium' / 'high'
   regimeAutoLastEvalAt: null,                // 上次评估时间 (ms)
+  // ============================================================
+  // ⭐ 风控套件 (riskGuard) — 100x × 50% 滚仓 + 24H/4H 清算密集区策略专用保护
+  // ============================================================
+  // 设计目标: 在不改杠杆/仓位的前提下, 用代码层把"必爆仓"事件砍到 < 3%,
+  // 单笔最大常规亏损从 -50% (爆仓) 降到 -15% / -30% (主动软止损).
+  //
+  // 总开关: softStopLoss.enabled + timeExit.enabled + 各子模块 .enabled 都 true 才生效.
+  // ============================================================
+  softStopLoss: {
+    enabled: true,
+    // 阶段 1 (假插针窗口): 入场后 fastWindowMs 毫秒内, 价格反向 ≥ fastPct% → 主动市价平仓.
+    // 默认 3 分钟, 0.15% — 70% 的有效反弹在前 3min 启动, 还在亏 0.15% 大概率假信号.
+    fastWindowMs: 180000,
+    fastPct: 0.15,
+    // 阶段 2 (标准窗口): fastWindowMs 之后, 价格反向 ≥ normalPct% → 主动平仓.
+    // 离 100x × 50% 爆仓距离 0.50% 还有 0.20% buffer.
+    normalPct: 0.30,
+    // 阶段 3 (保本触发): 价格走我方向 ≥ protectAfterTouchPct% 后,
+    //   把工具内部的 currentStopLoss 上移到 entryPrice (保本).
+    //   后续若回踩 entry → fireSl(soft_sl_protect) 主动平仓, 不会亏本金.
+    protectAfterTouchPct: 0.10,
+    // TP1 触发后的 trailing: 价格每多走 stepPct% 顺势 → SL 跟着上移 stepPct%
+    trailingAfterTp1: {
+      enabled: true,
+      stepPct: 0.20,
+    },
+  },
+  // ⭐ 时间退出 (密集区策略专属): 反弹窗口过了就主动平仓, 释放保证金给下个信号.
+  timeExit: {
+    enabled: true,
+    beforeTp1Ms: 600000,       // 10min 未触 TP1 → 全平仓
+    beforeTp2Ms: 3600000,      // 60min 未触 TP2 → 平剩余仓位
+    // 若设为数字, 仅当浮亏 > 该% 时退出 (避免浮赢窗口被切)
+    // null = 任意盈亏都按时间退出
+    onlyIfLossingPct: null,
+  },
+  // ⭐ 硬 SL 上限: 入场前强制 SL 距离 ≤ maxDistancePct%.
+  // 覆盖 ATR 算的 SL — 100x × 50% 下 ATR 0.27%+ 时 1.5×ATR 已超爆仓距离 0.50%.
+  hardSlCap: {
+    enabled: true,
+    maxDistancePct: 0.40,      // 比爆仓距离 0.50% 紧 0.10%
+  },
+  // ⭐ 半滚提利润提醒: 平仓后余额 > baselineUSD + thresholdUSD → 推送飞书 + TG.
+  // 配合用户严格执行"赚了就提走, 留场永远 baselineUSD"的纪律, 把"几何含 0 的纯滚仓"
+  // 改成"固定本金累积法".
+  profitWithdraw: {
+    enabled: true,
+    baselineUSD: 10,           // 留场基线 (用户的 10U 滚仓本金)
+    thresholdUSD: 0.5,         // 超过基线 0.5U 即推送
+  },
+  // ⭐ 连亏熔断: 连续 N 次软SL/爆仓 → 自动 cfg.enabled=false 暂停 X 毫秒.
+  // key = 连亏次数 (字符串, JSON 友好), value = 暂停毫秒数; -1 = 暂停到手动恢复.
+  // 任意一次 TP 命中重置 lossStreak=0.
+  lossStreakBrake: {
+    enabled: true,
+    thresholds: { '2': 28800000, '3': 86400000, '4': -1 },
+  },
+  // ⭐ 本金保护线: 余额 < minUSD → cfg.enabled=false (强制停, 等手动恢复).
+  // 防止把 10U 全亏完, 留种子重启.
+  balanceGuard: {
+    enabled: true,
+    minUSD: 3.0,
+  },
+  // 由 riskEngine 自动写入, 用户不应直接 patch:
+  lossStreak: 0,                              // 连续亏损笔数 (软SL/硬SL/爆仓)
+  pausedUntilMs: null,                        // 暂停到该时间戳 (ms), 超过后 enabled 自动恢复
+  pausedReason: null,                         // 'loss_streak_2' / 'balance_guard' / etc.
+  // 账户余额 (USDT) — 由用户通过 POST /risk-guard/balance 上报, 或在 fill/close 时手动 patch.
+  // riskEngine 用它做 balanceGuard / profitWithdraw 判定.
+  accountBalanceUSD: null,
   symbol: 'BTCUSDT',                          // 监听符号
   // ↓↓↓ 用户在需求里固定的两条默认配置
   webhookUrl: 'https://transpenetrable-shantel-unabortively.ngrok-free.dev/webhook/wh_d113d9b4d838dbd635d4c19c3f0c51d9',
@@ -229,6 +299,79 @@ function load() {
     fromEnv.regimeGuard.minConfidence = minConf;
   }
 
+  // 风控套件 .env 覆盖 (优先级: env > disk > default).
+  // 想 UI 热更新走 POST /risk-guard, 不要靠 .env (改 .env 要重启).
+  const _ssl = (k) => process.env[k];
+  if (_ssl('AUTO_TRADE_SOFT_SL_ENABLED') != null) {
+    fromEnv.softStopLoss = fromEnv.softStopLoss || {};
+    fromEnv.softStopLoss.enabled = _ssl('AUTO_TRADE_SOFT_SL_ENABLED') === '1';
+  }
+  const sslFastWin = parseInt(_ssl('AUTO_TRADE_SOFT_SL_FAST_WINDOW_MS'), 10);
+  if (Number.isFinite(sslFastWin) && sslFastWin > 0) {
+    fromEnv.softStopLoss = fromEnv.softStopLoss || {};
+    fromEnv.softStopLoss.fastWindowMs = sslFastWin;
+  }
+  const sslFastPct = parseFloat(_ssl('AUTO_TRADE_SOFT_SL_FAST_PCT'));
+  if (Number.isFinite(sslFastPct) && sslFastPct > 0) {
+    fromEnv.softStopLoss = fromEnv.softStopLoss || {};
+    fromEnv.softStopLoss.fastPct = sslFastPct;
+  }
+  const sslNormPct = parseFloat(_ssl('AUTO_TRADE_SOFT_SL_NORMAL_PCT'));
+  if (Number.isFinite(sslNormPct) && sslNormPct > 0) {
+    fromEnv.softStopLoss = fromEnv.softStopLoss || {};
+    fromEnv.softStopLoss.normalPct = sslNormPct;
+  }
+  const sslProtectPct = parseFloat(_ssl('AUTO_TRADE_SOFT_SL_PROTECT_PCT'));
+  if (Number.isFinite(sslProtectPct) && sslProtectPct > 0) {
+    fromEnv.softStopLoss = fromEnv.softStopLoss || {};
+    fromEnv.softStopLoss.protectAfterTouchPct = sslProtectPct;
+  }
+  if (_ssl('AUTO_TRADE_TIME_EXIT_ENABLED') != null) {
+    fromEnv.timeExit = fromEnv.timeExit || {};
+    fromEnv.timeExit.enabled = _ssl('AUTO_TRADE_TIME_EXIT_ENABLED') === '1';
+  }
+  const teTp1Ms = parseInt(_ssl('AUTO_TRADE_TIME_EXIT_TP1_MS'), 10);
+  if (Number.isFinite(teTp1Ms) && teTp1Ms > 0) {
+    fromEnv.timeExit = fromEnv.timeExit || {};
+    fromEnv.timeExit.beforeTp1Ms = teTp1Ms;
+  }
+  const teTp2Ms = parseInt(_ssl('AUTO_TRADE_TIME_EXIT_TP2_MS'), 10);
+  if (Number.isFinite(teTp2Ms) && teTp2Ms > 0) {
+    fromEnv.timeExit = fromEnv.timeExit || {};
+    fromEnv.timeExit.beforeTp2Ms = teTp2Ms;
+  }
+  if (_ssl('AUTO_TRADE_HARD_SL_CAP_ENABLED') != null) {
+    fromEnv.hardSlCap = fromEnv.hardSlCap || {};
+    fromEnv.hardSlCap.enabled = _ssl('AUTO_TRADE_HARD_SL_CAP_ENABLED') === '1';
+  }
+  const hslMaxPct = parseFloat(_ssl('AUTO_TRADE_HARD_SL_MAX_DISTANCE_PCT'));
+  if (Number.isFinite(hslMaxPct) && hslMaxPct > 0) {
+    fromEnv.hardSlCap = fromEnv.hardSlCap || {};
+    fromEnv.hardSlCap.maxDistancePct = hslMaxPct;
+  }
+  if (_ssl('AUTO_TRADE_PROFIT_WITHDRAW_ENABLED') != null) {
+    fromEnv.profitWithdraw = fromEnv.profitWithdraw || {};
+    fromEnv.profitWithdraw.enabled = _ssl('AUTO_TRADE_PROFIT_WITHDRAW_ENABLED') === '1';
+  }
+  const pwBaseline = parseFloat(_ssl('AUTO_TRADE_PROFIT_WITHDRAW_BASELINE_USD'));
+  if (Number.isFinite(pwBaseline) && pwBaseline > 0) {
+    fromEnv.profitWithdraw = fromEnv.profitWithdraw || {};
+    fromEnv.profitWithdraw.baselineUSD = pwBaseline;
+  }
+  if (_ssl('AUTO_TRADE_LOSS_STREAK_ENABLED') != null) {
+    fromEnv.lossStreakBrake = fromEnv.lossStreakBrake || {};
+    fromEnv.lossStreakBrake.enabled = _ssl('AUTO_TRADE_LOSS_STREAK_ENABLED') === '1';
+  }
+  if (_ssl('AUTO_TRADE_BALANCE_GUARD_ENABLED') != null) {
+    fromEnv.balanceGuard = fromEnv.balanceGuard || {};
+    fromEnv.balanceGuard.enabled = _ssl('AUTO_TRADE_BALANCE_GUARD_ENABLED') === '1';
+  }
+  const bgMin = parseFloat(_ssl('AUTO_TRADE_BALANCE_GUARD_MIN_USD'));
+  if (Number.isFinite(bgMin) && bgMin > 0) {
+    fromEnv.balanceGuard = fromEnv.balanceGuard || {};
+    fromEnv.balanceGuard.minUSD = bgMin;
+  }
+
   active = deepMerge(deepMerge(DEFAULT_CONFIG, fromDisk), fromEnv);
   // 启动时强制把 autoDisable* 重置 (避免上次运行时的"幽灵"自动拦截状态遗留下来,
   // 重新评估应该由 riskEngine 在第一帧 tick 上重新决定).
@@ -240,8 +383,19 @@ function load() {
   active.regimeAutoLastSubRegime = null;
   active.regimeAutoLastConfidence = null;
   active.regimeAutoLastEvalAt = null;
+  // 风控套件: 启动时重置连亏计数与暂停状态 (用户重启进程通常意味着想"清白上场"
+  // 不要让上次运行的连亏熔断悬而未决导致一启动就拦交易).
+  active.lossStreak = 0;
+  active.pausedUntilMs = null;
+  active.pausedReason = null;
   const dg = active.directionGuard || {};
   const rg = active.regimeGuard || {};
+  const ssl = active.softStopLoss || {};
+  const te = active.timeExit || {};
+  const hsl = active.hardSlCap || {};
+  const pw = active.profitWithdraw || {};
+  const lsb = active.lossStreakBrake || {};
+  const bg = active.balanceGuard || {};
   console.log(
     `[trade.config] 已加载: webhook=${active.webhookUrl?.slice(0, 60)}... enabled=${active.enabled}` +
     ` · disableLong=${!!active.disableLong} · disableShort=${!!active.disableShort}` +
@@ -251,6 +405,15 @@ function load() {
     ` · regimeGuard ${rg.enabled ? 'on' : 'off'}` +
     ` (LongOnSB=${rg.blockLongOnStrongBear ? '1' : '0'} ShortOnSB=${rg.blockShortOnStrongBull ? '1' : '0'}` +
     ` PANIC=${rg.blockBothOnPanic ? '1' : '0'} UNCLEAR=${rg.blockBothOnUnclear ? '1' : '0'} minConf=${rg.minConfidence})`
+  );
+  console.log(
+    `[trade.config] 🛡 风控套件:` +
+    ` softSL ${ssl.enabled ? 'on' : 'off'} (fast ${ssl.fastPct}%/${ssl.fastWindowMs}ms · norm ${ssl.normalPct}% · protect ${ssl.protectAfterTouchPct}% · trailingTp1 ${ssl.trailingAfterTp1?.enabled ? ssl.trailingAfterTp1.stepPct + '%' : 'off'})` +
+    ` · timeExit ${te.enabled ? 'on' : 'off'} (tp1<${te.beforeTp1Ms}ms · tp2<${te.beforeTp2Ms}ms)` +
+    ` · hardSlCap ${hsl.enabled ? 'on ' + hsl.maxDistancePct + '%' : 'off'}` +
+    ` · profitWithdraw ${pw.enabled ? 'on baseline=' + pw.baselineUSD + 'U' : 'off'}` +
+    ` · lossStreakBrake ${lsb.enabled ? 'on ' + JSON.stringify(lsb.thresholds) : 'off'}` +
+    ` · balanceGuard ${bg.enabled ? 'on min=' + bg.minUSD + 'U' : 'off'}`
   );
   return active;
 }
