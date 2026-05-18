@@ -10,11 +10,16 @@
  *                                          - 价位用 regime plan 优先 / ATR 回退 (与 manual-open 同源)
  *                                          - 同方向已有 pending → 默认自动覆盖 (replace=false 时拒绝)
  *                                          - 同方向已有 active 真实仓位 → 直接 409 拒绝, 不允许覆盖
- *    POST /api/auto-trade/market-order    ⚡ 对外市价立即开仓信号 (body.direction, X-Auth-Token 鉴权)
+ *    POST/GET /api/auto-trade/market-order   ⚡ 对外市价立即开仓信号
+ *    POST/GET /api/auto-trade/marker-order   (拼写兼容, 同源)
+ *                                          - 鉴权: Header X-Auth-Token / Authorization: Bearer / ?token= / body.token 任一
+ *                                          - 参数: direction (必填) / source / label / position_size, body 或 query 任一
  *                                          - 不等回踩, 收到信号立即按当下 WS 市价 forwardOpen
  *                                          - 价位用 regime plan 优先 / ATR 回退 (TP/SL 来自 plan, entry=市价)
  *                                          - 同方向已有 pending → 自动取消后立即市价开仓 (覆盖式)
  *                                          - 同方向已有 active 真实仓位 → 直接 409 拒绝
+ *                                          - 示例 (热力图工具直拼 URL):
+ *                                              GET https://monitor.24os.cn/api/auto-trade/marker-order?direction=long&token=<CONFIG_AUTH_TOKEN>&source=heatmap&label=L_Max_24H
  *    POST /api/auto-trade/reset           手动重置 { direction:'long'|'short' } (鉴权)
  *    POST /api/auto-trade/toggle           切换总开关 enabled (无需鉴权, 只切布尔)
  *    POST /api/auto-trade/toggle-direction 方向开关 { direction, disabled } 禁止做多/做空 (无需鉴权)
@@ -269,9 +274,27 @@ function validateAdjustActiveLevels(direction, entry, merged, tpHit) {
   return { ok: true };
 }
 
+/**
+ * 管理接口鉴权中间件.
+ *
+ * 兼容三种 token 传递方式 (优先级 header > query > body), 命中任一即放行:
+ *   1. HTTP Header  X-Auth-Token: <token>      (UI / 自家 admin 工具用)
+ *   2. URL Query    ?token=<token>             (外部信号源 / GET 友好 / 拼到 URL 直接喊单)
+ *   3. JSON Body    { "token": "<token>" }     (兼容老脚本)
+ *
+ * 同时还支持 Authorization: Bearer <token> (与 monitor webhook 风格一致).
+ */
 function requireAdmin(req, res, next) {
   if (!ADMIN_TOKEN) return res.status(503).json({ ok: false, error: 'CONFIG_AUTH_TOKEN 未配置, 管理接口已禁用' });
-  if (req.headers['x-auth-token'] !== ADMIN_TOKEN) return res.status(401).json({ ok: false, error: '鉴权失败' });
+  const headerTok = req.headers['x-auth-token'];
+  const bearerHdr = req.headers['authorization'] || '';
+  const bearerTok = /^Bearer\s+(.+)$/i.test(bearerHdr) ? bearerHdr.replace(/^Bearer\s+/i, '').trim() : null;
+  const queryTok = req.query?.token;
+  const bodyTok = req.body?.token;
+  const provided = headerTok || bearerTok || queryTok || bodyTok;
+  if (provided !== ADMIN_TOKEN) {
+    return res.status(401).json({ ok: false, error: '鉴权失败', hint: '可通过 Header X-Auth-Token / Authorization: Bearer / ?token= / body.token 任一方式提供' });
+  }
   next();
 }
 
@@ -1673,15 +1696,43 @@ async function marketOrderImpl(opts = {}) {
   return r;
 }
 
-router.post('/market-order', requireAdmin, async (req, res) => {
-  const r = await marketOrderImpl({
-    direction: req.body?.direction,
-    source: req.body?.source,
-    label: req.body?.label,
-    position_size: req.body?.position_size,
-  });
+/**
+ * 市价立即开仓信号 — 统一收集器.
+ *
+ * 兼容 5 种调用形态 (路径 × 方法 × 参数位置), 全部走同一个 marketOrderImpl:
+ *   1. POST /market-order           body: { direction, source, label, position_size }   (旧, 与之前完全一致)
+ *   2. POST /marker-order           body: 同上                                           (兼容拼写错误)
+ *   3. GET  /market-order?direction=long&token=xxx                                        (URL 直接喊单)
+ *   4. GET  /marker-order?direction=long&token=xxx                                        (热力图工具用)
+ *   5. POST /market-order 带 query  混合传参 (header token + body params, 或反过来)
+ *
+ * 所有路径都走 requireAdmin (token 来源已扩展: header / Bearer / query / body 任一即可).
+ *
+ * 参数取值优先级: body > query (POST 时 body 优先, GET 时只有 query)
+ *   - direction:     'long' | 'short'  必填
+ *   - source:        审计标签 (默认 'market_order')
+ *   - label:         任意字符串, 会回填到响应 body
+ *   - position_size: 仓位百分比, 不传则用 cfg.defaultPositionSize 或 plan 置信度
+ */
+function _readMarketOrderParams(req) {
+  return {
+    direction: req.body?.direction || req.query?.direction,
+    source: req.body?.source || req.query?.source,
+    label: req.body?.label || req.query?.label,
+    position_size: req.body?.position_size || req.query?.position_size,
+  };
+}
+
+async function _handleMarketOrder(req, res) {
+  const r = await marketOrderImpl(_readMarketOrderParams(req));
   res.status(r.status).json(r.body);
-});
+}
+
+router.post('/market-order', requireAdmin, _handleMarketOrder);
+router.get('/market-order',  requireAdmin, _handleMarketOrder);
+// 拼写兼容 (热力图工具用的 URL 是 /marker-order, 与 /market-order 同源)
+router.post('/marker-order', requireAdmin, _handleMarketOrder);
+router.get('/marker-order',  requireAdmin, _handleMarketOrder);
 
 // ============ POST /manual-follow: 手动追单 (一键立即市价) ============
 //
