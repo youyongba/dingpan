@@ -372,6 +372,73 @@ function setupShort(entry, opts = {}) {
   // 不会因为 pausedUntilMs 而误处理. 这个 case 简化跳过 (留一个手动验证的 placeholder)
   console.log('  ⏭ Case 14 跳过 (依赖 priceFeed tick 触发, 在脚本里不易模拟)');
 
+  // ============== Case 14b: 总开关 OFF — 所有模块跳过 ==============
+  console.log('\n=== Case 14b: 总开关 OFF — 软SL / 时间退出 / 保本 / 提利润 / 连亏熔断 都被跳过 ===');
+  notifyCount = 0; notifyLog = [];
+  // 关掉总开关
+  config.patch({
+    riskGuardEnabled: false,
+    enabled: true,
+    lossStreak: 0,
+    pausedUntilMs: null,
+    pausedReason: null,
+    accountBalanceUSD: 15.5,   // 故意设到提利润阈值之上
+  });
+  risk._reset();
+
+  // 14b-1: 软SL fast 应该不触发 (反向 0.20% > 0.15% fastPct, 但总开关 OFF)
+  setupLong(50000, { entryAt: new Date(Date.now() - 60000).toISOString() });
+  await risk._evaluateRiskGuard('long', 49900, Date.now());
+  await new Promise(r => setTimeout(r, 100));
+  const p14a = state.getPosition('long');
+  check('总开关 OFF: 软SL fast 不触发 (active=true)', p14a.active === true,
+    `active=${p14a.active}`);
+
+  // 14b-2: 时间退出不触发 (持仓 11min > 10min, 但总开关 OFF)
+  risk._reset();
+  setupLong(50000, { entryAt: new Date(Date.now() - 11 * 60 * 1000).toISOString() });
+  await risk._evaluateRiskGuard('long', 50000, Date.now());
+  await new Promise(r => setTimeout(r, 100));
+  const p14b = state.getPosition('long');
+  check('总开关 OFF: 时间退出不触发 (active=true)', p14b.active === true);
+
+  // 14b-3: 保本触发不应该改 SL (顺势 0.12%, 但总开关 OFF)
+  risk._reset();
+  setupLong(50000, {
+    entryAt: new Date(Date.now() - 60000).toISOString(),
+    sl: 49800,
+  });
+  await risk._evaluateRiskGuard('long', 50060, Date.now());
+  await new Promise(r => setTimeout(r, 100));
+  const p14c = state.getPosition('long');
+  check('总开关 OFF: 保本不触发 (currentStopLoss 仍是原 SL 49800)',
+    p14c.currentStopLoss === 49800,
+    `currentStopLoss=${p14c.currentStopLoss}`);
+
+  // 14b-4: _onPositionClosed 不更新 lossStreak / 不查 balance / 不推提利润
+  notifyCount = 0; notifyLog = [];
+  config.patch({ lossStreak: 1 });   // 设个非 0 值, 验证 _onPositionClosed 不改它
+  risk._onPositionClosed('long', 'sl', {});
+  await new Promise(r => setTimeout(r, 50));
+  const cfg14 = config.get();
+  check('总开关 OFF: lossStreak 不变 (仍是 1, 没 +1)', cfg14.lossStreak === 1,
+    `lossStreak=${cfg14.lossStreak}`);
+  check('总开关 OFF: 不推半滚提利润提醒',
+    !notifyLog.some(n => n.title.includes('提利润')),
+    `notifyLog=${JSON.stringify(notifyLog.map(n => n.title))}`);
+  check('总开关 OFF: 不推熔断告警',
+    !notifyLog.some(n => n.title.includes('熔断') || n.title.includes('本金保护')));
+
+  // 14b-5: 重新打开总开关 → 子模块配置原样恢复
+  config.patch({ riskGuardEnabled: true, lossStreak: 0, accountBalanceUSD: null });
+  risk._reset();
+  setupLong(50000, { entryAt: new Date(Date.now() - 60000).toISOString() });
+  await risk._evaluateRiskGuard('long', 49900, Date.now());
+  await new Promise(r => setTimeout(r, 100));
+  const p14e = state.getPosition('long');
+  check('重新打开总开关: 软SL fast 立即恢复触发 (active=false)',
+    p14e.active === false);
+
   // ============== Case 15: short 方向软SL ==============
   console.log('\n=== Case 15: short 方向 — 软SL fast / 保本触发 ===');
   notifyCount = 0; notifyLog = [];

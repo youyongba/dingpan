@@ -978,9 +978,17 @@
 <div class="regime-guard-bar" id="riskGuardBar" style="margin-top: 14px;">
   <div class="rg-head">
     <span class="rg-title">🛡 风控套件 <small>三阶段软SL · 时间退出 · 连亏熔断 · 本金保护 · 半滚提利润</small></span>
-    <span id="riskGuardPauseBadge" style="display:none; padding:4px 10px; border-radius:4px; background:#3d1416; color:#f85149; font-weight:700; font-size:12px;">
-      ⏸ 已暂停 <span id="riskGuardPauseCountdown"></span>
-    </span>
+    <div style="display:flex; align-items:center; gap:10px;">
+      <span id="riskGuardPauseBadge" style="display:none; padding:4px 10px; border-radius:4px; background:#3d1416; color:#f85149; font-weight:700; font-size:12px;">
+        ⏸ 已暂停 <span id="riskGuardPauseCountdown"></span>
+      </span>
+      <!-- ⭐ 总开关: 一键关掉/开启整个风控套件 (子模块 .enabled 配置保留) -->
+      <span id="riskGuardMasterState" class="at-state on" style="font-size:12px;">已启用</span>
+      <label class="switch rg-master" title="风控套件总开关 — 关掉后所有保护都跳过, 子模块配置保留">
+        <input type="checkbox" id="riskGuardMasterToggle" />
+        <span class="slider"></span>
+      </label>
+    </div>
   </div>
 
   <!-- 实时状态 -->
@@ -2041,6 +2049,22 @@
     const lsb = rg.lossStreakBrake || {};
     const bg = rg.balanceGuard || {};
 
+    // ⭐ 总开关同步 (rg.enabled !== false 视为开启 — 默认 on)
+    const masterOn = rg.enabled !== false;
+    const masterToggle = document.getElementById('riskGuardMasterToggle');
+    const masterState = document.getElementById('riskGuardMasterState');
+    if (masterToggle && document.activeElement !== masterToggle) {
+      masterToggle.checked = masterOn;
+      masterToggle.disabled = false;
+    }
+    if (masterState) {
+      masterState.textContent = masterOn ? '已启用' : '已关闭';
+      masterState.className = 'at-state ' + (masterOn ? 'on' : 'danger');
+    }
+    // 总开关 OFF 时整个卡片显示置灰, 提醒用户当前所有保护都被禁用
+    const card = document.getElementById('riskGuardBar');
+    if (card) card.style.opacity = masterOn ? '1' : '0.55';
+
     const setIfNotEditing = (id, val) => {
       const el = document.getElementById(id);
       if (!el) return;
@@ -2121,6 +2145,53 @@
       pauseEl.style.color = '#3fb950';
       pauseBadge.style.display = 'none';
       resumeBtn.style.display = 'none';
+    }
+  }
+
+  /**
+   * ⭐ 风控套件总开关切换 — POST /risk-guard { enabled: bool }.
+   * OFF 后所有保护逻辑跳过 (软SL / 保本 / trailing / 时间退出 / hardSlCap /
+   *                          连亏熔断 / 本金保护 / 半滚提利润), 子模块配置保留.
+   */
+  async function setRiskGuardMaster(enabled) {
+    const toggle = document.getElementById('riskGuardMasterToggle');
+    const stateEl = document.getElementById('riskGuardMasterState');
+    if (!toggle) return;
+    // 关闭前二次确认 (100x × 50% 裸奔风险极高)
+    if (!enabled && !confirm(
+      '⚠️ 确认关闭风控套件总开关?\n\n' +
+      '关闭后所有保护逻辑都会跳过:\n' +
+      '  · 三阶段软止损\n' +
+      '  · 保本触发 / TP1 后 trailing\n' +
+      '  · 时间退出 (10min / 60min)\n' +
+      '  · 硬 SL 上限 (0.40%)\n' +
+      '  · 连亏熔断\n' +
+      '  · 本金保护线\n' +
+      '  · 半滚提利润提醒\n\n' +
+      '100x × 50% 滚仓裸奔风险极高, 仅在测试 / 临时调试时关闭. 子模块配置会保留, 重新打开后立即恢复.'
+    )) {
+      // 用户取消 → 把 toggle 反弹回旧值
+      toggle.checked = !enabled;
+      return;
+    }
+    toggle.disabled = true;
+    stateEl.textContent = '切换中...';
+    try {
+      const j = await callAdminApi('/api/auto-trade/risk-guard', { enabled: !!enabled });
+      if (j.riskGuard) renderRiskGuard(j.riskGuard);
+      showToast('ok',
+        enabled ? '🛡 风控套件已启用' : '⚠️ 风控套件已关闭',
+        enabled
+          ? '所有子模块按各自配置生效'
+          : '所有保护都被跳过 — 仅测试用途, 100x 滚仓请尽快开回',
+        enabled ? 4000 : 6000);
+    } catch (e) {
+      showToast('err', '❌ 总开关切换失败', e.message || String(e), 6000);
+      toggle.checked = !enabled;   // 回滚
+      stateEl.textContent = enabled ? '已关闭' : '已启用';
+      stateEl.className = 'at-state ' + (enabled ? 'danger' : 'on');
+    } finally {
+      toggle.disabled = false;
     }
   }
 
@@ -3915,6 +3986,10 @@
   document.getElementById('rgSaveBtn').addEventListener('click', saveRegimeGuardRules);
 
   // ⭐ 风控套件按钮绑定
+  const riskGuardMasterToggle = document.getElementById('riskGuardMasterToggle');
+  if (riskGuardMasterToggle) {
+    riskGuardMasterToggle.addEventListener('change', (e) => setRiskGuardMaster(e.target.checked));
+  }
   const rgSaveRiskBtn = document.getElementById('rgSaveRiskBtn');
   if (rgSaveRiskBtn) rgSaveRiskBtn.addEventListener('click', saveRiskGuardConfig);
   const rgSyncBalanceBtn = document.getElementById('rgSyncBalanceBtn');

@@ -547,7 +547,8 @@ async function processSignal(sig, opts = {}) {
     //   pending 模式: 用 planEntry 应用一次, 直接落到 plan.sl
     //   immediate 模式: 由于 entryPrice 后续会变成 marketPrice, 还会在 line ~634 之后再应用一次
     let hardSlCapApplied = null;
-    if (cfg.hardSlCap?.enabled && Number.isFinite(sl) && Number.isFinite(entryPrice)) {
+    if (cfg.riskGuardEnabled !== false && cfg.hardSlCap?.enabled
+        && Number.isFinite(sl) && Number.isFinite(entryPrice)) {
       const cap = applyHardSlCap(direction, entryPrice, sl, cfg.hardSlCap.maxDistancePct);
       if (cap.capped) {
         console.log(`[trade.router] 🛡 hardSlCap (pending phase): ${direction} entry=${entryPrice} 原SL=${cap.originalSl}(距${cap.distancePct.toFixed(3)}%) → 收紧到 SL=${cap.sl}(距${cfg.hardSlCap.maxDistancePct}%)`);
@@ -676,7 +677,8 @@ async function processSignal(sig, opts = {}) {
     // ⭐ 风控套件: hardSlCap (immediate phase) — entryPrice 已变成 marketPrice,
     //   plan 的 sl 是基于 planEntry (回踩 0.5×ATR 后) 算的, 距离 marketPrice 实际 = 2.0×ATR,
     //   往往超过 maxDistancePct%. 这里再应用一次, 用真实入场价收紧 sl.
-    if (cfg.hardSlCap?.enabled && Number.isFinite(sl) && Number.isFinite(entryPrice)) {
+    if (cfg.riskGuardEnabled !== false && cfg.hardSlCap?.enabled
+        && Number.isFinite(sl) && Number.isFinite(entryPrice)) {
       const cap = applyHardSlCap(direction, entryPrice, sl, cfg.hardSlCap.maxDistancePct);
       if (cap.capped) {
         console.log(`[trade.router] 🛡 hardSlCap (immediate phase): ${direction} entry=${entryPrice} 原SL=${cap.originalSl}(距${cap.distancePct.toFixed(3)}%) → 收紧到 SL=${cap.sl}(距${cfg.hardSlCap.maxDistancePct}%)`);
@@ -913,6 +915,8 @@ router.get('/status', (req, res) => {
     //   lossStreak / pausedUntilMs / pausedReason / accountBalanceUSD 实时状态
     //   UI 用这些字段渲染"风控套件"卡片 + 输入框热更新.
     riskGuard: {
+      // ⭐ 总开关: false 时所有子模块逻辑都跳过 (子模块 .enabled 配置保留, 切回 true 立即恢复)
+      enabled: cfg.riskGuardEnabled !== false,
       softStopLoss: cfg.softStopLoss || null,
       timeExit: cfg.timeExit || null,
       hardSlCap: cfg.hardSlCap || null,
@@ -2351,6 +2355,12 @@ router.post('/risk-guard', requireAdmin, (req, res) => {
   const patch = {};
   const issues = [];
 
+  // ---------- ⭐ 总开关 ----------
+  // 顶层 enabled 字段 → 写到 cfg.riskGuardEnabled (与各子模块 .enabled 是独立位)
+  if (body.enabled != null) {
+    patch.riskGuardEnabled = !!body.enabled;
+  }
+
   // ---------- softStopLoss ----------
   if (body.softStopLoss && typeof body.softStopLoss === 'object') {
     const ssl = {};
@@ -2496,12 +2506,41 @@ router.post('/risk-guard', requireAdmin, (req, res) => {
     return res.status(400).json({ ok: false, error: 'no_changes' });
   }
 
+  const cfgBefore = config.get();
+  const masterToggled = patch.riskGuardEnabled != null
+    && (!!patch.riskGuardEnabled) !== (cfgBefore.riskGuardEnabled !== false);
   config.patch(patch);
   const finalCfg = config.get();
   console.log('[trade.router] /risk-guard updated:', JSON.stringify(patch));
+
+  // 总开关切换 → 推飞书 (其他子项调整不推, 避免刷屏)
+  if (masterToggled) {
+    const masterOn = finalCfg.riskGuardEnabled !== false;
+    exec.notify({
+      type: masterOn ? 'unlock' : 'reset',
+      title: masterOn
+        ? `🛡 风控套件已开启 (总开关)`
+        : `⚠️ 风控套件已关闭 (总开关)`,
+      lines: masterOn ? [
+        `所有子模块按各自配置生效:`,
+        `  · softStopLoss = ${finalCfg.softStopLoss?.enabled ? 'on' : 'off'}`,
+        `  · timeExit = ${finalCfg.timeExit?.enabled ? 'on' : 'off'}`,
+        `  · hardSlCap = ${finalCfg.hardSlCap?.enabled ? 'on' : 'off'}`,
+        `  · lossStreakBrake = ${finalCfg.lossStreakBrake?.enabled ? 'on' : 'off'}`,
+        `  · balanceGuard = ${finalCfg.balanceGuard?.enabled ? 'on' : 'off'}`,
+        `  · profitWithdraw = ${finalCfg.profitWithdraw?.enabled ? 'on' : 'off'}`,
+      ] : [
+        `所有保护逻辑都被跳过 (软SL / 保本 / trailing / 时间退出 / hardSlCap / 连亏熔断 / 本金保护 / 提利润提醒)`,
+        `子模块 .enabled 配置已保留, 重新打开总开关时立刻恢复`,
+        `⚠️ 100x × 50% 滚仓裸奔风险极高, 仅在测试 / 临时调试时关闭`,
+      ],
+      isAlert: !masterOn,
+    });
+  }
   res.json({
     ok: true,
     riskGuard: {
+      enabled: finalCfg.riskGuardEnabled !== false,
       softStopLoss: finalCfg.softStopLoss,
       timeExit: finalCfg.timeExit,
       hardSlCap: finalCfg.hardSlCap,

@@ -86,8 +86,16 @@ const DEFAULT_CONFIG = {
   // 设计目标: 在不改杠杆/仓位的前提下, 用代码层把"必爆仓"事件砍到 < 3%,
   // 单笔最大常规亏损从 -50% (爆仓) 降到 -15% / -30% (主动软止损).
   //
-  // 总开关: softStopLoss.enabled + timeExit.enabled + 各子模块 .enabled 都 true 才生效.
+  // ⭐ 双层开关设计:
+  //   - 总开关 riskGuardEnabled: 一键关掉整个套件 (所有 8 个保护逻辑都跳过)
+  //                              关掉后子模块 .enabled 配置保留, 再打开总开关时立刻恢复
+  //                              用户场景: "我现在想测试一下不带保护的纯信号, 临时关一下"
+  //   - 子模块 .enabled (softStopLoss/timeExit/hardSlCap/.../balanceGuard):
+  //                              独立开关, 各自决定是否生效
+  //                              用户场景: "我只想要软SL, 不要时间退出"
+  //   最终是否生效 = riskGuardEnabled && 子模块.enabled (两者都 true 才生效)
   // ============================================================
+  riskGuardEnabled: true,                       // 总开关 (默认 on, 强烈建议保持开启)
   softStopLoss: {
     enabled: true,
     // 阶段 1 (假插针窗口): 入场后 fastWindowMs 毫秒内, 价格反向 ≥ fastPct% → 主动市价平仓.
@@ -302,6 +310,9 @@ function load() {
   // 风控套件 .env 覆盖 (优先级: env > disk > default).
   // 想 UI 热更新走 POST /risk-guard, 不要靠 .env (改 .env 要重启).
   const _ssl = (k) => process.env[k];
+  if (_ssl('AUTO_TRADE_RISK_GUARD_ENABLED') != null) {
+    fromEnv.riskGuardEnabled = _ssl('AUTO_TRADE_RISK_GUARD_ENABLED') === '1';
+  }
   if (_ssl('AUTO_TRADE_SOFT_SL_ENABLED') != null) {
     fromEnv.softStopLoss = fromEnv.softStopLoss || {};
     fromEnv.softStopLoss.enabled = _ssl('AUTO_TRADE_SOFT_SL_ENABLED') === '1';
@@ -406,8 +417,9 @@ function load() {
     ` (LongOnSB=${rg.blockLongOnStrongBear ? '1' : '0'} ShortOnSB=${rg.blockShortOnStrongBull ? '1' : '0'}` +
     ` PANIC=${rg.blockBothOnPanic ? '1' : '0'} UNCLEAR=${rg.blockBothOnUnclear ? '1' : '0'} minConf=${rg.minConfidence})`
   );
+  const masterOn = active.riskGuardEnabled !== false;
   console.log(
-    `[trade.config] 🛡 风控套件:` +
+    `[trade.config] 🛡 风控套件 [总开关 ${masterOn ? '✅ ON' : '🔴 OFF · 所有保护都被禁用'}]:` +
     ` softSL ${ssl.enabled ? 'on' : 'off'} (fast ${ssl.fastPct}%/${ssl.fastWindowMs}ms · norm ${ssl.normalPct}% · protect ${ssl.protectAfterTouchPct}% · trailingTp1 ${ssl.trailingAfterTp1?.enabled ? ssl.trailingAfterTp1.stepPct + '%' : 'off'})` +
     ` · timeExit ${te.enabled ? 'on' : 'off'} (tp1<${te.beforeTp1Ms}ms · tp2<${te.beforeTp2Ms}ms)` +
     ` · hardSlCap ${hsl.enabled ? 'on ' + hsl.maxDistancePct + '%' : 'off'}` +

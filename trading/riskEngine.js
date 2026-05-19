@@ -270,6 +270,9 @@ function getRiskTelemetry() {
  */
 function _checkPauseExpiry() {
   const cfg = config.get();
+  // ⭐ 总开关 OFF: 不做自动恢复 (套件整体被禁用; 用户切回 ON 时若 pausedUntilMs 仍在,
+  //   下一次 _runEval 会自动检查并恢复, 不会"丢"暂停状态)
+  if (cfg.riskGuardEnabled === false) return;
   if (!cfg.pausedUntilMs || !Number.isFinite(cfg.pausedUntilMs)) return;
   if (Date.now() < cfg.pausedUntilMs) return;
   // 到点 → 自动恢复
@@ -572,6 +575,8 @@ function onTick({ price, ts }) {
  */
 function _evaluateRiskGuard(direction, price, tickTs) {
   const cfg = config.get();
+  // ⭐ 总开关: 一键关掉所有风控保护. 子模块各自的 .enabled 配置不变.
+  if (cfg.riskGuardEnabled === false) return false;
   const p = state.getPosition(direction);
   if (!p || !p.active) return false;
   if (!Number.isFinite(price) || price <= 0) return false;
@@ -1212,6 +1217,8 @@ function _onPositionClosed(direction, closeReason, snapshot = {}) {
   _resetRiskGuardCache(direction);
 
   const cfg = config.get();
+  // ⭐ 总开关 OFF: 不做 lossStreak / 熔断 / 余额检查 / 提利润 (但 cache 已清, 不影响下一笔仓位)
+  if (cfg.riskGuardEnabled === false) return;
   // 分类: 哪些 closeReason 算"亏损一笔" (用于 lossStreak)
   // - sl / sl_protection: 标准止损 / 保本止损
   // - soft_sl_fast / soft_sl_normal: 风控套件主动平仓 (软止损)
