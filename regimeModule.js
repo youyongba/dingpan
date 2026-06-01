@@ -410,8 +410,14 @@ function buildTradePlan(ind, regime, klines) {
   const tp2 = entry + dirSign * 2 * risk;
   const tp3 = entry + dirSign * 3 * risk;
 
-  // 仓位建议
-  const positionPct = ({ high: 50, medium: 50, low: 50 })[confidence];
+  // 仓位建议 (读取配置，若自动交易关闭则应用降级)
+  let positionPct = ({ high: 50, medium: 50, low: 50 })[confidence];
+  try {
+    const cfg = require('./trading/config').get();
+    if (!cfg.enabled) {
+      positionPct = ({ high: 3, medium: 2, low: 1 })[confidence] || 1;
+    }
+  } catch (e) {}
 
   // 数值精度
   const round2 = (n) => Math.round(n * 100) / 100;
