@@ -84,6 +84,12 @@ const nowStr = cnTime;
  */
 async function sendMessage(text, opt = {}) {
   if (!TG_CFG.enabled) return { ok: false, skipped: 'disabled' };
+
+  try {
+    const tradeCfgEnabled = require('../trading/config').get().enabled;
+    if (!tradeCfgEnabled) return { ok: false, skipped: 'auto_trade_disabled' };
+  } catch (e) {}
+
   if (!TG_CFG.token || !TG_CFG.chatId) return { ok: false, skipped: 'not_configured' };
   if (!text || typeof text !== 'string') return { ok: false, skipped: 'empty_text' };
 
