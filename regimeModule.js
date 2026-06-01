@@ -364,37 +364,15 @@ function buildTradePlan(ind, regime, klines) {
     return { ok: false, action: 'wait', reason: '指标数据不足，无法生成交易计划' };
   }
 
-  // 方向 + 置信度
-  let direction = null;       // 'long' | 'short'
-  let confidence = 'low';     // 'high' | 'medium' | 'low'
-  let basis = '';
+  // 方向 + 置信度 (直接使用 enhancedRegime 的分析结果，避免前后矛盾)
+  const direction = regime.direction;
+  const confidence = regime.confidence;
+  const basis = regime.riskNote || `基于 ${regime.subLabel} 状态`;
 
-  const diSpread = Math.abs(plusDI - minusDI);
-
-  if (regime.regime === 'TREND' && adx > 25) {
-    direction = plusDI > minusDI ? 'long' : 'short';
-    confidence = adx > 35 ? 'high' : 'medium';
-    basis = `趋势市 ADX=${adx.toFixed(1)} ${direction === 'long' ? '+DI' : '-DI'} 主导 (差值 ${diSpread.toFixed(1)})`;
-  } else if (regime.regime === 'NEUTRAL' && diSpread > 8 && adx > 20) {
-    direction = plusDI > minusDI ? 'long' : 'short';
-    confidence = 'low';
-    basis = `中性市但 DI 差值 ${diSpread.toFixed(1)} 偏 ${direction === 'long' ? '多' : '空'}，小仓位试单`;
-  } else if (regime.regime === 'RANGE') {
+  if (!direction || direction === 'neutral') {
     return {
       ok: false, action: 'wait',
-      reason: '震荡市建议等待区间突破或使用网格策略，不开方向单',
-      currentPrice: close,
-    };
-  } else if (regime.regime === 'PANIC') {
-    return {
-      ok: false, action: 'wait',
-      reason: '恐慌市波动剧烈但无明确方向，建议观望',
-      currentPrice: close,
-    };
-  } else {
-    return {
-      ok: false, action: 'wait',
-      reason: `当前 regime=${regime.label || '未知'} 信号不足以开仓`,
+      reason: regime.riskNote || '当前状态无明确方向，建议观望',
       currentPrice: close,
     };
   }
