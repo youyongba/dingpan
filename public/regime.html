@@ -3371,11 +3371,11 @@
     const anyActive = longActive || shortActive;
 
     if (!autoEnabled) {
-      [longBtn, shortBtn, followLongBtn, followShortBtn, closeAllBtn].forEach(b => {
-        if (b) { b.disabled = true; b.title = '已禁用: 请先开启「自动下单」总开关'; }
-      });
-      meta.textContent = '⚠️ 自动下单已关闭, 手动操作已禁用';
-      return;
+      meta.textContent = '⚠️ 自动下单已关闭, 手动操作仍可用 (仓位按置信度降级 1%~3%)';
+      meta.style.color = '#d29922'; // 提示色
+    } else {
+      meta.textContent = '挂单优先 Regime, 否则 0.5%~1.2% / 10%仓; 追单一律 0.5%~1.2% / 10%仓';
+      meta.style.color = '';
     }
 
     // 方向开关三重取或: 手动 disable* || 价格围栏 autoDisable* || Regime 守卫 regimeAutoDisable*
