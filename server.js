@@ -86,10 +86,16 @@ let state = {
     historyData: [],      // 币安8小时已结算费率历史 (60 条)
     realTimeHistory: [],  // 每轮轮询采样的"瞬时预测费率"快照 (60 条 ~ 90分钟)
     rate1hHistory: [],    // 每轮轮询采样的"近 1H 均值"快照 (240 条 ~ 6小时)
+    // ⭐ premium 基差快照 (60 条 ~ 90分钟): premium = (markPrice - indexPrice) / indexPrice
+    //   反映永续相对现货的实时溢价/折价 — 这是费率公式 clamp 之前的"原始拥挤强度"信号.
+    //   瞬时预测费率因为 ±0.05% clamp + 0.01% 利率档, 几乎永远被钉死在 0.01%;
+    //   premium 没有 clamp, 才是连续反映多空拥挤的曲线 (正=永续溢价/多头拥挤, 负=折价/空头拥挤).
+    premiumHistory: [],
 
     lastSettledFundingRate: null, // 上一期已结算费率 (币安返回)
     predictedFundingRate: null,   // 当前瞬时预测费率 (自算)
     prevPredictedFundingRate: null, // 用于突变告警
+    premium: null,                // 当前瞬时 premium 基差 (自算, 未 clamp)
 
     // 近 1H 均值情绪分析
     rate1hDirection: 'warming_up',  // warming_up / neutral / long_crowded / short_crowded
@@ -439,6 +445,7 @@ async function fetchBinanceData() {
         // 更新 state
         state.lastSettledFundingRate = lastSettledFundingRate;
         state.predictedFundingRate = predictedFundingRate;
+        state.premium = premium;
         state.currentPrice = price;
         state.indexPrice = indexPrice;
         state.interestRate = interestRate;
@@ -449,6 +456,10 @@ async function fetchBinanceData() {
         const nowTs = Date.now();
         state.realTimeHistory.push({ time: nowTs, rate: predictedFundingRate });
         if (state.realTimeHistory.length > 60) state.realTimeHistory.shift();
+
+        // ⭐ premium 基差快照 (与瞬时费率同节奏采样, 60 条 ~ 90分钟)
+        state.premiumHistory.push({ time: nowTs, rate: premium });
+        if (state.premiumHistory.length > 60) state.premiumHistory.shift();
 
         if (state.rate1hDirection !== 'warming_up' && Number.isFinite(rate1hAvgInclCurrent)) {
             state.rate1hHistory.push({ time: nowTs, rate: rate1hAvgInclCurrent });
@@ -481,9 +492,11 @@ app.post('/api/reset', authMiddleware, (req, res) => {
     state.historyData = [];
     state.realTimeHistory = [];
     state.rate1hHistory = [];
+    state.premiumHistory = [];
     state.lastSettledFundingRate = null;
     state.predictedFundingRate = null;
     state.prevPredictedFundingRate = null;
+    state.premium = null;
     state.rate1hDirection = 'warming_up';
     state.rate1hSamples = 0;
     state.isStrongSignal = false;

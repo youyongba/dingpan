@@ -381,21 +381,13 @@ function planLevelsFromRegime(direction) {
   const ageMs = updatedAt ? Date.now() - updatedAt : Infinity;
   if (ageMs > 30 * 60 * 1000) return null;
 
-  // 检查是否自动交易关闭，如果关闭则调整返回的仓位
-  let posPct = tradePlan.suggestedPositionPct;
-  const cfg = config.get();
-  if (!cfg.enabled) {
-    const conf = tradePlan.confidence || 'low';
-    posPct = { high: 3, medium: 2, low: 1 }[conf] || 1;
-  }
-
   return {
     planEntry: Number(tradePlan.entry),
     tp1: Number(tps[0].price),
     tp2: Number(tps[1].price),
     tp3: Number(tps[2].price),
     sl: Number(tradePlan.stopLoss),
-    positionSize: posPct + '%',
+    positionSize: tradePlan.suggestedPositionPct + '%',
     confidence: tradePlan.confidenceLabel,
     planAgeSec: Math.round(ageMs / 1000),
     source: 'regime_plan',
@@ -423,12 +415,12 @@ async function processSignal(sig, opts = {}) {
   const skipRegimePlan = !!opts.skipRegimePlan;
   // 手动 UI 来源 (manual_ui / manual_follow) 时, 在挂单/成交后顺手推 TG;
   // regime 自动 / 外部 webhook 不重复推 (regime 自身 handleNotificationsOnSuccess 已 sendTradeSignal).
-  const isManualCaller = ['manual_ui', 'manual_follow', 'price_trigger_open', 'price_trigger_follow'].includes(callerSource);
+  const isManualCaller = callerSource === 'manual_ui' || callerSource === 'manual_follow';
 
   if (!sig.token || sig.token !== cfg.token) {
     return { status: 401, body: { ok: false, error: 'invalid_token' } };
   }
-  if (!cfg.enabled && !isManualCaller) {
+  if (!cfg.enabled) {
     return { status: 503, body: { ok: false, error: 'auto_trade_disabled' } };
   }
 
@@ -1368,6 +1360,12 @@ async function manualOpenImpl(opts = {}) {
     return { status: 400, body: { ok: false, error: 'direction must be long|short' } };
   }
   const cfg = config.get();
+  if (!cfg.enabled) {
+    return {
+      status: 409,
+      body: { ok: false, error: 'auto_trade_disabled', hint: '请先开启「自动下单」总开关再手动开仓' },
+    };
+  }
 
   const sig = {
     token: cfg.token,
@@ -1402,11 +1400,7 @@ async function manualOpenImpl(opts = {}) {
     let getLatestPlan;
     try { getLatestPlan = require('../regimeModule').getLatestPlan; } catch (e) {}
     const planInfo = getLatestPlan ? getLatestPlan() : null;
-    let posPct = planInfo?.tradePlan?.suggestedPositionPct || 50;
-    if (!cfg.enabled) {
-      const conf = planInfo?.tradePlan?.confidence || 'low';
-      posPct = { high: 3, medium: 2, low: 1 }[conf] || 1;
-    }
+    const posPct = planInfo?.tradePlan?.suggestedPositionPct || 50;
     sig.position_size = `${posPct}%`;
     sig._priceSource = 'manual_fallback_atr';
   }
@@ -1773,6 +1767,12 @@ async function manualFollowImpl(opts = {}) {
     return { status: 400, body: { ok: false, error: 'direction must be long|short' } };
   }
   const cfg = config.get();
+  if (!cfg.enabled) {
+    return {
+      status: 409,
+      body: { ok: false, error: 'auto_trade_disabled', hint: '请先开启「自动下单」总开关再手动追单' },
+    };
+  }
 
   const marketPrice = priceFeed.getStatus().lastPrice;
   if (!Number.isFinite(marketPrice)) {
@@ -1796,15 +1796,9 @@ async function manualFollowImpl(opts = {}) {
   let getLatestPlan;
   try { getLatestPlan = require('../regimeModule').getLatestPlan; } catch (e) {}
   const planInfo = getLatestPlan ? getLatestPlan() : null;
-  
-  let posPct = opts.position_size != null
+  const posPct = opts.position_size != null
     ? parseFloat(opts.position_size)
     : (planInfo?.tradePlan?.suggestedPositionPct || 50);
-
-  if (!cfg.enabled) {
-    const conf = planInfo?.tradePlan?.confidence || 'low';
-    posPct = { high: 3, medium: 2, low: 1 }[conf] || 1;
-  }
 
   const sig = {
     token: cfg.token,
