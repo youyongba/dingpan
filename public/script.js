@@ -2,12 +2,14 @@ const chart8h = echarts.init(document.getElementById('chart8h'), 'dark', { backg
 const chart1h = echarts.init(document.getElementById('chart1h'), 'dark', { background: 'transparent' });
 const chart1hAvg = echarts.init(document.getElementById('chart1hAvg'), 'dark', { background: 'transparent' });
 const chartPremium = echarts.init(document.getElementById('chartPremium'), 'dark', { background: 'transparent' });
+const chartPremium1hAvg = echarts.init(document.getElementById('chartPremium1hAvg'), 'dark', { background: 'transparent' });
 
 window.addEventListener('resize', () => {
     chart8h.resize();
     chart1h.resize();
     chart1hAvg.resize();
     chartPremium.resize();
+    chartPremium1hAvg.resize();
 });
 
 const AUTH_TOKEN_KEY = 'dp_auth_token_v1';
@@ -203,11 +205,12 @@ async function fetchStatus() {
     renderChartIfChanged('chart1h', data.realTimeHistory, '瞬时预测费率', 'hhmm');
     renderChartIfChanged('chart1hAvg', data.rate1hHistory, '近1H均值', 'hhmm');
     renderChartIfChanged('chartPremium', data.premiumHistory, 'premium基差', 'hhmm');
+    renderChartIfChanged('chartPremium1hAvg', data.premium1hHistory, 'premium近1H均值', 'hhmm');
 }
 
 // 缓存每个图表上一次渲染的数据指纹, 相同则跳过 setOption
-const chartFingerprints = { chart8h: '', chart1h: '', chart1hAvg: '', chartPremium: '' };
-const chartInstances = { chart8h, chart1h, chart1hAvg, chartPremium };
+const chartFingerprints = { chart8h: '', chart1h: '', chart1hAvg: '', chartPremium: '', chartPremium1hAvg: '' };
+const chartInstances = { chart8h, chart1h, chart1hAvg, chartPremium, chartPremium1hAvg };
 
 function renderChartIfChanged(chartKey, history, seriesName, xFormat) {
     const hasData = history && history.length > 0;

@@ -91,6 +91,9 @@ let state = {
     //   瞬时预测费率因为 ±0.05% clamp + 0.01% 利率档, 几乎永远被钉死在 0.01%;
     //   premium 没有 clamp, 才是连续反映多空拥挤的曲线 (正=永续溢价/多头拥挤, 负=折价/空头拥挤).
     premiumHistory: [],
+    // ⭐ premium 近 1H 均值快照 (240 条 ~ 6小时): 与 rate1hHistory 同算法, 只是基于 premium 而非费率.
+    //   平滑掉 premium 的瞬时抖动, 反映"日内基差情绪曲线" (永续溢价/折价的趋势).
+    premium1hHistory: [],
 
     lastSettledFundingRate: null, // 上一期已结算费率 (币安返回)
     predictedFundingRate: null,   // 当前瞬时预测费率 (自算)
@@ -117,6 +120,7 @@ let state = {
     indexPrice: 0,
     interestRate: 0,
     rate1hAvg: null,
+    premium1hAvg: null,           // premium 近 1H 均值 (与 rate1hAvg 同算法)
     rateDailySettledSum: null,
     rateDailyWithPredict: null
 };
@@ -387,6 +391,19 @@ async function fetchBinanceData() {
             : predictedFundingRate;
         const samplesInclCurrent = count1h + 1;
 
+        // ⭐ premium 近 1H 均值 (与上面同算法, 基于 premiumHistory + 本轮 premium)
+        let sumP1h = 0;
+        let countP1h = 0;
+        state.premiumHistory.forEach(item => {
+            if (item.time >= oneHourAgo) {
+                sumP1h += item.rate;
+                countP1h++;
+            }
+        });
+        const premium1hAvgInclCurrent = countP1h > 0
+            ? (sumP1h + premium) / (countP1h + 1)
+            : premium;
+
         // UTC 日线已结算累计
         const todayStart = moment.utc().startOf('day').valueOf();
         let settledRateToday = 0;
@@ -450,6 +467,7 @@ async function fetchBinanceData() {
         state.indexPrice = indexPrice;
         state.interestRate = interestRate;
         state.rate1hAvg = rate1hAvgInclCurrent;
+        state.premium1hAvg = premium1hAvgInclCurrent;
         state.rateDailySettledSum = rateDailySettledSum;
         state.rateDailyWithPredict = rateDailyWithPredict;
 
@@ -464,6 +482,12 @@ async function fetchBinanceData() {
         if (state.rate1hDirection !== 'warming_up' && Number.isFinite(rate1hAvgInclCurrent)) {
             state.rate1hHistory.push({ time: nowTs, rate: rate1hAvgInclCurrent });
             if (state.rate1hHistory.length > 240) state.rate1hHistory.shift();
+        }
+
+        // ⭐ premium 近 1H 均值快照 (与 rate1hHistory 同节奏/同暖机门槛, 6小时窗口)
+        if (state.rate1hDirection !== 'warming_up' && Number.isFinite(premium1hAvgInclCurrent)) {
+            state.premium1hHistory.push({ time: nowTs, rate: premium1hAvgInclCurrent });
+            if (state.premium1hHistory.length > 240) state.premium1hHistory.shift();
         }
 
         // 终端日志
@@ -493,10 +517,12 @@ app.post('/api/reset', authMiddleware, (req, res) => {
     state.realTimeHistory = [];
     state.rate1hHistory = [];
     state.premiumHistory = [];
+    state.premium1hHistory = [];
     state.lastSettledFundingRate = null;
     state.predictedFundingRate = null;
     state.prevPredictedFundingRate = null;
     state.premium = null;
+    state.premium1hAvg = null;
     state.rate1hDirection = 'warming_up';
     state.rate1hSamples = 0;
     state.isStrongSignal = false;
