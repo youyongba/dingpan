@@ -970,7 +970,10 @@ router.get('/status', (req, res) => {
  *   - 必须能拿到 baselinePrice (传入 或 priceFeed.lastPrice)
  *   - 同方向若已有等价触发器 (同价同 action) → 409 拒绝, 防止误点重复 arm
  *
- * 副作用: arm 新条会自动解开同方向 locked=true (相当于"重新启用监听").
+ * 副作用:
+ *   - arm 新条会自动解开同方向 locked=true (相当于"重新启用监听").
+ *   - 同步推送一条「交易点位监控系统」webhook (fireMonitorOpen, comment 标"价格触发器待命"),
+ *     让监控端在触发器命中前就能登记该方向的待命点位; 命中后真正挂单/追单时还会再推真实点位.
  */
 router.post('/price-trigger/arm', requireAdmin, (req, res) => {
   const direction = req.body?.direction;
@@ -1040,6 +1043,38 @@ router.post('/price-trigger/arm', requireAdmin, (req, res) => {
       `❎ 清空该方向: POST /api/auto-trade/price-trigger/cancel-all {"direction":"${direction}"}`,
     ],
   });
+
+  // ⭐ 推送到「交易点位监控系统」: arm 价格触发器时就让监控端登记这条"待命点位".
+  //    arm 阶段 TP/SL 尚未最终确定, 这里用与 fire 时同源的逻辑预算一套预览点位:
+  //      1) 优先 regime tradePlan (与方向匹配且未过期) → 用 plan 的 entry/TP/SL
+  //      2) 否则按触发价 ATR 回退 (挂单回踩 0.5×ATR, 追单直接用触发价)
+  //      3) 连 ATR 都拿不到 → 退化为仅登记 entry=触发价, TP/SL 留空
+  //    命中后真正挂单/追单时 processSignal 还会再推一次"真实点位" (comment 不同, 监控端可区分).
+  //    全程 try/catch + fire-and-forget, 任何异常都不影响 arm 主流程.
+  try {
+    const preview = planLevelsFromRegime(direction);
+    let monEntry, monTp1, monTp2, monTp3, monSl;
+    if (preview) {
+      monEntry = preview.planEntry;
+      monTp1 = preview.tp1; monTp2 = preview.tp2; monTp3 = preview.tp3; monSl = preview.sl;
+    } else {
+      try {
+        const lv = computeManualFallbackLevels(direction, triggerPrice, action === 'open');
+        monEntry = lv.entry; monTp1 = lv.tp1; monTp2 = lv.tp2; monTp3 = lv.tp3; monSl = lv.sl;
+      } catch (_) {
+        monEntry = triggerPrice; // ATR 不可用: 仅登记触发价, TP/SL 由 fireMonitorOpen 序列化成 null
+      }
+    }
+    exec.fireMonitorOpen({
+      direction,
+      entry: monEntry,
+      tp1: monTp1, tp2: monTp2, tp3: monTp3, sl: monSl,
+      comment: `价格触发器待命 · ${action === 'follow' ? '追单' : '挂单'} · 触发价${triggerPrice.toFixed(2)}`,
+    });
+  } catch (e) {
+    console.error('[trade.router] price-trigger arm monitor 推送失败 (已忽略, 不影响 arm):', e?.message || e);
+  }
+
   res.json({ ok: true, direction, trigger, total: allItems.length });
 });
 
