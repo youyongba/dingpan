@@ -28,8 +28,12 @@
 
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+const tls = require('tls');
+const https = require('https');
 const axios = require('axios');
-const { httpAgent, httpsAgent } = require('../lib/httpAgents');
+const { httpAgent } = require('../lib/httpAgents');
 
 // -------------------- 配置 --------------------
 const CFG = {
@@ -38,7 +42,43 @@ const CFG = {
   token: process.env.MONITOR_WEBHOOK_TOKEN || '',
   enabled: process.env.MONITOR_WEBHOOK_ENABLED !== '0',
   timeoutMs: parseInt(process.env.MONITOR_WEBHOOK_TIMEOUT_MS, 10) || 10000,
+  // 紧急逃生开关: =1 时关闭 TLS 证书校验 (不安全, 仅在补根证书仍无法解决时临时用)
+  insecureTls: process.env.MONITOR_WEBHOOK_INSECURE_TLS === '1',
 };
+
+// -------------------- 专用 HTTPS Agent (修复证书链缺失) --------------------
+// 背景: tradingdata.24os.cn 的证书链根部是 "Sectigo Public Server Authentication
+//   Root R46" —— 一个较新的 Sectigo 根. 老版本 Node (如 18.12.x) 内置 CA 库不含此根,
+//   导致 TLS 校验报 "unable to get local issuer certificate" (curl 用系统信任库故能通).
+// 方案: 在 Node 默认根证书之上, 额外加载 lib/certs/*.pem 把缺失的根补进来, 校验照常开启.
+//   (新部署若 Node 已较新/系统根已含此根, 多加一份同样无害.)
+function loadExtraCerts() {
+  const dir = path.join(__dirname, '..', 'lib', 'certs');
+  const out = [];
+  try {
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.toLowerCase().endsWith('.pem') && !f.toLowerCase().endsWith('.crt')) continue;
+      try {
+        out.push(fs.readFileSync(path.join(dir, f), 'utf8'));
+      } catch (_) { /* 单个文件读失败忽略 */ }
+    }
+  } catch (_) { /* 目录不存在: 没有补充证书, 走默认即可 */ }
+  return out;
+}
+
+const _extraCerts = loadExtraCerts();
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30_000,
+  maxSockets: 50,
+  maxFreeSockets: 10,
+  timeout: 60_000,
+  scheduling: 'lifo',
+  // insecureTls=1 → 完全关校验; 否则用 默认根 + 补充根 做严格校验
+  ...(CFG.insecureTls
+    ? { rejectUnauthorized: false }
+    : { ca: [...tls.rootCertificates, ..._extraCerts] }),
+});
 
 // 启动时一次性自检日志, 便于排查"为何没推送"
 (function preflight() {
@@ -53,8 +93,11 @@ const CFG = {
   if (!CFG.token) {
     console.warn('[monitor-webhook] ⚠️ MONITOR_WEBHOOK_TOKEN 未配置, 仍会发送但 Authorization 头为空');
   }
+  if (CFG.insecureTls) {
+    console.warn('[monitor-webhook] ⚠️ MONITOR_WEBHOOK_INSECURE_TLS=1 已关闭证书校验 (不安全, 仅应临时使用)');
+  }
   console.log(
-    `[monitor-webhook] 已就绪 (open=${CFG.openUrl ? 'on' : 'off'}, cancel=${CFG.cancelUrl ? 'on' : 'off'}, token=${CFG.token ? 'on' : 'off'})`
+    `[monitor-webhook] 已就绪 (open=${CFG.openUrl ? 'on' : 'off'}, cancel=${CFG.cancelUrl ? 'on' : 'off'}, token=${CFG.token ? 'on' : 'off'}, tls=${CFG.insecureTls ? 'insecure' : 'strict'}, extraCerts=${_extraCerts.length})`
   );
 })();
 
