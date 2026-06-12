@@ -1063,7 +1063,7 @@ router.post('/price-trigger/arm', requireAdmin, (req, res) => {
       // ATR 不可用: 仅登记触发价, TP/SL 留空
     }
     const rp = planLevelsFromRegime(direction);
-    if (rp) planNote = ` · regime ${rp.confidence || ''}${rp.positionSize ? ' ' + rp.positionSize : ''}`.trimEnd();
+    planNote = ` · regime ${rp?.confidence || '低'} · 仓位${manualPositionPctByConfidence()}%`;
     exec.fireMonitorOpen({
       direction,
       entry: monEntry,
@@ -1388,6 +1388,18 @@ router.post('/cancel-pending', (req, res) => {
  * @param {string} [opts.source='manual_ui']  传给 processSignal 的来源标记
  * @returns {Promise<{status:number, body:object}>}
  */
+// ⭐ 手动挂单/追单的仓位: 按 regime 置信度降级到 1%/2%/3% (high/medium/low), 默认 1%.
+//    用户要求: 手动操作 (UI 挂单/追单 + 价格触发器命中走的也是这两个实现) 用小仓位以小博大,
+//    不沿用 regime plan 的 50% 默认仓位. 与 cfg.enabled 无关 (手动操作本就要求 enabled=true,
+//    所以 regimeModule 里"enabled 时 50%"的逻辑在这里必须显式覆盖).
+function manualPositionPctByConfidence() {
+  let getLatestPlan;
+  try { ({ getLatestPlan } = require('../regimeModule')); } catch (_) {}
+  const tp = getLatestPlan ? (getLatestPlan() || {}).tradePlan : null;
+  const conf = (tp && tp.ok) ? tp.confidence : 'low';
+  return ({ high: 3, medium: 2, low: 1 })[conf] || 1;
+}
+
 async function manualOpenImpl(opts = {}) {
   const direction = opts.direction;
   if (!['long', 'short'].includes(direction)) {
@@ -1430,14 +1442,12 @@ async function manualOpenImpl(opts = {}) {
     sig.entry = lv.entry;
     sig.stop_loss = lv.sl;
     sig.tp1 = lv.tp1; sig.tp2 = lv.tp2; sig.tp3 = lv.tp3;
-
-    let getLatestPlan;
-    try { getLatestPlan = require('../regimeModule').getLatestPlan; } catch (e) {}
-    const planInfo = getLatestPlan ? getLatestPlan() : null;
-    const posPct = planInfo?.tradePlan?.suggestedPositionPct || 50;
-    sig.position_size = `${posPct}%`;
     sig._priceSource = 'manual_fallback_atr';
   }
+
+  // ⭐ 手动挂单仓位强制按置信度 1%/2%/3% (覆盖 regime plan / fallback 的 50% 默认).
+  //    processSignal 内 "if (sig.position_size != null) positionSize = sig.position_size" 会尊重这里.
+  sig.position_size = `${manualPositionPctByConfidence()}%`;
 
   return processSignal(sig, { source: opts.source || 'manual_ui' });
 }
@@ -1702,17 +1712,16 @@ async function marketOrderImpl(opts = {}) {
     sig.entry = lv.entry;
     sig.stop_loss = lv.sl;
     sig.tp1 = lv.tp1; sig.tp2 = lv.tp2; sig.tp3 = lv.tp3;
-    if (sig.position_size == null) {
-      let getLatestPlan;
-      try { getLatestPlan = require('../regimeModule').getLatestPlan; } catch (e) {}
-      const planInfo = getLatestPlan ? getLatestPlan() : null;
-      const posPct = planInfo?.tradePlan?.suggestedPositionPct || 50;
-      sig.position_size = `${posPct}%`;
-    }
     sig._priceSource = 'market_order_atr';
   } else {
-    // 有 regime plan: TP/SL/仓位 用 plan, entry 由 immediate 分支用 marketPrice 自动覆盖
+    // 有 regime plan: TP/SL 用 plan, entry 由 immediate 分支用 marketPrice 自动覆盖
     sig._priceSource = 'market_order_plan';
+  }
+
+  // ⭐ 仓位: 调用方显式传了 position_size 就用传入值 (line 上方已写入), 否则按 regime 置信度 1%/2%/3%
+  //    (与手动挂单/追单一致, 覆盖 regime plan 的 50% 默认). processSignal line 539 会尊重 sig.position_size.
+  if (sig.position_size == null) {
+    sig.position_size = `${manualPositionPctByConfidence()}%`;
   }
 
   const r = await processSignal(sig, { source });
@@ -1827,12 +1836,10 @@ async function manualFollowImpl(opts = {}) {
     return { status: 400, body: { ok: false, error: 'manual_levels_invalid:' + validate.reason, segments: validate.segments } };
   }
 
-  let getLatestPlan;
-  try { getLatestPlan = require('../regimeModule').getLatestPlan; } catch (e) {}
-  const planInfo = getLatestPlan ? getLatestPlan() : null;
+  // ⭐ 手动追单仓位: 调用方显式传了就用传入值, 否则按 regime 置信度降级到 1%/2%/3% (不用 plan 默认 50%).
   const posPct = opts.position_size != null
     ? parseFloat(opts.position_size)
-    : (planInfo?.tradePlan?.suggestedPositionPct || 50);
+    : manualPositionPctByConfidence();
 
   const sig = {
     token: cfg.token,
