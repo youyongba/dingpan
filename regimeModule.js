@@ -388,14 +388,9 @@ function buildTradePlan(ind, regime, klines) {
   const tp2 = entry + dirSign * 2 * risk;
   const tp3 = entry + dirSign * 3 * risk;
 
-  // 仓位建议 (读取配置，若自动交易关闭则应用降级)
-  let positionPct = ({ high: 50, medium: 50, low: 50 })[confidence];
-  try {
-    const cfg = require('./trading/config').get();
-    if (!cfg.enabled) {
-      positionPct = ({ high: 3, medium: 2, low: 1 })[confidence] || 1;
-    }
-  } catch (e) {}
+  // 仓位建议: 一律按置信度小仓位 (高 3% / 中 2% / 低 1%), 不再用 50% 默认.
+  //   100x 杠杆下 50% 仓位 = 必爆仓级别, 全局去掉; 自动/手动/热力图所有路径统一这套.
+  const positionPct = ({ high: 3, medium: 2, low: 1 })[confidence] || 1;
 
   // 数值精度
   const round2 = (n) => Math.round(n * 100) / 100;
