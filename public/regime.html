@@ -3370,13 +3370,10 @@
     const shortBusy = shortActive || shortPending;
     const anyActive = longActive || shortActive;
 
-    if (!autoEnabled) {
-      [longBtn, shortBtn, followLongBtn, followShortBtn, closeAllBtn].forEach(b => {
-        if (b) { b.disabled = true; b.title = '已禁用: 请先开启「自动下单」总开关'; }
-      });
-      meta.textContent = '⚠️ 自动下单已关闭, 手动操作已禁用';
-      return;
-    }
+    // ⭐ 自动下单关闭 ≠ 禁用手动: 总开关只拦"自动开仓"(regime 自动 + 外部/热力图信号),
+    //    手动开仓 / 手动追单 / 价格触发器 / 一键全平 照常可用 (后端 isManualTradeSource 已放行),
+    //    持仓 TP/SL 也仍由 riskEngine 自动管理. 这里不再 force-disable 按钮, 只在 meta 提示状态.
+    //    按钮可用态继续由下方"持仓 busy + 方向开关"逻辑决定.
 
     // 方向开关三重取或: 手动 disable* || 价格围栏 autoDisable* || Regime 守卫 regimeAutoDisable*
     // 任意一个 ON 都视为该方向被禁; tooltip 列出全部原因
@@ -3464,9 +3461,12 @@
     const baseMeta = tags.length
       ? `当前: ${tags.join(' · ')} · 重复同方向开仓/追单会被拒绝`
       : '挂单优先 Regime, 否则动态 ATR 回退; 追单一律动态 ATR (不回踩) (不参考 Regime 入场价)';
-    meta.textContent = blockTags.length
+    const autoOffNote = !autoEnabled
+      ? '⚠️ 自动下单已关闭 (仅手动开仓/追单/价格触发器可用; 自动信号被拦, 持仓 TP/SL 仍自动) · '
+      : '';
+    meta.textContent = autoOffNote + (blockTags.length
       ? `${blockTags.join(' · ')} (新信号 409, 已有持仓 TP/SL 不受影响) · ${baseMeta}`
-      : baseMeta;
+      : baseMeta);
   }
 
   async function setAutoTrade(enabled) {
