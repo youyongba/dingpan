@@ -420,7 +420,9 @@ async function processSignal(sig, opts = {}) {
   if (!sig.token || sig.token !== cfg.token) {
     return { status: 401, body: { ok: false, error: 'invalid_token' } };
   }
-  if (!cfg.enabled) {
+  // 自动下单关闭: 仅放行用户手动来源 (UI 手动开仓/追单 + 价格触发器命中); 外部/热力图自动信号仍拦.
+  //   TP/SL/平仓由 riskEngine 独立评估, 不经过 processSignal, 关闭后照常自动管理.
+  if (!cfg.enabled && !isManualTradeSource(callerSource)) {
     return { status: 503, body: { ok: false, error: 'auto_trade_disabled' } };
   }
 
@@ -444,7 +446,9 @@ async function processSignal(sig, opts = {}) {
     //     b) cfg.autoDisableLong/Short      — 价格围栏自动 (riskEngine.evaluateDirectionGuard)
     //     c) cfg.regimeAutoDisableLong/Short — 📊 Regime 守卫自动 (riskEngine.evaluateRegimeGuard)
     //   不影响 take_profit / stop_loss / close-all-positions, 也不影响已有 pending 触达 entry 的 fill.
-    //   想彻底撤已有 pending 请 POST /api/auto-trade/cancel-pending. 想拦 active 仓位 TP/SL 请关 cfg.enabled.
+    //   想彻底撤已有 pending 请 POST /api/auto-trade/cancel-pending.
+    //   ⚠️ active 仓位的 TP/SL 由 riskEngine 独立评估, 完全不受 cfg.enabled 影响 (关了也照常自动触发);
+    //      要停某方向 TP/SL 只能 close-all-positions 或手动平仓, 关总开关不会停 TP/SL.
     const manualKey   = direction === 'long' ? 'disableLong' : 'disableShort';
     const priceKey    = direction === 'long' ? 'autoDisableLong' : 'autoDisableShort';
     const regimeKey   = direction === 'long' ? 'regimeAutoDisableLong' : 'regimeAutoDisableShort';
@@ -1400,16 +1404,30 @@ function manualPositionPctByConfidence() {
   return ({ high: 3, medium: 2, low: 1 })[conf] || 1;
 }
 
+// ⭐ "用户手动来源": 即便自动下单总开关 (cfg.enabled) 关闭, 这些来源仍允许下单.
+//    包含: UI 手动开仓/追单按钮 + 价格触发器命中 (用户手动设的触发价).
+//    不含: 外部 webhook (external) / 热力图 /market-order (market_order_api) / 第三方挂单 (pending_order_api)
+//          / regime 自动 (regime_plan) —— 这些才是"自动下单", 关闭总开关时照常被拦.
+//    用途: 用户场景 "我关掉自动下单, 但想自己手动开仓; 开仓后 TP/SL 仍由 riskEngine 自动管理".
+//    注意: TP/SL/平仓由 riskEngine 独立评估, 完全不经过 cfg.enabled, 关不关都自动触发.
+const MANUAL_TRADE_SOURCES = new Set([
+  'manual_ui', 'manual_follow', 'price_trigger_open', 'price_trigger_follow',
+]);
+function isManualTradeSource(source) {
+  return MANUAL_TRADE_SOURCES.has(source);
+}
+
 async function manualOpenImpl(opts = {}) {
   const direction = opts.direction;
   if (!['long', 'short'].includes(direction)) {
     return { status: 400, body: { ok: false, error: 'direction must be long|short' } };
   }
   const cfg = config.get();
-  if (!cfg.enabled) {
+  // 自动下单关闭时: 仍放行用户手动来源 (UI 手动开仓 / 价格触发器命中); 外部复用 (如 /pending-order) 仍拦.
+  if (!cfg.enabled && !isManualTradeSource(opts.source)) {
     return {
       status: 409,
-      body: { ok: false, error: 'auto_trade_disabled', hint: '请先开启「自动下单」总开关再手动开仓' },
+      body: { ok: false, error: 'auto_trade_disabled', hint: '自动下单已关闭; 仅手动开仓 / 价格触发器可下单' },
     };
   }
 
@@ -1810,10 +1828,11 @@ async function manualFollowImpl(opts = {}) {
     return { status: 400, body: { ok: false, error: 'direction must be long|short' } };
   }
   const cfg = config.get();
-  if (!cfg.enabled) {
+  // 自动下单关闭时: 仍放行用户手动来源 (UI 手动追单 / 价格触发器命中).
+  if (!cfg.enabled && !isManualTradeSource(opts.source)) {
     return {
       status: 409,
-      body: { ok: false, error: 'auto_trade_disabled', hint: '请先开启「自动下单」总开关再手动追单' },
+      body: { ok: false, error: 'auto_trade_disabled', hint: '自动下单已关闭; 仅手动追单 / 价格触发器可下单' },
     };
   }
 
