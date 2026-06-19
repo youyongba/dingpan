@@ -1404,14 +1404,15 @@ function manualPositionPctByConfidence() {
   return ({ high: 3, medium: 2, low: 1 })[conf] || 1;
 }
 
-// ⭐ "用户手动来源": 即便自动下单总开关 (cfg.enabled) 关闭, 这些来源仍允许下单.
-//    包含: UI 手动开仓/追单按钮 + 价格触发器命中 (用户手动设的触发价).
+// ⭐ "用户手动来源": 即便自动下单总开关 (cfg.enabled) 关闭, 这些来源仍允许下单/平仓.
+//    包含: UI 手动开仓/追单按钮 + 价格触发器命中 (用户手动设的触发价) + 手动点击 TP/SL 触发按钮 (manual_fire).
 //    不含: 外部 webhook (external) / 热力图 /market-order (market_order_api) / 第三方挂单 (pending_order_api)
 //          / regime 自动 (regime_plan) —— 这些才是"自动下单", 关闭总开关时照常被拦.
-//    用途: 用户场景 "我关掉自动下单, 但想自己手动开仓; 开仓后 TP/SL 仍由 riskEngine 自动管理".
-//    注意: TP/SL/平仓由 riskEngine 独立评估, 完全不经过 cfg.enabled, 关不关都自动触发.
+//    用途: 用户场景 "我关掉自动下单, 但想自己手动开仓 + 手动点 TP/SL 平仓; 开仓后 TP/SL 仍由 riskEngine 自动管理".
+//    注意: riskEngine 的 TP/SL 自动评估本就完全不经过 cfg.enabled, 关不关都自动触发;
+//          这里加 manual_fire 是为了让"手动点 TP/SL 按钮"(走 processSignal) 在关闭总开关时也能用.
 const MANUAL_TRADE_SOURCES = new Set([
-  'manual_ui', 'manual_follow', 'price_trigger_open', 'price_trigger_follow',
+  'manual_ui', 'manual_follow', 'price_trigger_open', 'price_trigger_follow', 'manual_fire',
 ]);
 function isManualTradeSource(source) {
   return MANUAL_TRADE_SOURCES.has(source);
@@ -2040,9 +2041,8 @@ router.post('/manual-fire', requireAdmin, async (req, res) => {
     return res.status(400).json({ ok: false, error: "level must be tp_1|tp_2|tp_3|sl" });
   }
   const cfg = config.get();
-  if (!cfg.enabled) {
-    return res.status(409).json({ ok: false, error: 'auto_trade_disabled', hint: '请先开启自动下单总开关' });
-  }
+  // ⭐ 手动点击 TP/SL 触发是平仓动作 (用户主动退出持仓), 任何时候都该允许 —— 自动下单关闭时不拦.
+  //    processSignal 也已把 source='manual_fire' 列入手动白名单, 不会被 auto_trade_disabled 二次拦截.
   const p = state.getPosition(direction);
   if (!p || !p.active) {
     return res.status(409).json({ ok: false, error: 'no_active_position', direction });
