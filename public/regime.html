@@ -286,6 +286,20 @@
   .auto-trade-bar .at-state.danger { background: rgba(248, 81, 73, 0.15); color: #f85149; border: 1px solid rgba(248, 81, 73, 0.4); }
   .auto-trade-bar .at-divider { color: #30363d; font-size: 14px; user-select: none; display: none; } /* 在新设计中隐藏分割线 */
   .auto-trade-bar .at-meta { font-size: 12px; color: #8b949e; margin-left: auto; line-height: 1.4; }
+  /* ✋ 手动仓位覆盖控件 (输入框 + 设置/自动按钮) */
+  .auto-trade-bar .pos-pct-ctrl { display: flex; align-items: center; gap: 6px; }
+  .auto-trade-bar .pos-pct-ctrl input {
+    width: 64px; padding: 5px 8px; border-radius: 6px; font-size: 13px;
+    background: #0e1116; border: 1px solid #30363d; color: #e6edf3;
+  }
+  .auto-trade-bar .pos-pct-ctrl input:focus { outline: none; border-color: #58a6ff; }
+  .auto-trade-bar .pos-pct-ctrl button {
+    padding: 5px 10px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer;
+    background: rgba(88, 166, 255, 0.12); border: 1px solid rgba(88, 166, 255, 0.35); color: #58a6ff;
+    transition: background 0.2s;
+  }
+  .auto-trade-bar .pos-pct-ctrl button:hover { background: rgba(88, 166, 255, 0.25); }
+  .auto-trade-bar .pos-pct-ctrl button:disabled { opacity: 0.5; cursor: not-allowed; }
 
   /* 🤖 价格围栏 (自动方向开关) — 与价格触发器 .price-trigger-bar 同视觉风格但更紧凑 */
   .direction-guard-bar {
@@ -850,6 +864,15 @@
     <span class="slider"></span>
   </label>
   <span id="disableShortState" class="at-state off">--</span>
+
+  <span class="at-divider">|</span>
+  <span class="at-label" title="手动仓位覆盖: 设置后所有新开仓 (regime 自动 / 手动挂单 / 手动追单 / 价格触发器 / 外部信号) 一律按该比例开仓; 点「自动」恢复按置信度 (高3% / 中2% / 低1%); 最高可调 10%; 只影响之后的新开仓, 已有持仓/挂单不变">仓位</span>
+  <span class="pos-pct-ctrl">
+    <input type="number" id="posPctInput" min="0.1" max="10" step="0.1" placeholder="自动" title="0.1 ~ 10, 单位 %, 最高 10%">
+    <button id="posPctSetBtn" title="设置手动仓位覆盖 (最高 10%)">设置</button>
+    <button id="posPctAutoBtn" title="清除手动覆盖, 恢复按置信度自动仓位 (高3% / 中2% / 低1%)">自动</button>
+  </span>
+  <span id="posPctState" class="at-state off">--</span>
 
   <span class="at-meta">
     自动下单关闭后 TP1 保本设置不生效
@@ -1639,6 +1662,8 @@
       // 方向开关 UI 同步 (开关 ON = 拦截中 = 红色 danger; OFF = 正常 = 绿色 on)
       renderDirectionDisableState('long', autoTrade.disableLong);
       renderDirectionDisableState('short', autoTrade.disableShort);
+      // ✋ 手动仓位覆盖状态同步 (manualPositionPct=null → 按置信度自动)
+      renderPositionPctState(j.manualPositionPct ?? null, j.autoPositionPct);
       // 价格围栏: 配置 + 实时 autoDisable* 状态都从 /status 同步
       autoTrade.directionGuard = j.directionGuard || null;
       autoTrade.autoDisableLong = !!j.autoDisableLong;
@@ -1684,6 +1709,57 @@
     toggle.disabled = false;
     stateEl.textContent = disabled ? '🚫 拦截中' : '✅ 正常';
     stateEl.className = 'at-state ' + (disabled ? 'danger' : 'on');
+  }
+
+  /**
+   * ✋ 手动仓位覆盖 UI 渲染.
+   *   manualPct 为数字 → 覆盖生效 (橙色 "手动 X%")
+   *   manualPct 为 null → 按置信度自动 (绿色 "自动 X%")
+   */
+  function renderPositionPctState(manualPct, autoPct) {
+    const stateEl = document.getElementById('posPctState');
+    if (!stateEl) return;
+    if (manualPct != null) {
+      stateEl.textContent = `✋ 手动 ${manualPct}%`;
+      stateEl.className = 'at-state off';   // 黄色: 提醒用户当前是人工覆盖状态
+      stateEl.title = `所有新开仓一律 ${manualPct}% (已覆盖置信度自动仓位)`;
+    } else {
+      stateEl.textContent = `🤖 自动 ${autoPct != null ? autoPct + '%' : ''}`;
+      stateEl.className = 'at-state on';
+      stateEl.title = '按 regime 置信度: 高 3% / 中 2% / 低 1%';
+    }
+  }
+
+  /**
+   * ✋ 设置/清除手动仓位覆盖.
+   * @param {number|null} pct  0.1~10 → 覆盖; null → 恢复置信度自动
+   */
+  async function setManualPositionPct(pct) {
+    const setBtn = document.getElementById('posPctSetBtn');
+    const autoBtn = document.getElementById('posPctAutoBtn');
+    const stateEl = document.getElementById('posPctState');
+    if (setBtn) setBtn.disabled = true;
+    if (autoBtn) autoBtn.disabled = true;
+    if (stateEl) { stateEl.textContent = '保存中...'; stateEl.className = 'at-state off'; }
+    try {
+      const j = await callAdminApi('/api/auto-trade/position-size', { pct });
+      renderPositionPctState(j.manualPositionPct ?? null, j.autoPositionPct);
+      if (j.manualPositionPct != null) {
+        showToast('ok', `✋ 仓位已改为手动 ${j.manualPositionPct}%`,
+          '之后所有新开仓 (自动 / 手动 / 触发器) 一律按该比例; 已有持仓与挂单不受影响');
+      } else {
+        showToast('ok', '🤖 仓位已恢复自动',
+          `按 regime 置信度: 高 3% / 中 2% / 低 1% (当前 ${j.autoPositionPct ?? '--'}%)`);
+        const input = document.getElementById('posPctInput');
+        if (input) input.value = '';
+      }
+    } catch (e) {
+      showToast('err', '❌ 仓位设置失败', e.message, 6000);
+      await fetchAutoTradeStatus();
+    } finally {
+      if (setBtn) setBtn.disabled = false;
+      if (autoBtn) autoBtn.disabled = false;
+    }
   }
 
   /**
@@ -3999,6 +4075,25 @@
 
   document.getElementById('resetLongBtn').addEventListener('click', () => resetDirection('long'));
   document.getElementById('resetShortBtn').addEventListener('click', () => resetDirection('short'));
+
+  // ✋ 手动仓位覆盖: 设置 (0.1~10%) / 恢复自动
+  const posPctSetBtn = document.getElementById('posPctSetBtn');
+  const posPctAutoBtn = document.getElementById('posPctAutoBtn');
+  const posPctInput = document.getElementById('posPctInput');
+  if (posPctSetBtn && posPctInput) {
+    const submitPosPct = () => {
+      const raw = posPctInput.value.trim();
+      const pct = parseFloat(raw);
+      if (!raw || !Number.isFinite(pct) || pct <= 0 || pct > 10) {
+        showToast('warn', '⚠️ 仓位比例无效', '请输入 0.1 ~ 10 之间的数字 (最高可调 10%)');
+        return;
+      }
+      setManualPositionPct(pct);
+    };
+    posPctSetBtn.addEventListener('click', submitPosPct);
+    posPctInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitPosPct(); });
+  }
+  if (posPctAutoBtn) posPctAutoBtn.addEventListener('click', () => setManualPositionPct(null));
 
   // 手动交易按钮
   document.getElementById('manualOpenLongBtn').addEventListener('click', () => manualOpen('long'));

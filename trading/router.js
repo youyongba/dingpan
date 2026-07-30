@@ -541,6 +541,12 @@ async function processSignal(sig, opts = {}) {
     if (sig.tp2 != null) tp2 = Number(sig.tp2);
     if (sig.tp3 != null) tp3 = Number(sig.tp3);
     if (sig.position_size != null) positionSize = sig.position_size;
+    // ⭐ 手动仓位覆盖 (POST /position-size 热更新, 上限 10%):
+    //    cfg.manualPositionPct 设置后, 所有新开仓一律用该比例,
+    //    覆盖 regime plan 置信度仓位 / 信号显式 position_size / 默认兜底.
+    //    这里是所有开仓路径 (regime 自动 / 手动挂单 / 追单 / 价格触发器 / 外部信号) 的汇合点.
+    const posOverride = manualPositionOverridePct(cfg);
+    if (posOverride != null) positionSize = posOverride + '%';
     if (sig.entry != null || sig.stop_loss != null) source = 'signal_explicit';
     // 手动追单 / 手动开仓回退方案显式标记, 便于 UI/TG/飞书 区分价位来源
     if (sig._priceSource) source = sig._priceSource;
@@ -895,6 +901,14 @@ router.get('/status', (req, res) => {
     // 切换走 POST /toggle-direction 或 POST /config { disableLong | disableShort }
     disableLong: !!cfg.disableLong,
     disableShort: !!cfg.disableShort,
+    // ⭐ 手动仓位覆盖 (POST /position-size 热更新):
+    //   manualPositionPct:    null = 自动按置信度; 数字 = 全局覆盖 (上限 10%)
+    //   autoPositionPct:      当前置信度对应的自动仓位 (高3%/中2%/低1%)
+    //   effectivePositionPct: 下一笔新开仓实际会用的仓位
+    manualPositionPct: manualPositionOverridePct(cfg),
+    autoPositionPct: confidencePositionPct(),
+    effectivePositionPct: manualPositionPctByConfidence(),
+    maxManualPositionPct: config.MAX_MANUAL_POSITION_PCT,
     // ⭐ 价格围栏 (自动方向开关) — 配置 + 实时自动状态:
     //   directionGuard:    { long:{enabled,threshold}, short:{enabled,threshold}, hysteresisPct, minSwitchIntervalMs }
     //   autoDisableLong/Short: riskEngine 实时评估写入, 与手动 disable* 取或决定 processSignal 是否拦截
@@ -1397,11 +1411,29 @@ router.post('/cancel-pending', (req, res) => {
 //    不沿用 regime plan 的 50% 默认仓位. 与 cfg.enabled 无关 (手动操作本就要求 enabled=true,
 //    所以 regimeModule 里"enabled 时 50%"的逻辑在这里必须显式覆盖).
 function manualPositionPctByConfidence() {
+  // 手动仓位覆盖优先 (POST /position-size 设置, 上限 10%)
+  const override = manualPositionOverridePct(config.get());
+  if (override != null) return override;
+  return confidencePositionPct();
+}
+
+/** 按 regime 置信度算的"自动"仓位 (不含手动覆盖): 高 3% / 中 2% / 低 1% */
+function confidencePositionPct() {
   let getLatestPlan;
   try { ({ getLatestPlan } = require('../regimeModule')); } catch (_) {}
   const tp = getLatestPlan ? (getLatestPlan() || {}).tradePlan : null;
   const conf = (tp && tp.ok) ? tp.confidence : 'low';
   return ({ high: 3, medium: 2, low: 1 })[conf] || 1;
+}
+
+/**
+ * 读取手动仓位覆盖值 (cfg.manualPositionPct).
+ * @returns {number|null} (0, 10] 内的数字; 未设置/非法 → null (走置信度自动)
+ */
+function manualPositionOverridePct(cfg) {
+  const n = Number(cfg?.manualPositionPct);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.min(n, config.MAX_MANUAL_POSITION_PCT);
 }
 
 // ⭐ "用户手动来源": 即便自动下单总开关 (cfg.enabled) 关闭, 这些来源仍允许下单/平仓.
@@ -1856,10 +1888,12 @@ async function manualFollowImpl(opts = {}) {
     return { status: 400, body: { ok: false, error: 'manual_levels_invalid:' + validate.reason, segments: validate.segments } };
   }
 
-  // ⭐ 手动追单仓位: 调用方显式传了就用传入值, 否则按 regime 置信度降级到 1%/2%/3% (不用 plan 默认 50%).
-  const posPct = opts.position_size != null
+  // ⭐ 手动追单仓位: 调用方显式传了就用传入值 (clamp 到 ≤10%), 否则走手动覆盖 / 置信度 1%/2%/3%.
+  let posPct = opts.position_size != null
     ? parseFloat(opts.position_size)
     : manualPositionPctByConfidence();
+  if (!Number.isFinite(posPct) || posPct <= 0) posPct = manualPositionPctByConfidence();
+  posPct = Math.min(posPct, config.MAX_MANUAL_POSITION_PCT);
 
   const sig = {
     token: cfg.token,
@@ -1884,6 +1918,45 @@ router.post('/manual-follow', requireAdmin, async (req, res) => {
     position_size: req.body?.position_size,
   });
   res.status(r.status).json(r.body);
+});
+
+// ============ POST /position-size: 手动调整仓位比例 (全局覆盖, 最高 10%) ============
+//
+// body: { pct: number | null }
+//   - pct = 0.1 ~ 10 (单位 %): 之后所有新开仓 (regime 自动 / 手动挂单 / 追单 / 价格触发器 /
+//                              外部信号) 一律按该比例开仓, 覆盖按置信度的 1%/2%/3%
+//   - pct = null / 0 / 缺省:   恢复自动 (按 regime 置信度: 高 3% / 中 2% / 低 1%)
+//
+// 写入 cfg.manualPositionPct (热更新, 立即写盘, 重启保留).
+// ⚠️ 只影响之后的新开仓; 已有 active 持仓 / pending 挂单的仓位不变 (本地记录也不改,
+//    真实仓位由外部 webhook 接收端持有, 改这里改不动交易所).
+router.post('/position-size', requireAdmin, (req, res) => {
+  const raw = req.body?.pct;
+  const isReset = raw == null || raw === '' || Number(raw) === 0;
+  if (!isReset) {
+    const pct = Number(raw);
+    if (!Number.isFinite(pct) || pct <= 0 || pct > config.MAX_MANUAL_POSITION_PCT) {
+      return res.status(400).json({
+        ok: false,
+        error: 'invalid_pct',
+        hint: `pct 必须是 0 ~ ${config.MAX_MANUAL_POSITION_PCT} 之间的数字 (最高 ${config.MAX_MANUAL_POSITION_PCT}%), 或传 null 恢复置信度自动仓位`,
+        maxPct: config.MAX_MANUAL_POSITION_PCT,
+      });
+    }
+    config.patch({ manualPositionPct: pct });
+    console.log(`[trade.router] ✋ 手动仓位覆盖已设置: ${pct}% (之后所有新开仓生效)`);
+  } else {
+    config.patch({ manualPositionPct: null });
+    console.log('[trade.router] 🤖 手动仓位覆盖已清除, 恢复按置信度自动仓位 (高3%/中2%/低1%)');
+  }
+  const cfg = config.get();
+  res.json({
+    ok: true,
+    manualPositionPct: cfg.manualPositionPct,          // null = 自动
+    autoPositionPct: confidencePositionPct(),          // 当前置信度对应的自动仓位
+    effectivePositionPct: manualPositionPctByConfidence(),
+    maxPct: config.MAX_MANUAL_POSITION_PCT,
+  });
 });
 
 // ============ POST /adjust-levels: 手动调整 TP1/TP2/TP3/SL ============

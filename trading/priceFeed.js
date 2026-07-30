@@ -67,9 +67,15 @@ class PriceFeed extends EventEmitter {
     // 默认订阅者数量上限: 风控 1 + SSE 1 + 备用 = 5; 给 50 留足空间避免 MaxListenersWarning
     this.setMaxListeners(50);
 
-    // 配置变更时重连
-    config.subscribe(() => {
-      console.log('[trade.priceFeed] 配置变更, 重启连接');
+    // 配置变更时重连 — 仅当 WS 流配置 (stream) 真的变化时才重连.
+    // 其他配置热更新 (仓位覆盖 / tp1Protection / 方向开关等) 与行情连接无关,
+    // 全量重连会造成几百 ms 的价格空窗, 持仓时可能延迟 TP/SL 触发, 必须避免.
+    this._lastStream = config.get()?.priceFeed?.stream || null;
+    config.subscribe((cfg) => {
+      const stream = cfg?.priceFeed?.stream || null;
+      if (stream === this._lastStream) return;
+      console.log(`[trade.priceFeed] 流配置变更 (${this._lastStream} → ${stream}), 重启连接`);
+      this._lastStream = stream;
       this._safeClose();
       this._scheduleReconnect(0);
     });

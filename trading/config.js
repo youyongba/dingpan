@@ -165,6 +165,13 @@ const DEFAULT_CONFIG = {
   // 默认杠杆与仓位（信号未带时兜底）
   defaultLeverage: 100,
   defaultPositionSize: '1%',
+  // ⭐ 手动仓位覆盖 (单位 %, 数字): 设置后所有新开仓 (regime 自动 / 手动挂单 / 手动追单 /
+  //    价格触发器 / 外部信号) 一律按该比例开仓, 覆盖按置信度的 1%/2%/3% 与信号显式仓位.
+  //    null = 不覆盖 (按 regime 置信度自动: 高 3% / 中 2% / 低 1%).
+  //    上限 MAX_MANUAL_POSITION_PCT (10%), patch 时自动 clamp.
+  //    热更新: POST /api/auto-trade/position-size { pct: 5 }; { pct: null } 恢复自动.
+  //    ⚠️ 只影响之后的新开仓, 已有 active 持仓 / pending 挂单不受影响.
+  manualPositionPct: null,
   // 是否将开仓信号转发到 webhookUrl（外部下单端）
   forwardOpenOrders: true,
   // 出站 HTTP 超时
@@ -211,6 +218,17 @@ const DEFAULT_CONFIG = {
     telegram: false,
   },
 };
+
+// 手动仓位覆盖的硬上限 (%): 无论 disk / env / patch 传什么, 都 clamp 到 ≤ 10%
+const MAX_MANUAL_POSITION_PCT = 10;
+
+/** 把 manualPositionPct 规整为 null 或 (0, MAX_MANUAL_POSITION_PCT] 内的数字 */
+function sanitizeManualPositionPct(cfg) {
+  const n = Number(cfg.manualPositionPct);
+  cfg.manualPositionPct = (Number.isFinite(n) && n > 0)
+    ? Math.min(n, MAX_MANUAL_POSITION_PCT)
+    : null;
+}
 
 // 在内存中持有的活动配置
 let active = null;
@@ -384,6 +402,7 @@ function load() {
   }
 
   active = deepMerge(deepMerge(DEFAULT_CONFIG, fromDisk), fromEnv);
+  sanitizeManualPositionPct(active);
   // 启动时强制把 autoDisable* 重置 (避免上次运行时的"幽灵"自动拦截状态遗留下来,
   // 重新评估应该由 riskEngine 在第一帧 tick 上重新决定).
   active.autoDisableLong = false;
@@ -410,6 +429,7 @@ function load() {
   console.log(
     `[trade.config] 已加载: webhook=${active.webhookUrl?.slice(0, 60)}... enabled=${active.enabled}` +
     ` · disableLong=${!!active.disableLong} · disableShort=${!!active.disableShort}` +
+    ` · manualPositionPct=${active.manualPositionPct != null ? active.manualPositionPct + '%' : 'auto(置信度1/2/3%)'}` +
     ` · directionGuard long(${dg.long?.enabled ? 'on' : 'off'} ${dg.long?.threshold ?? '--'})` +
     ` short(${dg.short?.enabled ? 'on' : 'off'} ${dg.short?.threshold ?? '--'})` +
     ` hysteresis=${dg.hysteresisPct ?? '--'}% minSwitch=${dg.minSwitchIntervalMs ?? '--'}ms` +
@@ -451,6 +471,7 @@ function get() {
 function patch(p) {
   if (!active) load();
   active = deepMerge(active, p || {});
+  sanitizeManualPositionPct(active);
   save();
   for (const fn of subscribers) {
     try { fn(active); } catch (e) { console.error('[trade.config] subscriber 异常:', e.message); }
@@ -465,4 +486,4 @@ function subscribe(fn) {
 
 load();
 
-module.exports = { get, patch, subscribe, DEFAULT_CONFIG };
+module.exports = { get, patch, subscribe, DEFAULT_CONFIG, MAX_MANUAL_POSITION_PCT };
