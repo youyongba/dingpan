@@ -35,6 +35,33 @@ const TG_CFG = {
 
 const TG_API_BASE = 'https://api.telegram.org';
 
+// -------------------- 代理 (可选) --------------------
+// api.telegram.org 在境内网络直连不通 (超时), 浏览器能通是因为走了系统代理,
+// 但 Node 里的 axios 不会自动用系统代理, 必须显式配置.
+// 优先 TELEGRAM_PROXY (仅 TG 通道), 其次通用 HTTPS_PROXY / ALL_PROXY / HTTP_PROXY
+// (与 trading/priceFeed.js 的 WS 代理同一套环境变量).
+function buildProxyAgent() {
+  const proxy = process.env.TELEGRAM_PROXY
+    || process.env.HTTPS_PROXY || process.env.https_proxy
+    || process.env.ALL_PROXY   || process.env.all_proxy
+    || process.env.HTTP_PROXY  || process.env.http_proxy;
+  if (!proxy) return null;
+  try {
+    if (/^socks/i.test(proxy)) {
+      const { SocksProxyAgent } = require('socks-proxy-agent');
+      console.log(`[telegram] 使用 SOCKS 代理: ${proxy}`);
+      return new SocksProxyAgent(proxy);
+    }
+    const { HttpsProxyAgent } = require('https-proxy-agent');
+    console.log(`[telegram] 使用 HTTPS 代理: ${proxy}`);
+    return new HttpsProxyAgent(proxy);
+  } catch (e) {
+    console.error('[telegram] 代理 agent 创建失败, 回退直连:', e.message);
+    return null;
+  }
+}
+const proxyAgent = buildProxyAgent();
+
 // 启动校验（仅打印一次警告，不抛错）
 (function preflight() {
   if (!TG_CFG.enabled) {
@@ -84,12 +111,10 @@ const nowStr = cnTime;
  */
 async function sendMessage(text, opt = {}) {
   if (!TG_CFG.enabled) return { ok: false, skipped: 'disabled' };
-
-  try {
-    const tradeCfgEnabled = require('../trading/config').get().enabled;
-    if (!tradeCfgEnabled) return { ok: false, skipped: 'auto_trade_disabled' };
-  } catch (e) {}
-
+  // ⚠️ 这里不要再按 trading 的自动下单总开关 (cfg.enabled) 拦截:
+  //    regime 喊单 / 开仓成交等 TG 消息是"信号通知", 与要不要自动下单是两件事.
+  //    历史上曾在此处加过 enabled=false → 全部静默跳过的闸门, 导致关掉自动下单后
+  //    TG 完全静音且无任何报错, 排查成本极高, 已移除.
   if (!TG_CFG.token || !TG_CFG.chatId) return { ok: false, skipped: 'not_configured' };
   if (!text || typeof text !== 'string') return { ok: false, skipped: 'empty_text' };
 
@@ -106,7 +131,10 @@ async function sendMessage(text, opt = {}) {
     const resp = await axios.post(url, payload, {
       timeout: TG_CFG.timeoutMs,
       headers: { 'Content-Type': 'application/json' },
-      httpAgent, httpsAgent,
+      httpAgent: proxyAgent || httpAgent,
+      httpsAgent: proxyAgent || httpsAgent,
+      // 禁用 axios 内置的 env proxy 解析 (对 https 有已知缺陷), 统一走上面的 agent
+      proxy: false,
     });
     if (resp.data && resp.data.ok) return { ok: true };
     console.error('[telegram] 业务错误:', resp.data);
