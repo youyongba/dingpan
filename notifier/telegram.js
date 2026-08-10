@@ -141,8 +141,25 @@ async function sendMessage(text, opt = {}) {
     return { ok: false, error: 'tg_biz_error' };
   } catch (err) {
     // 关键：只打印日志，不抛出，确保不影响主流程
-    const detail = err.response?.data?.description || err.message || 'unknown';
-    console.error('[telegram] 推送失败:', detail);
+    // ⚠️ Node 18+ 对域名所有 IP 连接全部失败时抛 AggregateError, 其 message 为空,
+    //    必须展开 err.errors/err.cause/err.code 才能看到真实原因 (如 ECONNREFUSED/ETIMEDOUT),
+    //    否则日志只有毫无信息量的 "unknown" — 这通常意味着服务器直连 api.telegram.org 不通, 需要配代理.
+    const causes = [];
+    if (err.code) causes.push(err.code);
+    if (Array.isArray(err.errors)) {
+      causes.push(...err.errors.map((e) => e?.code || e?.message).filter(Boolean));
+    }
+    if (err.cause) causes.push(err.cause.code || err.cause.message);
+    const detail = err.response?.data?.description
+      || err.message
+      || causes.join(' / ')
+      || err.name
+      || 'unknown';
+    console.error(
+      '[telegram] 推送失败:', detail,
+      causes.length ? `(底层: ${[...new Set(causes)].join(', ')})` : '',
+      proxyAgent ? '(已走代理)' : '(直连, 未配置 TELEGRAM_PROXY/HTTPS_PROXY)'
+    );
     return { ok: false, error: detail };
   }
 }
