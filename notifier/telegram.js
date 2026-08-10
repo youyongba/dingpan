@@ -16,13 +16,17 @@
  *    TELEGRAM_VIP_GROUP_ID    VIP 群 chat_id（超级群组以 -100 开头的负数）
  *    TELEGRAM_PUSH_ENABLED    "0" 关闭推送（默认开启）
  *    TELEGRAM_TIMEOUT_MS      请求超时，默认 8000ms
+ *    TELEGRAM_PROXY           TG 专用代理 (http/socks5); 未设时回退 HTTPS_PROXY 等通用变量
+ *    TELEGRAM_API_BASE        API 反代地址 (直连 api.telegram.org 超时且无代理时,
+ *                             用 Cloudflare Worker 等反代, 如 https://xxx.workers.dev)
  * ============================================================
  */
 
 'use strict';
 
+const http = require('http');
+const https = require('https');
 const axios = require('axios');
-const { httpAgent, httpsAgent } = require('../lib/httpAgents');
 const { cnTime } = require('../lib/timeFmt');
 
 // -------------------- 配置 --------------------
@@ -33,7 +37,15 @@ const TG_CFG = {
   timeoutMs: parseInt(process.env.TELEGRAM_TIMEOUT_MS, 10) || 8000,
 };
 
-const TG_API_BASE = 'https://api.telegram.org';
+// API 地址可用反代覆盖 (服务器直连 api.telegram.org 被墙/超时时的兜底方案)
+const TG_API_BASE = (process.env.TELEGRAM_API_BASE || 'https://api.telegram.org').replace(/\/+$/, '');
+
+// TG 专用直连 agent: 强制 IPv4 (family: 4).
+// 部分主机 IPv6 路由不通 (ping IPv4 能通, 但 Node 会尝试 AAAA 记录 → 卡死到 ETIMEDOUT),
+// Telegram API 走 IPv4 完全够用, 直接排除 IPv6 这个故障源.
+const tgAgentOpts = { keepAlive: true, keepAliveMsecs: 30000, maxSockets: 10, family: 4 };
+const tgHttpAgent = new http.Agent(tgAgentOpts);
+const tgHttpsAgent = new https.Agent(tgAgentOpts);
 
 // -------------------- 代理 (可选) --------------------
 // api.telegram.org 在境内网络直连不通 (超时), 浏览器能通是因为走了系统代理,
@@ -71,7 +83,8 @@ const proxyAgent = buildProxyAgent();
   if (!TG_CFG.token || !TG_CFG.chatId) {
     console.warn('[telegram] ⚠️  TELEGRAM_BOT_TOKEN / TELEGRAM_VIP_GROUP_ID 未配置，推送将被静默跳过');
   } else {
-    console.log(`[telegram] 推送已就绪 (chat_id=${TG_CFG.chatId})`);
+    const baseNote = TG_API_BASE !== 'https://api.telegram.org' ? ` · API 反代 ${TG_API_BASE}` : '';
+    console.log(`[telegram] 推送已就绪 (chat_id=${TG_CFG.chatId}${baseNote})`);
   }
 })();
 
@@ -131,8 +144,8 @@ async function sendMessage(text, opt = {}) {
     const resp = await axios.post(url, payload, {
       timeout: TG_CFG.timeoutMs,
       headers: { 'Content-Type': 'application/json' },
-      httpAgent: proxyAgent || httpAgent,
-      httpsAgent: proxyAgent || httpsAgent,
+      httpAgent: proxyAgent || tgHttpAgent,
+      httpsAgent: proxyAgent || tgHttpsAgent,
       // 禁用 axios 内置的 env proxy 解析 (对 https 有已知缺陷), 统一走上面的 agent
       proxy: false,
     });
