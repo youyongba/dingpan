@@ -2025,6 +2025,19 @@ router.post('/adjust-levels', requireAdmin, (req, res) => {
       sl: r.next.sl,
       comment: `挂单点位调整 · manual_ui · entry=${r.next.entry}`,
     });
+    // ⭐ 手动调整触发价位 → 同步推 TG (与飞书/监控通道对齐, 修复"改了价位 TG 没通知")
+    tg.fireAndForget(tg.sendLevelsAdjusted({
+      direction,
+      symbol: config.get().symbol,
+      target: 'pending',
+      levels: {
+        entry: { prev: r.prev.entry, next: r.next.entry },
+        sl:    { prev: r.prev.sl,    next: r.next.sl },
+        tp1:   { prev: r.prev.tp1,   next: r.next.tp1 },
+        tp2:   { prev: r.prev.tp2,   next: r.next.tp2 },
+        tp3:   { prev: r.prev.tp3,   next: r.next.tp3 },
+      },
+    }));
     return res.json({ ok: true, target: 'pending', prev: r.prev, next: r.next, skipped: r.skipped });
   }
 
@@ -2086,6 +2099,20 @@ router.post('/adjust-levels', requireAdmin, (req, res) => {
     sl: r.next.currentStopLoss,
     comment: `持仓点位调整 · manual_ui · entry=${entry}`,
   });
+  // ⭐ 手动调整触发价位 → 同步推 TG (与飞书/监控通道对齐, 修复"改了价位 TG 没通知")
+  tg.fireAndForget(tg.sendLevelsAdjusted({
+    direction,
+    symbol: config.get().symbol,
+    target: 'active',
+    entryPrice: entry,
+    levels: {
+      sl:  { prev: r.prev.currentStopLoss, next: r.next.currentStopLoss },
+      tp1: { prev: r.prev.tp1, next: r.next.tp1 },
+      tp2: { prev: r.prev.tp2, next: r.next.tp2 },
+      tp3: { prev: r.prev.tp3, next: r.next.tp3 },
+    },
+    tpHit: before.tpHit || {},
+  }));
   return res.json({
     ok: true, target: 'active', entry,
     prev: { tp1: r.prev.tp1, tp2: r.prev.tp2, tp3: r.prev.tp3, sl: r.prev.currentStopLoss },

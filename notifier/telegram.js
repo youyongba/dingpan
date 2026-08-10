@@ -385,6 +385,61 @@ async function sendOpenArmed(info) {
   return sendMessage(lines.join('\n'));
 }
 
+// -------------------- 业务专用：手动调整触发价位 --------------------
+
+/**
+ * 推送【手动调整触发价位】通知 — /adjust-levels 成功后调用.
+ *
+ * @param {object} info
+ *   @param {'long'|'short'}      info.direction
+ *   @param {string}              [info.symbol]
+ *   @param {'active'|'pending'}  info.target      持仓 or 挂单
+ *   @param {number}              [info.entryPrice] active 分支的固定入场价
+ *   @param {object}              info.levels      { entry?, sl, tp1, tp2, tp3 } 每项 { prev, next }
+ *   @param {object}              [info.tpHit]     active 分支: { tp1, tp2, tp3 } 已触发标记
+ */
+async function sendLevelsAdjusted(info) {
+  if (!info || typeof info !== 'object') return { ok: false, skipped: 'no_info' };
+  const dir = info.direction;
+  if (dir !== 'long' && dir !== 'short') return { ok: false, skipped: 'bad_direction' };
+
+  const dirEmoji = dir === 'long' ? '🟢' : '🔴';
+  const dirZh = dir === 'long' ? '做多 (LONG)' : '做空 (SHORT)';
+  const symbol = info.symbol || 'BTCUSDT';
+  const targetZh = info.target === 'pending' ? '📋 挂单 (未成交)' : '📌 持仓 (active)';
+  const lv = info.levels || {};
+  const tpHit = info.tpHit || {};
+
+  // 变更行: 改了 → 划线旧值 + 加粗新值; 没改 → 原值; 已触发的 TP 标注跳过
+  const line = (icon, label, pair, hit) => {
+    if (!pair || (pair.prev == null && pair.next == null)) return null;
+    if (hit) return `${icon} ${label}：<code>${escapeHTML(fmt(pair.prev))}</code>   <i>(已触发, 跳过)</i>`;
+    const changed = Number(pair.prev) !== Number(pair.next);
+    const val = changed
+      ? `<s>${escapeHTML(fmt(pair.prev))}</s> → <b>${escapeHTML(fmt(pair.next))}</b>`
+      : `<code>${escapeHTML(fmt(pair.next))}</code>`;
+    return `${icon} ${label}：${val}`;
+  };
+
+  const lines = [
+    `✏️ <b>${escapeHTML(symbol)} 触发价位已手动调整 · ${dirEmoji} ${escapeHTML(dirZh)}</b>`,
+    targetZh,
+    '',
+    info.target === 'pending'
+      ? line('🚪', 'entry', lv.entry)
+      : (Number.isFinite(info.entryPrice) ? `🚪 入场价：<code>${escapeHTML(fmt(info.entryPrice))}</code>` : null),
+    line('🛡', '止损价', lv.sl),
+    '',
+    line('🎯', 'TP1', lv.tp1, !!tpHit.tp1),
+    line('🎯', 'TP2', lv.tp2, !!tpHit.tp2),
+    line('🎯', 'TP3', lv.tp3, !!tpHit.tp3),
+    '',
+    `⏰ ${escapeHTML(nowStr())}`,
+  ].filter((l) => l !== null);
+
+  return sendMessage(lines.join('\n'));
+}
+
 // -------------------- 状态查询 / 自检 --------------------
 
 function getStatus() {
@@ -407,6 +462,7 @@ module.exports = {
   sendTradeSignal,
   sendOpenFilled,
   sendOpenArmed,
+  sendLevelsAdjusted,
   fireAndForget,
   getStatus,
   ping,
