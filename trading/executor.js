@@ -50,6 +50,11 @@ async function postWebhook(payload, label = 'auto-trade', opts = {}) {
   }
   const retry = opts.retry != null ? opts.retry : (cfg.webhookRetry ?? 2);
   const timeout = opts.timeoutMs ?? cfg.webhookTimeoutMs ?? 15000;
+  // 出站审计日志: 与接收端日志逐条对账用 (排查"对方收到 action=undefined"类问题).
+  // 打印完整 payload — 本通道只发交易指令, 无敏感内容 (token 本身就是接收端要校验的).
+  try {
+    console.log(`[trade.executor] 📤 ${label} → ${cfg.webhookUrl}\n  ${JSON.stringify(payload)}`);
+  } catch (_) { /* 序列化失败不阻塞发送 */ }
   let lastErr = null;
   for (let i = 0; i <= retry; i++) {
     try {
@@ -58,7 +63,13 @@ async function postWebhook(payload, label = 'auto-trade', opts = {}) {
         headers: { 'Content-Type': 'application/json' },
         httpAgent, httpsAgent,
       });
-      console.log(`[trade.executor] ✅ ${label} 发送成功 status=${resp.status} (尝试 ${i + 1}/${retry + 1})`);
+      // 响应体也打出来: 接收端"跳过/去重/失败"往往只体现在 body 里, status 仍是 200
+      let respBrief = '';
+      try {
+        const s = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+        if (s && s !== '{}') respBrief = ` resp=${s.length > 300 ? s.slice(0, 300) + '...' : s}`;
+      } catch (_) {}
+      console.log(`[trade.executor] ✅ ${label} 发送成功 status=${resp.status} (尝试 ${i + 1}/${retry + 1})${respBrief}`);
       return { ok: true, status: resp.status, data: resp.data, attempts: i + 1 };
     } catch (err) {
       lastErr = err;
