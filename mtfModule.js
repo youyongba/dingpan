@@ -478,64 +478,67 @@ function buildSummary(tfMap, tfRows) {
   };
 }
 
-// ---------------------- 15分钟状态变化 → 飞书推送 ----------------------
+// ---------------------- 短周期状态变化 → 飞书推送 ----------------------
 //
 // 规则:
-//   - 监控 15M 周期的"状态"标签 (强多/偏多/震荡/混乱/偏空/强空)
+//   - 监控 MTF_NOTIFY_TFS 指定周期 (默认 15M + 5M) 的"状态"标签
+//     (强多/偏多/震荡/混乱/偏空/强空)
 //   - 新状态需连续 MTF_NOTIFY_CONFIRM 轮刷新一致才确认推送 (默认 2 轮 ≈ 3 分钟),
 //     防止分数在阈值附近来回抖动刷屏
 //   - 进程启动后的第一轮只记录基线, 不推送 (避免每次重启都发一条)
 //   - 走 force 跳过 feishuWebhook 的全局节流 (confirm 机制本身就是防抖)
 const STATE_CONFIRM = Math.max(1, parseInt(process.env.MTF_NOTIFY_CONFIRM, 10) || 2);
+const NOTIFY_TFS = (process.env.MTF_NOTIFY_TFS || '15,5').split(',').map((s) => s.trim()).filter(Boolean);
+const TF_CN_LABEL = { W: '周线', D: '日线', 240: '4小时', 60: '1小时', 15: '15分钟', 5: '5分钟' };
 
-const notify15 = {
-  lastState: null,       // 已确认的基线状态
-  pendingState: null,    // 待确认的新状态
-  pendingCount: 0,
-};
+// key -> { lastState, pendingState, pendingCount }
+const notifyStates = new Map();
 
-function evaluate15StateChange(tf15, summary) {
-  if (!tf15 || !tf15.state) return;
-  const cur = tf15.state;
+function evaluateTfStateChange(tfKey, tf, summary) {
+  if (!tf || !tf.state) return;
+  const cur = tf.state;
+  const label = TF_CN_LABEL[tfKey] || tfKey;
+  let st = notifyStates.get(tfKey);
+  if (!st) { st = { lastState: null, pendingState: null, pendingCount: 0 }; notifyStates.set(tfKey, st); }
 
   // 启动首轮: 只记基线
-  if (notify15.lastState == null) {
-    notify15.lastState = cur;
-    console.log(`[mtf] 15M 状态基线: ${cur}`);
+  if (st.lastState == null) {
+    st.lastState = cur;
+    console.log(`[mtf] ${label} 状态基线: ${cur}`);
     return;
   }
   // 状态没变 (或抖回原状态): 清掉待确认
-  if (cur === notify15.lastState) {
-    notify15.pendingState = null;
-    notify15.pendingCount = 0;
+  if (cur === st.lastState) {
+    st.pendingState = null;
+    st.pendingCount = 0;
     return;
   }
   // 状态变了: 累计确认轮数
-  if (notify15.pendingState === cur) {
-    notify15.pendingCount += 1;
+  if (st.pendingState === cur) {
+    st.pendingCount += 1;
   } else {
-    notify15.pendingState = cur;
-    notify15.pendingCount = 1;
+    st.pendingState = cur;
+    st.pendingCount = 1;
   }
-  if (notify15.pendingCount < STATE_CONFIRM) return;
+  if (st.pendingCount < STATE_CONFIRM) return;
 
-  const from = notify15.lastState;
-  notify15.lastState = cur;
-  notify15.pendingState = null;
-  notify15.pendingCount = 0;
+  const from = st.lastState;
+  st.lastState = cur;
+  st.pendingState = null;
+  st.pendingCount = 0;
 
-  const emoji = tf15.side === 'bear' ? '🔴' : tf15.side === 'bull' ? '🟢' : '🟡';
-  const scoreStr = tf15.score > 0 ? `+${tf15.score}` : String(tf15.score);
-  console.log(`[mtf] 📣 15M 状态变化: ${from} → ${cur} (分 ${scoreStr}), 推送飞书`);
-  feishu.sendRich(`${emoji} MTF 15分钟状态变化: ${from} → ${cur}`, [
-    [{ text: `📊 ${SYMBOL} · 15分钟周期` }],
+  const emoji = tf.side === 'bear' ? '🔴' : tf.side === 'bull' ? '🟢' : '🟡';
+  const scoreStr = tf.score > 0 ? `+${tf.score}` : String(tf.score);
+  console.log(`[mtf] 📣 ${label} 状态变化: ${from} → ${cur} (分 ${scoreStr}), 推送飞书`);
+  feishu.sendRich(`${emoji} MTF ${label}状态变化: ${from} → ${cur}`, [
+    [{ text: `📊 ${SYMBOL} · ${label}周期` }],
     [{ text: `状态: ${from} → ${cur}   (分数 ${scoreStr})` }],
-    [{ text: `操作: ${tf15.action}` }],
+    [{ text: `操作: ${tf.action}` }],
     [{ text: `总分: ${summary.totalState} ${summary.totalScore > 0 ? '+' + summary.totalScore : summary.totalScore} · 建议 ${summary.suggestion}${summary.execTf ? ' · ' + summary.execTf : ''}` }],
     [{ text: `共振: ${summary.resonanceLabel}${summary.overall ? ' · ' + summary.overall : ''}` }],
     [{ text: `现价: ${summary.currentPrice != null ? Number(summary.currentPrice).toFixed(1) : '--'}` }],
     [{ text: `⏰ ${cnTime()}` }],
-  ], { eventKey: 'mtf15StateChange', force: true });
+  ], { eventKey: `mtf${tfKey}StateChange`, force: true });
 }
 
 // ---------------------- 数据拉取与刷新 ----------------------
@@ -588,11 +591,13 @@ async function refresh() {
       error: null,
     };
 
-    // 15M 状态变化检测 → 飞书 (confirm 防抖, 详见上方注释)
-    try {
-      evaluate15StateChange(tfMap['15'], summary);
-    } catch (e) {
-      console.error('[mtf] 15M 状态推送检测异常:', e?.message || e);
+    // 短周期 (默认 15M/5M) 状态变化检测 → 飞书 (confirm 防抖, 详见上方注释)
+    for (const tfKey of NOTIFY_TFS) {
+      try {
+        evaluateTfStateChange(tfKey, tfMap[tfKey], summary);
+      } catch (e) {
+        console.error(`[mtf] ${tfKey} 状态推送检测异常:`, e?.message || e);
+      }
     }
   } catch (e) {
     cache.error = e?.message || String(e);
@@ -620,4 +625,4 @@ if (typeof timer.unref === 'function') timer.unref();
 refresh();
 console.log(`[mtf] 多周期共振模块已启动: ${SYMBOL} · ${TIMEFRAMES.map((t) => t.key).join('/')} · 刷新 ${REFRESH_MS / 1000}s`);
 
-module.exports = { router, refresh, _test: { evaluate15StateChange, notify15 } };
+module.exports = { router, refresh, _test: { evaluateTfStateChange, notifyStates } };
