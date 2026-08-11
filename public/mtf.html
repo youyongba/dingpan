@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>多周期共振 · BTC/USDT</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #131a24;
+    --border: #26313f;
+    --head: #1a2634;
+    --text: #e6edf3;
+    --dim: #8b949e;
+    --bull: #3fb950;
+    --bull-bg: rgba(63, 185, 80, 0.14);
+    --bear: #f85149;
+    --bear-bg: rgba(248, 81, 73, 0.14);
+    --mid: #d29922;
+    --mid-bg: rgba(210, 153, 34, 0.14);
+    --accent: #58a6ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 13px; padding: 14px; max-width: 900px; margin: 0 auto;
+  }
+  h1 { font-size: 17px; margin-bottom: 4px; }
+  .meta { color: var(--dim); font-size: 12px; margin-bottom: 12px; }
+  .meta a { color: var(--accent); text-decoration: none; margin-left: 10px; }
+
+  .board {
+    border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+    background: var(--panel); box-shadow: 0 4px 14px rgba(0,0,0,0.3);
+  }
+  .grid-top { display: grid; grid-template-columns: 1fr 1fr; }
+  @media (max-width: 700px) { .grid-top { grid-template-columns: 1fr; } }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td {
+    padding: 7px 9px; text-align: center; border: 1px solid var(--border);
+    font-size: 13px; white-space: nowrap;
+  }
+  th { background: var(--head); color: var(--dim); font-weight: 600; font-size: 12px; }
+  td.name { color: var(--dim); font-weight: 600; }
+
+  .cell-bull { background: var(--bull-bg); color: var(--bull); font-weight: 700; }
+  .cell-bear { background: var(--bear-bg); color: var(--bear); font-weight: 700; }
+  .cell-mid  { background: var(--mid-bg);  color: var(--mid);  font-weight: 700; }
+  .cell-dim  { color: var(--dim); }
+
+  .reso-row td {
+    background: #101722; font-weight: 700; padding: 9px;
+  }
+  .reso-bear { color: var(--bear); }
+  .reso-bull { color: var(--bull); }
+  .reso-none { color: var(--dim); }
+
+  /* 底部聚合区 */
+  .summary { border-top: 2px solid var(--border); }
+  .sum-grid {
+    display: grid; grid-template-columns: repeat(6, 1fr);
+    border-bottom: 1px solid var(--border);
+  }
+  .sum-cell {
+    padding: 9px 6px; text-align: center; border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 3px; justify-content: center;
+  }
+  .sum-cell:last-child { border-right: none; }
+  .sum-cell .k { font-size: 11px; color: var(--dim); }
+  .sum-cell .v { font-size: 15px; font-weight: 800; }
+  .v.bull { color: var(--bull); }
+  .v.bear { color: var(--bear); }
+  .v.mid  { color: var(--mid); }
+
+  .tags {
+    display: flex; flex-wrap: wrap; gap: 8px; padding: 10px;
+    border-bottom: 1px solid var(--border); background: #101722;
+  }
+  .tag {
+    padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 700;
+    border: 1px solid var(--border); color: var(--dim); background: var(--panel);
+  }
+  .tag.bear { color: var(--bear); border-color: rgba(248,81,73,0.4); background: var(--bear-bg); }
+  .tag.bull { color: var(--bull); border-color: rgba(63,185,80,0.4); background: var(--bull-bg); }
+  .tag.mid  { color: var(--mid);  border-color: rgba(210,153,34,0.4); background: var(--mid-bg); }
+
+  .vol-grid { display: grid; grid-template-columns: repeat(4, 1fr); }
+  .vol-grid .sum-cell { border-bottom: none; }
+
+  .err {
+    display: none; margin-bottom: 10px; padding: 8px 12px; border-radius: 8px;
+    background: var(--bear-bg); border: 1px solid rgba(248,81,73,0.4); color: var(--bear); font-size: 12px;
+  }
+  .arrow-up::after { content: '↑'; margin-left: 2px; }
+  .arrow-down::after { content: '↓'; margin-left: 2px; }
+</style>
+</head>
+<body>
+
+<h1>📊 多周期共振 · <span id="symbol">BTCUSDT</span></h1>
+<div class="meta">
+  W / D / 4H / 1H / 15M / 5M 六周期评分 ·
+  <span id="updatedAt">加载中...</span> ·
+  <a href="/regime">← Regime 面板</a>
+  <a href="#" id="refreshBtn">手动刷新</a>
+</div>
+<div id="err" class="err"></div>
+
+<div class="board">
+  <div class="grid-top">
+    <!-- 左表: 周期评分 -->
+    <table>
+      <thead><tr><th>周期</th><th>分</th><th>状态</th><th>操作</th></tr></thead>
+      <tbody id="tfBody"></tbody>
+      <tfoot><tr class="reso-row"><td colspan="4" id="resoCell">--</td></tr></tfoot>
+    </table>
+    <!-- 右表: 全局指标 -->
+    <table>
+      <thead><tr><th>指标</th><th>状态</th><th>分</th></tr></thead>
+      <tbody id="indBody"></tbody>
+    </table>
+  </div>
+
+  <div class="summary">
+    <!-- 计数 + 总分 -->
+    <div class="sum-grid">
+      <div class="sum-cell"><span class="k">多</span><span class="v bull" id="bullCount">-</span></div>
+      <div class="sum-cell"><span class="k">中</span><span class="v mid" id="neutralCount">-</span></div>
+      <div class="sum-cell"><span class="k">空</span><span class="v bear" id="bearCount">-</span></div>
+      <div class="sum-cell"><span class="k">共</span><span class="v" id="totalCount">-</span></div>
+      <div class="sum-cell"><span class="k">总分</span><span class="v" id="totalScore">-</span></div>
+      <div class="sum-cell"><span class="k">建议</span><span class="v" id="suggestion">-</span></div>
+    </div>
+    <!-- 状态标签行 -->
+    <div class="tags" id="tagRow"></div>
+    <!-- 波动率行 -->
+    <div class="vol-grid">
+      <div class="sum-cell"><span class="k">ATR%</span><span class="v" id="atrPct">-</span></div>
+      <div class="sum-cell"><span class="k">HV%</span><span class="v" id="hvPct">-</span></div>
+      <div class="sum-cell"><span class="k">BBW%</span><span class="v" id="bbwPct">-</span></div>
+      <div class="sum-cell"><span class="k">ATR×1.5 (点)</span><span class="v" id="atrX15">-</span></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const REFRESH_MS = 30 * 1000;
+
+  const sideClass = (side) => side === 'bull' ? 'cell-bull' : side === 'bear' ? 'cell-bear' : 'cell-mid';
+  const tendencyClass = (t) => t === '多' ? 'cell-bull' : t === '空' ? 'cell-bear' : 'cell-mid';
+  const esc = (s) => String(s ?? '--').replace(/</g, '&lt;');
+
+  function render(d) {
+    document.getElementById('symbol').textContent = d.symbol || 'BTCUSDT';
+    document.getElementById('updatedAt').textContent = d.updatedAt
+      ? '更新于 ' + new Date(d.updatedAt).toLocaleTimeString('zh-CN', { hour12: false })
+      : '暂无数据';
+
+    // 左表: 周期行
+    document.getElementById('tfBody').innerHTML = (d.timeframes || []).map((t) => `
+      <tr>
+        <td class="name">${esc(t.key)}</td>
+        <td class="${sideClass(t.side)}">${t.score > 0 ? '+' + t.score : t.score}</td>
+        <td class="${sideClass(t.side)}">${esc(t.state)}</td>
+        <td class="${t.state === '混乱' || t.state === '震荡' ? 'cell-dim' : sideClass(t.side)}">${esc(t.action)}</td>
+      </tr>`).join('');
+
+    // 共振行
+    const s = d.summary || {};
+    const resoCell = document.getElementById('resoCell');
+    resoCell.textContent = s.resonanceLabel || '--';
+    resoCell.className = s.resonance === 'bear' ? 'reso-bear' : s.resonance === 'bull' ? 'reso-bull' : 'reso-none';
+
+    // 右表: 指标行
+    document.getElementById('indBody').innerHTML = (d.indicators || []).map((i) => `
+      <tr>
+        <td class="name" title="${esc(i.detail)}">${esc(i.name)}</td>
+        <td class="${tendencyClass(i.tendency)}" title="${esc(i.detail)}">${esc(i.state)}</td>
+        <td class="${tendencyClass(i.tendency)}">${esc(i.tendency)}</td>
+      </tr>`).join('');
+
+    // 计数 + 总分 + 建议
+    document.getElementById('bullCount').textContent = s.bullCount ?? '-';
+    document.getElementById('neutralCount').textContent = s.neutralCount ?? '-';
+    document.getElementById('bearCount').textContent = s.bearCount ?? '-';
+    document.getElementById('totalCount').textContent = s.total ?? '-';
+    const tsEl = document.getElementById('totalScore');
+    tsEl.textContent = s.totalScore != null ? `${s.totalState} ${s.totalScore > 0 ? '+' + s.totalScore : s.totalScore}` : '-';
+    tsEl.className = 'v ' + (s.totalScore >= 2 ? 'bull' : s.totalScore <= -2 ? 'bear' : 'mid');
+    const sgEl = document.getElementById('suggestion');
+    sgEl.textContent = s.suggestion ? s.suggestion + (s.execTf ? ` · ${s.execTf}` : '') : '-';
+    sgEl.className = tsEl.className;
+
+    // 标签行
+    const tags = [];
+    if (s.overall) tags.push({ text: s.overall, cls: s.overall.includes('空') ? 'bear' : 'bull' });
+    if (s.resonance) tags.push({ text: s.resonanceLabel, cls: s.resonance === 'bear' ? 'bear' : 'bull' });
+    if (s.leaders && s.leaders.length) {
+      tags.push({ text: `先行${s.totalScore < 0 ? '空' : '多'}: ${s.leaders.join(' · ')}`, cls: s.totalScore < 0 ? 'bear' : 'bull' });
+    }
+    if (s.candleSync) tags.push({ text: s.candleSync, cls: s.candleSync === '齐跌' ? 'bear' : 'bull' });
+    if (s.vol && s.vol.squeeze) tags.push({ text: '压缩 · 蓄势待发', cls: 'mid' });
+    if (s.currentPrice != null) tags.push({ text: `现价 ${Number(s.currentPrice).toFixed(1)}`, cls: '' });
+    document.getElementById('tagRow').innerHTML = tags.length
+      ? tags.map((t) => `<span class="tag ${t.cls}">${esc(t.text)}</span>`).join('')
+      : '<span class="tag">暂无信号标签</span>';
+
+    // 波动率
+    const v = s.vol || {};
+    const volCell = (id, val, trend, suffix = '%') => {
+      const el = document.getElementById(id);
+      el.textContent = val != null ? val + suffix : '-';
+      el.classList.remove('arrow-up', 'arrow-down');
+      if (trend === 'up') el.classList.add('arrow-up');
+      if (trend === 'down') el.classList.add('arrow-down');
+    };
+    volCell('atrPct', v.atrPct, v.atrTrend);
+    volCell('hvPct', v.hvPct, v.hvTrend);
+    volCell('bbwPct', v.bbwPct, v.bbwTrend);
+    volCell('atrX15', v.atrX15, null, '');
+  }
+
+  async function load(manual = false) {
+    const errEl = document.getElementById('err');
+    try {
+      if (manual) await fetch('/api/mtf/refresh', { method: 'POST' });
+      const r = await fetch('/api/mtf/status');
+      const d = await r.json();
+      if (d.error && !d.ok) throw new Error(d.error);
+      errEl.style.display = 'none';
+      render(d);
+      if (d.error) {   // 有缓存但最近一轮刷新失败 → 显示提示不清空面板
+        errEl.textContent = '⚠️ 最近一轮刷新失败 (' + d.error + '), 当前显示为上次成功数据';
+        errEl.style.display = 'block';
+      }
+    } catch (e) {
+      errEl.textContent = '❌ 加载失败: ' + e.message;
+      errEl.style.display = 'block';
+    }
+  }
+
+  document.getElementById('refreshBtn').addEventListener('click', (e) => {
+    e.preventDefault();
+    load(true);
+  });
+  setInterval(load, REFRESH_MS);
+  load();
+})();
+</script>
+</body>
+</html>

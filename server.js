@@ -55,6 +55,11 @@ app.use(express.static('public'));
 // === Regime 监控（独立模块）：JSON 接口 + Chart.js 面板 + 飞书通知 ===
 app.use('/api/regime', regimeMod.router);
 
+// === 多周期共振评分面板（独立只读模块）：W/D/4H/1H/15M/5M 六周期评分 + 聚合 ===
+const mtfMod = require('./mtfModule');
+app.use('/api/mtf', mtfMod.router);
+app.get('/mtf', (req, res) => res.redirect('/mtf.html'));
+
 // === 自动平仓引擎（独立模块）：WS 监控 + 风控 + 出站 webhook ===
 const autoTrade = require('./trading');
 autoTrade.attach(app);
