@@ -1305,6 +1305,14 @@
     <h3>RSI (14) · 最近 50 根</h3>
     <div class="chart-wrap"><canvas id="chartRsi"></canvas></div>
   </div>
+  <div class="card">
+    <h3>MACD (12, 26, 9) · 15分钟 · 最近 50 根</h3>
+    <div class="chart-wrap"><canvas id="chartMacd15"></canvas></div>
+  </div>
+  <div class="card">
+    <h3>RSI (14) · 15分钟 · 最近 50 根</h3>
+    <div class="chart-wrap"><canvas id="chartRsi15"></canvas></div>
+  </div>
 </div>
 
 <!-- ============ DeepSeek AI 行情分析面板 (aitrade.24os.cn) ============ -->
@@ -3711,7 +3719,8 @@
    * MACD 专用图：柱状图 Hist + 折线 DIF/DEA
    * datasets 中 bar 会自动与 line 叠加渲染（Chart.js 混合类型）
    */
-  function macdChart(canvasId, times, macd, signal, hist) {
+  function macdChart(canvasId, times, macd, signal, hist, opt = {}) {
+    const timeUnit = opt.timeUnit || 'day';   // 15m 图用 'hour'，1h 图默认 'day'
     const ctx = document.getElementById(canvasId).getContext('2d');
     const dataHist = times.map((t, i) => ({ x: t, y: hist[i] == null ? null : hist[i] }));
     const dataMacd = times.map((t, i) => ({ x: t, y: macd[i] == null ? null : macd[i] }));
@@ -3754,7 +3763,7 @@
         scales: {
           x: {
             type: 'time',
-            time: { unit: 'day', tooltipFormat: 'yyyy-LL-dd HH:mm' },
+            time: { unit: timeUnit, tooltipFormat: 'yyyy-LL-dd HH:mm' },
             grid: { color: 'rgba(255,255,255,0.05)' },
             ticks: { maxRotation: 0, autoSkipPadding: 20 },
           },
@@ -3775,7 +3784,8 @@
    *  - hitRadius：给一个命中半径，避免 hover 在密集数据间抖动
    *  - 水平线插件 afterDatasetsDraw 一次性绘制三条，减少 save/restore 次数
    */
-  function rsiChart(canvasId, times, rsi) {
+  function rsiChart(canvasId, times, rsi, opt = {}) {
+    const timeUnit = opt.timeUnit || 'day';   // 15m 图用 'hour'，1h 图默认 'day'
     const ctx = document.getElementById(canvasId).getContext('2d');
     const data = times.map((t, i) => ({ x: t, y: rsi[i] == null ? null : rsi[i] }));
 
@@ -3851,7 +3861,7 @@
         scales: {
           x: {
             type: 'time',
-            time: { unit: 'day', tooltipFormat: 'yyyy-LL-dd HH:mm' },
+            time: { unit: timeUnit, tooltipFormat: 'yyyy-LL-dd HH:mm' },
             grid: { color: 'rgba(255,255,255,0.05)' },
             ticks: { maxRotation: 0, autoSkipPadding: 20 },
           },
@@ -3994,6 +4004,13 @@
     if (mr && mr.times && mr.times.length) {
       macdChart('chartMacd', mr.times, mr.macd || [], mr.signal || [], mr.hist || []);
       rsiChart('chartRsi', mr.times, mr.rsi || []);
+    }
+
+    // 新增：15 分钟 MACD / RSI（后端 macdRsi15；15m 拉取失败时保持上一帧）
+    const mr15 = data.macdRsi15;
+    if (mr15 && mr15.times && mr15.times.length) {
+      macdChart('chartMacd15', mr15.times, mr15.macd || [], mr15.signal || [], mr15.hist || [], { timeUnit: 'hour' });
+      rsiChart('chartRsi15', mr15.times, mr15.rsi || [], { timeUnit: 'hour' });
     }
   }
 

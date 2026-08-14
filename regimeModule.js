@@ -124,8 +124,9 @@ const notifyState = {
   lastSubRegime: null,     // 上一次增强 Regime 的 subRegime
   lastRsiZone: null,       // 'OVERBOUGHT' / 'OVERSOLD' / 'NEUTRAL'
   lastMacdSide: null,      // 'BULL' / 'BEAR' / 'FLAT'
-  // 15 分钟 RSI 区间 + 多周期共振信号状态（首次为 null 表示未建基线）
+  // 15 分钟 RSI 区间 / MACD 零轴侧 + 多周期共振信号状态（首次为 null 表示未建基线）
   lastRsi15Zone: null,     // 'OVERBOUGHT' / 'OVERSOLD' / 'NEUTRAL'
+  lastMacd15Side: null,    // 'BULL' / 'BEAR'（hist 零轴侧，切换即金叉/死叉）
   lastCombo1h: null,       // 'BULL' / 'BEAR' / 'NONE'
   lastCombo15m: null,      // 'BULL' / 'BEAR' / 'NONE'
 };
@@ -148,6 +149,7 @@ function loadNotifyState() {
     if (obj && typeof obj.lastRsiZone === 'string') notifyState.lastRsiZone = obj.lastRsiZone;
     if (obj && typeof obj.lastMacdSide === 'string') notifyState.lastMacdSide = obj.lastMacdSide;
     if (obj && typeof obj.lastRsi15Zone === 'string') notifyState.lastRsi15Zone = obj.lastRsi15Zone;
+    if (obj && typeof obj.lastMacd15Side === 'string') notifyState.lastMacd15Side = obj.lastMacd15Side;
     if (obj && typeof obj.lastCombo1h === 'string') notifyState.lastCombo1h = obj.lastCombo1h;
     if (obj && typeof obj.lastCombo15m === 'string') notifyState.lastCombo15m = obj.lastCombo15m;
     console.log(`[regime] 通知状态已恢复: lastTradeAction=${notifyState.lastTradeAction}, startupSent=${notifyState.startupSent}, lastSubRegime=${notifyState.lastSubRegime}`);
@@ -164,6 +166,7 @@ function saveNotifyState() {
       lastRsiZone: notifyState.lastRsiZone,
       lastMacdSide: notifyState.lastMacdSide,
       lastRsi15Zone: notifyState.lastRsi15Zone,
+      lastMacd15Side: notifyState.lastMacd15Side,
       lastCombo1h: notifyState.lastCombo1h,
       lastCombo15m: notifyState.lastCombo15m,
       savedAt: new Date().toISOString(),
@@ -501,6 +504,7 @@ function compute15mIndicators(klines15) {
   const rsi = computeRSI(c15, 14);
   return {
     rsi, macd, signal, hist,
+    times: klines15.map(k => k.time),
     lastClose: c15[c15.length - 1],
     lastTime: klines15[klines15.length - 1].time,
   };
@@ -583,9 +587,9 @@ async function refresh() {
     handleNotificationsOnSuccess(prevRegime, enhanced, klines, tradePlan);
     // 关键信号 → 飞书 Webhook（独立于 IM API 通道）
     dispatchWebhookSignals(prevRegime, enhanced, tradePlan, klines);
-    // 15m RSI 超买/超卖 → 飞书（异常隔离，不影响主流程）
-    try { dispatch15mRsiSignal(m15); }
-    catch (e) { console.error('[regime] 15m RSI 信号检测异常:', e?.message || e); }
+    // 15m RSI 超买/超卖 + MACD 金叉/死叉 → 飞书（异常隔离，不影响主流程）
+    try { dispatch15mSignals(m15); }
+    catch (e) { console.error('[regime] 15m 信号检测异常:', e?.message || e); }
     // 多周期共振信号（1h / 15m 的 RSI+MACD 回溯 × 5分钟MTF强多/强空）→ 飞书
     try { dispatchComboSignals(indicators, m15, c[c.length - 1]); }
     catch (e) { console.error('[regime] 共振信号检测异常:', e?.message || e); }
@@ -930,42 +934,76 @@ function getMtf5Row() {
 }
 
 /**
- * 15 分钟 RSI 超买/超卖 → 飞书
- * 与 1h 同款边沿逻辑：只在“进入”超买/超卖区时推送一次，离开→中性不推；
- * 状态持久化到 notifyState.lastRsi15Zone，首轮只建基线不推送。
+ * 15 分钟信号 → 飞书（RSI 超买/超卖 + MACD 金叉/死叉）
+ *   - RSI：与 1h 同款边沿逻辑，只在“进入”超买/超卖区时推送一次，离开→中性不推
+ *   - MACD：跟踪 hist 零轴侧（BULL/BEAR），侧翻转即金叉/死叉；
+ *     用状态机而非 detectMacdCross 是因为 regime 5min 刷新 < 15m 出K节奏，
+ *     纯边沿检测会在同一根交叉 K 线上重复命中
+ * 状态持久化到 notifyState，首轮只建基线不推送。
  */
-function dispatch15mRsiSignal(m15) {
+function dispatch15mSignals(m15) {
   if (!m15 || !Array.isArray(m15.rsi) || !m15.rsi.length) return;
   const rsiNow = m15.rsi[m15.rsi.length - 1];
-  const zone = classifyRSI(rsiNow, { overbought: COMBO.rsiOverbought, oversold: COMBO.rsiOversold });
-  if (!zone) return;
-
-  if (notifyState.lastRsi15Zone == null) {
-    notifyState.lastRsi15Zone = zone;
-    saveNotifyState();
-    return;
-  }
-  if (zone === notifyState.lastRsi15Zone) return;
-  notifyState.lastRsi15Zone = zone;
-  saveNotifyState();
-  if (zone !== 'OVERBOUGHT' && zone !== 'OVERSOLD') return;
-
-  const isOB = zone === 'OVERBOUGHT';
   const histNow = Array.isArray(m15.hist) ? m15.hist[m15.hist.length - 1] : null;
-  webhook.sendRich(
-    isOB ? '⚠️ 15分钟 RSI 进入超买区' : '⚠️ 15分钟 RSI 进入超卖区',
-    [
-      [{ text: '⏰ 时间：', bold: true }, { text: new Date().toLocaleString() }],
-      [{ text: '💰 当前价：', bold: true }, { text: fmt(m15.lastClose) }],
-      [{ text: `RSI(14,15m)=${fmt(rsiNow)}  MACD HIST(15m)=${fmt(histNow)}` }],
-      [{ text: '💡 解读：', bold: true }, {
-        text: isOB
-          ? `15分钟 RSI ≥${COMBO.rsiOverbought}：短线超买，追多风险偏高，注意回调`
-          : `15分钟 RSI ≤${COMBO.rsiOversold}：短线超卖，追空风险偏高，注意反弹`,
-      }],
-    ],
-    { eventKey: `rsi15Zone_${zone}` }
-  );
+
+  // ---- 1) RSI 超买 / 超卖 ----
+  const zone = classifyRSI(rsiNow, { overbought: COMBO.rsiOverbought, oversold: COMBO.rsiOversold });
+  if (zone) {
+    if (notifyState.lastRsi15Zone == null) {
+      notifyState.lastRsi15Zone = zone;
+      saveNotifyState();
+    } else if (zone !== notifyState.lastRsi15Zone) {
+      notifyState.lastRsi15Zone = zone;
+      saveNotifyState();
+      if (zone === 'OVERBOUGHT' || zone === 'OVERSOLD') {
+        const isOB = zone === 'OVERBOUGHT';
+        webhook.sendRich(
+          isOB ? '⚠️ 15分钟 RSI 进入超买区' : '⚠️ 15分钟 RSI 进入超卖区',
+          [
+            [{ text: '⏰ 时间：', bold: true }, { text: new Date().toLocaleString() }],
+            [{ text: '💰 当前价：', bold: true }, { text: fmt(m15.lastClose) }],
+            [{ text: `RSI(14,15m)=${fmt(rsiNow)}  MACD HIST(15m)=${fmt(histNow)}` }],
+            [{ text: '💡 解读：', bold: true }, {
+              text: isOB
+                ? `15分钟 RSI ≥${COMBO.rsiOverbought}：短线超买，追多风险偏高，注意回调`
+                : `15分钟 RSI ≤${COMBO.rsiOversold}：短线超卖，追空风险偏高，注意反弹`,
+            }],
+          ],
+          { eventKey: `rsi15Zone_${zone}` }
+        );
+      }
+    }
+  }
+
+  // ---- 2) MACD 金叉 / 死叉（hist 零轴侧翻转）----
+  if (histNow != null && Number.isFinite(histNow) && histNow !== 0) {
+    const side = histNow > 0 ? 'BULL' : 'BEAR';
+    if (notifyState.lastMacd15Side == null) {
+      notifyState.lastMacd15Side = side;
+      saveNotifyState();
+    } else if (side !== notifyState.lastMacd15Side) {
+      notifyState.lastMacd15Side = side;
+      saveNotifyState();
+      const isGolden = side === 'BULL';
+      const dif = Array.isArray(m15.macd) ? m15.macd[m15.macd.length - 1] : null;
+      const dea = Array.isArray(m15.signal) ? m15.signal[m15.signal.length - 1] : null;
+      webhook.sendRich(
+        isGolden ? '📈 15分钟 MACD 金叉' : '📉 15分钟 MACD 死叉',
+        [
+          [{ text: '⏰ 时间：', bold: true }, { text: new Date().toLocaleString() }],
+          [{ text: '💰 当前价：', bold: true }, { text: fmt(m15.lastClose) }],
+          [{ text: `MACD(15m): DIF=${fmt(dif)}  DEA=${fmt(dea)}  HIST=${fmt(histNow)}` }],
+          [{ text: `RSI(14,15m)=${fmt(rsiNow)}` }],
+          [{ text: '💡 解读：', bold: true }, {
+            text: isGolden
+              ? '15分钟级别多头动能启动；短线可关注回调做多机会，注意结合大周期方向过滤'
+              : '15分钟级别空头动能启动；短线可关注反弹做空机会，注意结合大周期方向过滤',
+          }],
+        ],
+        { eventKey: `macd15Cross_${isGolden ? 'GOLDEN' : 'DEATH'}` }
+      );
+    }
+  }
 }
 
 /**
@@ -1295,8 +1333,26 @@ router.get('/snapshot', (req, res) => {
     },
     // 需求 1.2 / 1.3：独立返回 MACD / RSI 最近 50 个周期的历史数据供图表单独渲染
     macdRsi: buildMacdRsiChartSlice(cache.klines, ind, CHART_TAIL),
+    // 15 分钟 MACD / RSI 最近 50 根（15m 拉取失败时为 null）
+    macdRsi15: buildM15ChartSlice(cache.m15, CHART_TAIL),
   });
 });
+
+/** 提取 15 分钟 MACD / RSI 最近 N 根（与 buildMacdRsiChartSlice 同结构） */
+function buildM15ChartSlice(m15, tail = CHART_TAIL) {
+  if (!m15 || !Array.isArray(m15.times) || !m15.times.length) return null;
+  const n = Math.min(tail, m15.times.length);
+  const start = m15.times.length - n;
+  const tailArr = (arr) => (Array.isArray(arr) ? arr.slice(start) : []);
+  return {
+    tail: n,
+    times: m15.times.slice(start),
+    macd: tailArr(m15.macd),
+    signal: tailArr(m15.signal),
+    hist: tailArr(m15.hist),
+    rsi: tailArr(m15.rsi),
+  };
+}
 
 /**
  * 提取 MACD / RSI 最近 N 个周期，单独返回给前端（满足需求 1.2 / 1.3）
@@ -1387,6 +1443,11 @@ module.exports = {
     rsiTouchedWithin,
     macdCrossedWithin,
     evalCombo,
+    // 15m 指标/信号（供测试复用）
+    compute15mIndicators,
+    buildM15ChartSlice,
+    dispatch15mSignals,
+    notifyState,
     // 同时暴露 enhanceRegime 给回测使用 (已经从 ./regime/enhancedJudge require)
     enhanceRegime,
     // 暴露常量
