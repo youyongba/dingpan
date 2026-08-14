@@ -2,9 +2,11 @@
  * ============================================================
  *  regimeModule.js
  *  宏观市场状态（Regime）独立判定模块
- *  - 拉取 Binance USDT 永续合约 BTCUSDT 1h K线
+ *  - 拉取 Binance USDT 永续合约 BTCUSDT 1h K线（辅以 15m K线算 RSI/MACD）
  *  - 计算 ATR / ADX / +DI / -DI / HV / ROC / Slope
  *  - 输出 Regime：趋势 / 震荡 / 恐慌 / 中性
+ *  - 附加飞书信号：15m RSI 超买超卖；1h/15m「RSI超卖过+MACD金叉过+5分钟MTF强多」
+ *    及反向「RSI超买过+MACD死叉过+5分钟MTF强空」共振推送
  *  - 与原有业务完全解耦：只对外暴露一个 Express Router
  * ============================================================
  */
@@ -41,6 +43,19 @@ const LIMIT = 500;                 // 拉取 500 根K线
 const REFRESH_MS = 5 * 60 * 1000;  // 5 分钟刷新一次
 const TIMEOUT = Number(process.env.BINANCE_TIMEOUT_MS || 10000);
 
+// 15 分钟辅助周期 + 多周期共振信号配置
+//   - 15m RSI 超买/超卖 → 飞书（边沿去重）
+//   - 「RSI超卖过 + MACD金叉过 + 5分钟MTF强多」共振（1h / 15m 两组）→ 飞书
+//   「xx过」= 最近 N 根 K 线内曾经发生（含当根），N 可通过环境变量调整
+const INTERVAL_15M = '15m';
+const COMBO = {
+  lookback1h: Math.max(1, parseInt(process.env.REGIME_COMBO_LOOKBACK_1H, 10) || 6),    // 1h 回溯 6 根 ≈ 6 小时
+  lookback15m: Math.max(1, parseInt(process.env.REGIME_COMBO_LOOKBACK_15M, 10) || 8),  // 15m 回溯 8 根 ≈ 2 小时
+  rsiOverbought: 70,
+  rsiOversold: 30,
+  mtfMaxAgeMs: 10 * 60 * 1000, // MTF 数据超过 10 分钟未刷新视为不可用
+};
+
 // 飞书通知配置
 const NOTIFY = {
   enabled: process.env.REGIME_FEISHU_ENABLED !== '0',
@@ -55,6 +70,7 @@ let cache = {
   indicators: null,
   regime: null,
   tradePlan: null,
+  m15: null,   // 15 分钟辅助指标 { rsi, macd, signal, hist, lastClose, lastTime }
   error: null,
 };
 
@@ -108,6 +124,10 @@ const notifyState = {
   lastSubRegime: null,     // 上一次增强 Regime 的 subRegime
   lastRsiZone: null,       // 'OVERBOUGHT' / 'OVERSOLD' / 'NEUTRAL'
   lastMacdSide: null,      // 'BULL' / 'BEAR' / 'FLAT'
+  // 15 分钟 RSI 区间 + 多周期共振信号状态（首次为 null 表示未建基线）
+  lastRsi15Zone: null,     // 'OVERBOUGHT' / 'OVERSOLD' / 'NEUTRAL'
+  lastCombo1h: null,       // 'BULL' / 'BEAR' / 'NONE'
+  lastCombo15m: null,      // 'BULL' / 'BEAR' / 'NONE'
 };
 
 // 配置项: 状态持久化文件路径
@@ -127,6 +147,9 @@ function loadNotifyState() {
     if (obj && typeof obj.lastSubRegime === 'string') notifyState.lastSubRegime = obj.lastSubRegime;
     if (obj && typeof obj.lastRsiZone === 'string') notifyState.lastRsiZone = obj.lastRsiZone;
     if (obj && typeof obj.lastMacdSide === 'string') notifyState.lastMacdSide = obj.lastMacdSide;
+    if (obj && typeof obj.lastRsi15Zone === 'string') notifyState.lastRsi15Zone = obj.lastRsi15Zone;
+    if (obj && typeof obj.lastCombo1h === 'string') notifyState.lastCombo1h = obj.lastCombo1h;
+    if (obj && typeof obj.lastCombo15m === 'string') notifyState.lastCombo15m = obj.lastCombo15m;
     console.log(`[regime] 通知状态已恢复: lastTradeAction=${notifyState.lastTradeAction}, startupSent=${notifyState.startupSent}, lastSubRegime=${notifyState.lastSubRegime}`);
   } catch (e) { /* 文件不存在则忽略 */ }
 }
@@ -140,6 +163,9 @@ function saveNotifyState() {
       lastSubRegime: notifyState.lastSubRegime,
       lastRsiZone: notifyState.lastRsiZone,
       lastMacdSide: notifyState.lastMacdSide,
+      lastRsi15Zone: notifyState.lastRsi15Zone,
+      lastCombo1h: notifyState.lastCombo1h,
+      lastCombo15m: notifyState.lastCombo15m,
       savedAt: new Date().toISOString(),
     }, null, 2));
   } catch (e) { console.error('[regime] saveNotifyState 失败:', e.message); }
@@ -454,10 +480,10 @@ function _legacy_buildTradePlanText_unused(plan) {
 }
 
 // ---------------------- 数据拉取 ----------------------
-async function fetchKlines() {
+async function fetchKlines(interval = INTERVAL, limit = LIMIT) {
   const url = `${BINANCE_FAPI}/fapi/v1/klines`;
   const { data } = await axios.get(url, {
-    params: { symbol: SYMBOL, interval: INTERVAL, limit: LIMIT },
+    params: { symbol: SYMBOL, interval, limit },
     timeout: TIMEOUT,
     httpAgent, httpsAgent,
   });
@@ -465,6 +491,19 @@ async function fetchKlines() {
     time: k[0],
     open: +k[1], high: +k[2], low: +k[3], close: +k[4], volume: +k[5],
   }));
+}
+
+/** 计算 15 分钟辅助指标（拉取失败时返回 null，不影响 1h 主流程） */
+function compute15mIndicators(klines15) {
+  if (!Array.isArray(klines15) || !klines15.length) return null;
+  const c15 = klines15.map(k => k.close);
+  const { macd, signal, hist } = computeMACD(c15, { fast: 12, slow: 26, signal: 9 });
+  const rsi = computeRSI(c15, 14);
+  return {
+    rsi, macd, signal, hist,
+    lastClose: c15[c15.length - 1],
+    lastTime: klines15[klines15.length - 1].time,
+  };
 }
 
 // 重入守卫: 防止上一轮 refresh 还没回(币安 fapi 慢响应), setInterval
@@ -482,7 +521,14 @@ async function refresh() {
   _isRefreshing = true;
   _lastRefreshStartedAt = Date.now();
   try {
-    const klines = await fetchKlines();
+    // 1h 主周期 + 15m 辅助周期并行拉取；15m 失败只降级（不影响 1h 主流程）
+    const [klines, klines15] = await Promise.all([
+      fetchKlines(INTERVAL, LIMIT),
+      fetchKlines(INTERVAL_15M, LIMIT).catch(e => {
+        console.error('[regime] 15m K线拉取失败(本轮跳过 15m 信号):', e.message);
+        return null;
+      }),
+    ]);
     const h = klines.map(k => k.high);
     const l = klines.map(k => k.low);
     const c = klines.map(k => k.close);
@@ -517,6 +563,9 @@ async function refresh() {
 
     const tradePlan = buildTradePlan(indicators, enhanced, klines);
 
+    // 15 分钟辅助指标（RSI / MACD）
+    const m15 = compute15mIndicators(klines15);
+
     const prevRegime = cache.regime;
     cache = {
       updatedAt: Date.now(),
@@ -524,6 +573,7 @@ async function refresh() {
       indicators,
       regime: enhanced,
       tradePlan,
+      m15,
       error: null,
     };
     console.log(
@@ -533,6 +583,12 @@ async function refresh() {
     handleNotificationsOnSuccess(prevRegime, enhanced, klines, tradePlan);
     // 关键信号 → 飞书 Webhook（独立于 IM API 通道）
     dispatchWebhookSignals(prevRegime, enhanced, tradePlan, klines);
+    // 15m RSI 超买/超卖 → 飞书（异常隔离，不影响主流程）
+    try { dispatch15mRsiSignal(m15); }
+    catch (e) { console.error('[regime] 15m RSI 信号检测异常:', e?.message || e); }
+    // 多周期共振信号（1h / 15m 的 RSI+MACD 回溯 × 5分钟MTF强多/强空）→ 飞书
+    try { dispatchComboSignals(indicators, m15, c[c.length - 1]); }
+    catch (e) { console.error('[regime] 共振信号检测异常:', e?.message || e); }
   } catch (err) {
     cache.error = err.message;
     console.error('[regime] refresh failed:', err.message);
@@ -827,6 +883,174 @@ function dirZh(d) {
   return ({ long: '做多 (LONG)', short: '做空 (SHORT)', neutral: '中性 / 观望' })[d] || '—';
 }
 
+// ---------------------- 15m RSI 信号 + 多周期共振信号 ----------------------
+
+/** RSI 最近 lookback 根内（含当根）是否触碰过超卖/超买区 */
+function rsiTouchedWithin(rsiSeries, zone, lookback) {
+  if (!Array.isArray(rsiSeries) || !rsiSeries.length) return false;
+  const n = rsiSeries.length;
+  for (let i = Math.max(0, n - lookback); i < n; i++) {
+    const v = rsiSeries[i];
+    if (v == null || !Number.isFinite(v)) continue;
+    if (zone === 'OVERSOLD' && v <= COMBO.rsiOversold) return true;
+    if (zone === 'OVERBOUGHT' && v >= COMBO.rsiOverbought) return true;
+  }
+  return false;
+}
+
+/** MACD hist 最近 lookback 根内（含当根）是否出现过金叉/死叉 */
+function macdCrossedWithin(histSeries, type, lookback) {
+  if (!Array.isArray(histSeries) || histSeries.length < 2) return false;
+  const n = histSeries.length;
+  for (let i = Math.max(1, n - lookback); i < n; i++) {
+    const prev = histSeries[i - 1];
+    const cur = histSeries[i];
+    if (prev == null || cur == null) continue;
+    if (type === 'GOLDEN' && prev <= 0 && cur > 0) return true;
+    if (type === 'DEATH' && prev >= 0 && cur < 0) return true;
+  }
+  return false;
+}
+
+/**
+ * 读取 MTF 模块 5 分钟周期的最新评分行（强多/强空来自 mtfModule.scoreTimeframe）。
+ * 懒加载 require，且数据超过 mtfMaxAgeMs 未刷新视为不可用，返回 null。
+ */
+function getMtf5Row() {
+  try {
+    const mtf = require('./mtfModule');
+    if (typeof mtf.getTimeframe !== 'function') return null;
+    const updatedAt = typeof mtf.getUpdatedAt === 'function' ? mtf.getUpdatedAt() : null;
+    if (!updatedAt || Date.now() - updatedAt > COMBO.mtfMaxAgeMs) return null;
+    return mtf.getTimeframe('5');
+  } catch (e) {
+    console.error('[regime] 读取 MTF 5m 状态失败:', e?.message || e);
+    return null;
+  }
+}
+
+/**
+ * 15 分钟 RSI 超买/超卖 → 飞书
+ * 与 1h 同款边沿逻辑：只在“进入”超买/超卖区时推送一次，离开→中性不推；
+ * 状态持久化到 notifyState.lastRsi15Zone，首轮只建基线不推送。
+ */
+function dispatch15mRsiSignal(m15) {
+  if (!m15 || !Array.isArray(m15.rsi) || !m15.rsi.length) return;
+  const rsiNow = m15.rsi[m15.rsi.length - 1];
+  const zone = classifyRSI(rsiNow, { overbought: COMBO.rsiOverbought, oversold: COMBO.rsiOversold });
+  if (!zone) return;
+
+  if (notifyState.lastRsi15Zone == null) {
+    notifyState.lastRsi15Zone = zone;
+    saveNotifyState();
+    return;
+  }
+  if (zone === notifyState.lastRsi15Zone) return;
+  notifyState.lastRsi15Zone = zone;
+  saveNotifyState();
+  if (zone !== 'OVERBOUGHT' && zone !== 'OVERSOLD') return;
+
+  const isOB = zone === 'OVERBOUGHT';
+  const histNow = Array.isArray(m15.hist) ? m15.hist[m15.hist.length - 1] : null;
+  webhook.sendRich(
+    isOB ? '⚠️ 15分钟 RSI 进入超买区' : '⚠️ 15分钟 RSI 进入超卖区',
+    [
+      [{ text: '⏰ 时间：', bold: true }, { text: new Date().toLocaleString() }],
+      [{ text: '💰 当前价：', bold: true }, { text: fmt(m15.lastClose) }],
+      [{ text: `RSI(14,15m)=${fmt(rsiNow)}  MACD HIST(15m)=${fmt(histNow)}` }],
+      [{ text: '💡 解读：', bold: true }, {
+        text: isOB
+          ? `15分钟 RSI ≥${COMBO.rsiOverbought}：短线超买，追多风险偏高，注意回调`
+          : `15分钟 RSI ≤${COMBO.rsiOversold}：短线超卖，追空风险偏高，注意反弹`,
+      }],
+    ],
+    { eventKey: `rsi15Zone_${zone}` }
+  );
+}
+
+/**
+ * 多周期共振信号 → 飞书（两组，条件均为“最近 N 根内发生过”）：
+ *   1h 组：  1h RSI 超卖过 + 1h MACD 金叉过 + 5分钟 MTF 强多 → 多头共振
+ *            1h RSI 超买过 + 1h MACD 死叉过 + 5分钟 MTF 强空 → 空头共振
+ *   15m 组： 15m RSI 超卖过 + 15m MACD 金叉过 + 5分钟 MTF 强多 → 多头共振
+ *            15m RSI 超买过 + 15m MACD 死叉过 + 5分钟 MTF 强空 → 空头共振
+ * 只在共振状态首次成立（NONE/反向 → BULL/BEAR）时推送一次，状态持久化。
+ */
+function dispatchComboSignals(indicators, m15, lastClose) {
+  const mtf5 = getMtf5Row();
+
+  applyComboState('lastCombo1h', evalCombo(indicators.rsi, indicators.hist, COMBO.lookback1h, mtf5), {
+    tfLabel: '1小时', lookback: COMBO.lookback1h,
+    rsiNow: indicators.rsi[indicators.rsi.length - 1],
+    histNow: indicators.hist[indicators.hist.length - 1],
+    lastClose, mtf5, eventPrefix: 'combo1h',
+  });
+
+  if (m15) {
+    applyComboState('lastCombo15m', evalCombo(m15.rsi, m15.hist, COMBO.lookback15m, mtf5), {
+      tfLabel: '15分钟', lookback: COMBO.lookback15m,
+      rsiNow: m15.rsi[m15.rsi.length - 1],
+      histNow: m15.hist[m15.hist.length - 1],
+      lastClose: m15.lastClose, mtf5, eventPrefix: 'combo15m',
+    });
+  }
+}
+
+/** 判定单组共振状态：'BULL' / 'BEAR' / 'NONE' */
+function evalCombo(rsiSeries, histSeries, lookback, mtf5) {
+  if (!mtf5 || !mtf5.state) return 'NONE';
+  if (mtf5.state === '强多'
+    && rsiTouchedWithin(rsiSeries, 'OVERSOLD', lookback)
+    && macdCrossedWithin(histSeries, 'GOLDEN', lookback)) return 'BULL';
+  if (mtf5.state === '强空'
+    && rsiTouchedWithin(rsiSeries, 'OVERBOUGHT', lookback)
+    && macdCrossedWithin(histSeries, 'DEATH', lookback)) return 'BEAR';
+  return 'NONE';
+}
+
+/** 共振状态机：首轮建基线；状态变为 BULL/BEAR 时推送飞书 */
+function applyComboState(stateKey, comboState, ctx) {
+  const prev = notifyState[stateKey];
+  if (prev == null) {
+    notifyState[stateKey] = comboState;
+    saveNotifyState();
+    return;
+  }
+  if (comboState === prev) return;
+  notifyState[stateKey] = comboState;
+  saveNotifyState();
+  if (comboState !== 'BULL' && comboState !== 'BEAR') return;
+
+  const isBull = comboState === 'BULL';
+  const title = isBull
+    ? `🚀 ${ctx.tfLabel}多头共振：RSI超卖过 + MACD金叉过 + 5分钟MTF强多`
+    : `🧨 ${ctx.tfLabel}空头共振：RSI超买过 + MACD死叉过 + 5分钟MTF强空`;
+  console.log(`[regime] 📣 共振信号 ${ctx.eventPrefix}=${comboState}, 推送飞书`);
+  webhook.sendRich(title, buildComboLines(isBull, ctx), { eventKey: `${ctx.eventPrefix}_${comboState}` });
+}
+
+function buildComboLines(isBull, ctx) {
+  const { tfLabel, lookback, rsiNow, histNow, lastClose, mtf5 } = ctx;
+  const scoreStr = mtf5 && mtf5.score != null
+    ? (mtf5.score > 0 ? `+${mtf5.score}` : String(mtf5.score))
+    : '--';
+  return [
+    [{ text: '⏰ 时间：', bold: true }, { text: new Date().toLocaleString() }],
+    [{ text: '💰 当前价：', bold: true }, { text: fmt(lastClose) }],
+    [{ text: '━━━━━ 共振条件 ━━━━━' }],
+    [{ text: isBull
+      ? `① ${tfLabel} RSI 最近 ${lookback} 根内曾 ≤${COMBO.rsiOversold}（超卖过），当前 RSI=${fmt(rsiNow)}`
+      : `① ${tfLabel} RSI 最近 ${lookback} 根内曾 ≥${COMBO.rsiOverbought}（超买过），当前 RSI=${fmt(rsiNow)}` }],
+    [{ text: isBull
+      ? `② ${tfLabel} MACD 最近 ${lookback} 根内出现金叉，当前 HIST=${fmt(histNow)}`
+      : `② ${tfLabel} MACD 最近 ${lookback} 根内出现死叉，当前 HIST=${fmt(histNow)}` }],
+    [{ text: `③ 5分钟 MTF 当前「${mtf5?.state || '--'}」（评分 ${scoreStr} · 操作：${mtf5?.action || '--'}）` }],
+    [{ text: '💡 解读：', bold: true }, { text: isBull
+      ? '超卖修复 + 动能转多 + 短周期强多三重共振，可关注顺势做多机会（注意回踩确认）'
+      : '超买回落 + 动能转空 + 短周期强空三重共振，可关注顺势做空机会（注意反弹确认）' }],
+  ];
+}
+
 // ---------------------- 通知触发（状态机）----------------------
 function handleNotificationsOnSuccess(prevRegime, currentRegime, klines, tradePlan) {
   // 1) 失败恢复
@@ -989,6 +1213,13 @@ router.get('/status', (req, res) => {
     updatedAt: cache.updatedAt,
     regime: cache.regime,
     tradePlan: cache.tradePlan,
+    // 15 分钟辅助指标最新值（拉取失败时为 null）
+    m15: cache.m15 ? {
+      rsi: cache.m15.rsi[cache.m15.rsi.length - 1],
+      macdHist: cache.m15.hist[cache.m15.hist.length - 1],
+      lastClose: cache.m15.lastClose,
+      lastTime: cache.m15.lastTime,
+    } : null,
   });
 });
 
@@ -1152,6 +1383,10 @@ module.exports = {
     computeSlope,
     judgeRegime,
     buildTradePlan,
+    // 多周期共振信号纯函数（供测试/回测复用）
+    rsiTouchedWithin,
+    macdCrossedWithin,
+    evalCombo,
     // 同时暴露 enhanceRegime 给回测使用 (已经从 ./regime/enhancedJudge require)
     enhanceRegime,
     // 暴露常量

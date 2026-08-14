@@ -625,4 +625,20 @@ if (typeof timer.unref === 'function') timer.unref();
 refresh();
 console.log(`[mtf] 多周期共振模块已启动: ${SYMBOL} · ${TIMEFRAMES.map((t) => t.key).join('/')} · 刷新 ${REFRESH_MS / 1000}s`);
 
-module.exports = { router, refresh, _test: { evaluateTfStateChange, notifyStates } };
+// ---------------------- 对外只读接口 ----------------------
+/**
+ * 读取指定周期的最新评分行（供 regimeModule 共振信号复用）
+ * @param {string} key 'W'|'D'|'240'|'60'|'15'|'5'
+ * @returns {{key,label,score,state,action,side,components,recentCross,candle}|null}
+ */
+function getTimeframe(key) {
+  if (!cache.ok || !Array.isArray(cache.timeframes)) return null;
+  return cache.timeframes.find((t) => t.key === String(key)) || null;
+}
+
+/** 最近一次成功刷新的时间戳（毫秒），未成功过返回 null */
+function getUpdatedAt() {
+  return cache.updatedAt;
+}
+
+module.exports = { router, refresh, getTimeframe, getUpdatedAt, _test: { evaluateTfStateChange, notifyStates } };
