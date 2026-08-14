@@ -3,7 +3,7 @@
  *  mtfModule.js
  *  多周期共振评分面板 (Multi-TimeFrame Consensus)
  *
- *  六个周期 W / D / 240(4H) / 60(1H) / 15(15M) / 5(5M) 各自打分,
+ *  七个周期 W / D / 240(4H) / 60(1H) / 15(15M) / 5(5M) / 1(1M) 各自打分,
  *  加上一列全局市场指标与底部聚合, 复刻"多周期共振"盯盘面板:
  *
  *  ── 单周期评分 (5 个分量, 每项 -1/0/+1, 总分 ∈ [-5, +5]) ──
@@ -18,7 +18,7 @@
  *    -1..+1 → 分量方向打架 (≥2正 且 ≥2负) 记"混乱→过滤观望", 否则"震荡→观望"
  *
  *  ── 全局指标列 ──
- *    共识引力  六周期收盘 vs EMA50 的多数方 (上方/下方/分歧)
+ *    共识引力  全周期收盘 vs EMA50 的多数方 (≥2/3 同侧: 上方/下方/分歧)
  *    市场引力  日线收盘 vs 日线 EMA20
  *    周期驱动  4H EMA20 斜率方向 (上行/下行)
  *    市场斜率  1H EMA20 斜率角度 (ATR 归一化, ±90°)
@@ -27,7 +27,7 @@
  *    市场结构  1H 摆动点 (fractal k=2): HH+HL 多 / LH+LL 空 / 混合
  *
  *  ── 底部聚合 ──
- *    多/中/空计数 · 加权总分 (W×0.5 D×1 4H×1.5 1H×1.5 15M×1 5M×0.5, 归一到 ±5)
+ *    多/中/空计数 · 加权总分 (W×0.5 D×1 4H×1.5 1H×1.5 15M×1 5M×0.5 1M×0.25, 归一到 ±5)
  *    建议 (只找空/反弹做空/观望/...) + 建议执行周期
  *    共振检测 (4H+1H+15M 同向) · 全面偏多/偏空 (≥5 周期同向)
  *    先行周期 (最近 2 根内 MACD 金/死叉的周期) · 齐涨/齐跌 (4H/1H/15M 最近一根同色)
@@ -56,12 +56,13 @@ const REFRESH_MS = Number(process.env.MTF_REFRESH_MS || 90 * 1000);   // 默认 
 
 // 周期定义 (key 与面板显示一致; weight 用于加权总分)
 const TIMEFRAMES = [
-  { key: 'W',   interval: '1w',  limit: 200, weight: 0.5, label: '周线' },
-  { key: 'D',   interval: '1d',  limit: 300, weight: 1.0, label: '日线' },
-  { key: '240', interval: '4h',  limit: 300, weight: 1.5, label: '4小时' },
-  { key: '60',  interval: '1h',  limit: 300, weight: 1.5, label: '1小时' },
-  { key: '15',  interval: '15m', limit: 300, weight: 1.0, label: '15分钟' },
-  { key: '5',   interval: '5m',  limit: 300, weight: 0.5, label: '5分钟' },
+  { key: 'W',   interval: '1w',  limit: 200, weight: 0.5,  label: '周线' },
+  { key: 'D',   interval: '1d',  limit: 300, weight: 1.0,  label: '日线' },
+  { key: '240', interval: '4h',  limit: 300, weight: 1.5,  label: '4小时' },
+  { key: '60',  interval: '1h',  limit: 300, weight: 1.5,  label: '1小时' },
+  { key: '15',  interval: '15m', limit: 300, weight: 1.0,  label: '15分钟' },
+  { key: '5',   interval: '5m',  limit: 300, weight: 0.5,  label: '5分钟' },
+  { key: '1',   interval: '1m',  limit: 300, weight: 0.25, label: '1分钟' },
 ];
 const RESONANCE_KEYS = ['240', '60', '15'];      // 共振检测周期组 (4H+1H+15M)
 
@@ -281,21 +282,23 @@ function buildIndicators(tfMap) {
   const list = [];
   const sideOf = (v) => (v === 'bull' ? '多' : v === 'bear' ? '空' : '中');
 
-  // 1. 共识引力: 六周期收盘 vs EMA50 多数方
+  // 1. 共识引力: 全周期收盘 vs EMA50 多数方 (≥2/3 周期同侧)
   {
     let above = 0, below = 0;
+    const totalTf = Object.keys(tfMap).length;
     for (const tf of Object.values(tfMap)) {
       if (tf._close != null && tf._ema50 != null) {
         if (tf._close > tf._ema50) above++;
         else if (tf._close < tf._ema50) below++;
       }
     }
-    const side = above >= 4 ? 'bull' : below >= 4 ? 'bear' : 'mixed';
+    const majority = Math.ceil(totalTf * 2 / 3);   // 6周期时=4, 7周期时=5
+    const side = above >= majority ? 'bull' : below >= majority ? 'bear' : 'mixed';
     list.push({
       key: 'consensusGravity', name: '共识引力',
       state: side === 'bull' ? '上方' : side === 'bear' ? '下方' : '分歧',
       tendency: sideOf(side),
-      detail: `收盘在EMA50上方 ${above}/6 · 下方 ${below}/6`,
+      detail: `收盘在EMA50上方 ${above}/${totalTf} · 下方 ${below}/${totalTf}`,
     });
   }
 
@@ -391,7 +394,7 @@ function buildSummary(tfMap, tfRows) {
   const bearCount = tfRows.filter((t) => t.side === 'bear').length;
   const neutralCount = tfRows.length - bullCount - bearCount;
 
-  // 加权总分, 归一到 ±5 (权重和 = 6, 除以 6 再乘 5 后四舍五入)
+  // 加权总分 = 各周期分的加权平均 (按权重和归一), 四舍五入后钳制到 ±5
   const weightSum = tfRows.reduce((s, t) => s + t.weight, 0) || 1;
   const weighted = tfRows.reduce((s, t) => s + t.score * t.weight, 0) / weightSum;
   const totalScore = Math.max(-5, Math.min(5, Math.round(weighted)));
@@ -411,8 +414,9 @@ function buildSummary(tfMap, tfRows) {
     else if (resoRows.every((t) => t.side === 'bull')) resonance = 'bull';
   }
 
-  // 全面偏多/偏空: ≥5 个周期同向
-  const overall = bearCount >= 5 ? '全面偏空' : bullCount >= 5 ? '全面偏多' : null;
+  // 全面偏多/偏空: 至多允许 1 个周期不同向 (6周期时≥5, 7周期时≥6)
+  const overallMin = tfRows.length - 1;
+  const overall = bearCount >= overallMin ? '全面偏空' : bullCount >= overallMin ? '全面偏多' : null;
 
   // 建议执行周期: 与总方向一致的最小共振周期 (240→60→15 里最后一个同向的)
   let execTf = null;
@@ -489,7 +493,7 @@ function buildSummary(tfMap, tfRows) {
 //   - 走 force 跳过 feishuWebhook 的全局节流 (confirm 机制本身就是防抖)
 const STATE_CONFIRM = Math.max(1, parseInt(process.env.MTF_NOTIFY_CONFIRM, 10) || 2);
 const NOTIFY_TFS = (process.env.MTF_NOTIFY_TFS || '15,5').split(',').map((s) => s.trim()).filter(Boolean);
-const TF_CN_LABEL = { W: '周线', D: '日线', 240: '4小时', 60: '1小时', 15: '15分钟', 5: '5分钟' };
+const TF_CN_LABEL = { W: '周线', D: '日线', 240: '4小时', 60: '1小时', 15: '15分钟', 5: '5分钟', 1: '1分钟' };
 
 // key -> { lastState, pendingState, pendingCount }
 const notifyStates = new Map();
