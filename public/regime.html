@@ -1130,9 +1130,14 @@
   <button id="manualOpenLongBtn" class="manual-btn long" disabled>📈 挂多单</button>
   <button id="manualOpenShortBtn" class="manual-btn short" disabled>📉 挂空单</button>
   <label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:#c9d1d9;cursor:pointer;white-space:nowrap;"
-         title="MTF 5分钟评分连续确认转为「强多」→ 自动挂多单; 转为「强空」→ 自动挂空单。单次武装: 成功挂单后开关自动关闭, 避免重复开仓。与手动挂单同通道 (Regime plan 优先 / ATR 回退, 小仓位, pending 限价)。后端运行, 关闭浏览器仍生效">
-    <input type="checkbox" id="mtf5AutoOpenChk" style="accent-color:#2ea043;cursor:pointer;" />
-    🤖 MTF5 强多开多/强空开空
+         title="MTF 5分钟评分连续确认转为「强多」→ 自动挂多单。单次武装: 成功挂单后本开关自动关闭 (不影响强空开关)。与手动挂单同通道 (Regime plan 优先 / ATR 回退, 小仓位, pending 限价)。后端运行, 关闭浏览器仍生效">
+    <input type="checkbox" id="mtf5AutoLongChk" style="accent-color:#2ea043;cursor:pointer;" />
+    🤖🟢 强多开多
+  </label>
+  <label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:#c9d1d9;cursor:pointer;white-space:nowrap;"
+         title="MTF 5分钟评分连续确认转为「强空」→ 自动挂空单。单次武装: 成功挂单后本开关自动关闭 (不影响强多开关)。与手动挂单同通道 (Regime plan 优先 / ATR 回退, 小仓位, pending 限价)。后端运行, 关闭浏览器仍生效">
+    <input type="checkbox" id="mtf5AutoShortChk" style="accent-color:#f85149;cursor:pointer;" />
+    🤖🔴 强空开空
   </label>
   <span id="mtf5AutoOpenMeta" class="ta-meta">--</span>
   <span class="ta-divider"></span>
@@ -3100,9 +3105,11 @@
       const r = await fetch('/api/regime/mtf-auto-open');
       if (!r.ok) return;
       const j = await r.json();
-      const chk = document.getElementById('mtf5AutoOpenChk');
+      const chkL = document.getElementById('mtf5AutoLongChk');
+      const chkS = document.getElementById('mtf5AutoShortChk');
       const meta = document.getElementById('mtf5AutoOpenMeta');
-      if (chk) chk.checked = !!j.enabled;
+      if (chkL) chkL.checked = !!j.enabledLong;
+      if (chkS) chkS.checked = !!j.enabledShort;
       if (meta) {
         const parts = [];
         if (j.mtf5) {
@@ -3111,36 +3118,40 @@
         } else {
           parts.push('5M: --');
         }
+        const armed = [];
+        if (j.enabledLong) armed.push('多');
+        if (j.enabledShort) armed.push('空');
+        parts.push(armed.length ? `武装: ${armed.join('+')}` : '未武装');
         if (j.lastFired) {
           const f = j.lastFired;
           parts.push(`上次: ${f.direction === 'long' ? '开多' : '开空'}${f.ok ? '✅' : '❌'} ${new Date(f.at).toLocaleString()}`);
-          if (!j.enabled && f.ok) parts.push('已触发·自动关闭');
-        } else if (j.enabled) {
-          parts.push('武装中·尚未触发');
         }
         meta.textContent = parts.join(' · ');
       }
     } catch (_) { /* 静默, 30s 后重试 */ }
   }
 
-  async function toggleMtf5AutoOpen(want) {
-    const chk = document.getElementById('mtf5AutoOpenChk');
+  async function toggleMtf5AutoOpen(direction, want) {
+    const isLong = direction === 'long';
+    const chk = document.getElementById(isLong ? 'mtf5AutoLongChk' : 'mtf5AutoShortChk');
+    const dirZh = isLong ? '强多自动开多' : '强空自动开空';
     if (want && !confirm(
-      '确认开启 MTF5 自动开仓?\n' +
-      '· 5分钟评分连续确认「转为」强多 → 自动挂多单; 强空 → 自动挂空单\n' +
+      `确认开启 MTF5「${dirZh}」?\n` +
+      `· 5分钟评分连续确认「转为」${isLong ? '强多 → 自动挂多单' : '强空 → 自动挂空单'}\n` +
       '· 与手动挂单同通道: Regime plan 优先 / ATR 回退, 置信度小仓位, pending 限价\n' +
       '· 开启时不追溯当前已有状态, 只对之后的新转变生效\n' +
-      '· ⭐ 单次武装: 成功挂单后开关自动关闭, 不会重复开仓; 需再次手动开启\n' +
+      '· ⭐ 单次武装: 成功挂单后本开关自动关闭 (不影响另一方向); 需再次手动开启\n' +
       '· 后端运行, 关闭浏览器仍生效; 触发结果推飞书'
     )) { if (chk) chk.checked = false; return; }
     try {
-      await callAdminApi('/api/regime/mtf-auto-open', { enabled: want });
+      await callAdminApi('/api/regime/mtf-auto-open',
+        isLong ? { enabledLong: want } : { enabledShort: want });
       showToast('ok',
-        want ? '🤖 MTF5 自动开仓已开启' : '🛑 MTF5 自动开仓已关闭',
-        want ? '5分钟确认转强多/强空后将自动挂单, 结果同步推飞书' : '');
+        want ? `🤖 已开启「${dirZh}」` : `🛑 已关闭「${dirZh}」`,
+        want ? `5分钟确认转${isLong ? '强多后自动挂多单' : '强空后自动挂空单'}, 结果同步推飞书` : '');
     } catch (e) {
       if (chk) chk.checked = !want;
-      showToast('err', '❌ 切换 MTF5 自动开仓失败', e.message, 8000);
+      showToast('err', `❌ 切换「${dirZh}」失败`, e.message, 8000);
     }
     loadMtf5AutoOpen();
   }
@@ -4176,9 +4187,11 @@
   // 手动交易按钮
   document.getElementById('manualOpenLongBtn').addEventListener('click', () => manualOpen('long'));
   document.getElementById('manualOpenShortBtn').addEventListener('click', () => manualOpen('short'));
-  // MTF5 强多/强空 自动开仓开关 (状态 30s 轮询)
-  const mtf5AutoChk = document.getElementById('mtf5AutoOpenChk');
-  if (mtf5AutoChk) mtf5AutoChk.addEventListener('change', () => toggleMtf5AutoOpen(mtf5AutoChk.checked));
+  // MTF5 强多/强空 自动开仓开关 (多/空独立, 状态 30s 轮询)
+  const mtf5LongChk = document.getElementById('mtf5AutoLongChk');
+  const mtf5ShortChk = document.getElementById('mtf5AutoShortChk');
+  if (mtf5LongChk) mtf5LongChk.addEventListener('change', () => toggleMtf5AutoOpen('long', mtf5LongChk.checked));
+  if (mtf5ShortChk) mtf5ShortChk.addEventListener('change', () => toggleMtf5AutoOpen('short', mtf5ShortChk.checked));
   loadMtf5AutoOpen();
   setInterval(loadMtf5AutoOpen, 30 * 1000);
   // 一键追单 (立即市价, 不参考 Regime, 10% 仓位)

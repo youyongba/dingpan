@@ -1092,14 +1092,16 @@ function buildComboLines(isBull, ctx) {
 // ---------------------- MTF 5分钟 强多/强空 自动开仓 ----------------------
 //
 // 用户在 regime 页面「手动开仓」栏拨开关武装后：
+//   - ⭐ 多/空开关独立：「强多自动开多」(enabledLong) 与「强空自动开空」(enabledShort)
+//     分开武装、分开触发、分开自动关闭
 //   - 每 30s 检查 mtfModule 的 5 分钟评分状态（只评估新快照, 按 updatedAt 去重）
 //   - 状态需连续 MTF5_AUTO_OPEN_CONFIRM 个新快照一致才确认（默认 2, 与 MTF 推送同款防抖）
-//   - 确认「转为」强多 → 自动挂多单；「转为」强空 → 自动挂空单
-//     （开启开关时只记基线不追溯, 避免对着已存在的陈旧强多/强空立刻下单）
+//   - 确认「转为」强多 且多开关开 → 自动挂多单；「转为」强空 且空开关开 → 自动挂空单
+//     （从全关到武装时只记基线不追溯, 避免对着已存在的陈旧强多/强空立刻下单）
 //   - 下单复用 trading/router.manualOpenImpl（与 UI 手动挂单/价格触发器同一实现：
 //     Regime plan 优先 / ATR 回退, 置信度小仓位, pending 限价模式）
-//   - ⭐ 单次武装：成功挂单后开关自动关闭, 避免重复开仓（被拒时保持武装）
-//   - 触发后冷却 MTF5_AUTO_OPEN_COOLDOWN_MS（默认 10 分钟, 兜底）
+//   - ⭐ 单次武装：成功挂单后只自动关闭该方向的开关, 另一方向保持武装（被拒时保持武装）
+//   - 触发后冷却 MTF5_AUTO_OPEN_COOLDOWN_MS（默认 10 分钟, 兜底, 两方向共用）
 //   - 开关与触发记录持久化到磁盘, 进程重启后保持
 const MTF5_AUTO_FILE = process.env.MTF5_AUTO_OPEN_STATE_PATH
   || path.join(__dirname, 'data', 'mtf5_auto_open.json');
@@ -1109,7 +1111,8 @@ const MTF5_AUTO = {
   checkMs: 30 * 1000,
 };
 const mtf5Auto = {
-  enabled: false,
+  enabledLong: false,   // 强多 → 自动开多
+  enabledShort: false,  // 强空 → 自动开空
   lastFiredAt: 0,
   lastFired: null,      // { at, state, score, direction, status, ok, note }
   // 运行时（不持久化）
@@ -1119,14 +1122,23 @@ const mtf5Auto = {
   _pendingCount: 0,
   _firing: false,
 };
+function mtf5Armed() { return mtf5Auto.enabledLong || mtf5Auto.enabledShort; }
 
 function loadMtf5AutoState() {
   try {
     const obj = JSON.parse(fs.readFileSync(MTF5_AUTO_FILE, 'utf8'));
-    if (obj && typeof obj.enabled === 'boolean') mtf5Auto.enabled = obj.enabled;
+    // 旧版单开关字段迁移：enabled=true → 双方向都武装
+    if (obj && typeof obj.enabled === 'boolean') {
+      mtf5Auto.enabledLong = obj.enabled;
+      mtf5Auto.enabledShort = obj.enabled;
+    }
+    if (obj && typeof obj.enabledLong === 'boolean') mtf5Auto.enabledLong = obj.enabledLong;
+    if (obj && typeof obj.enabledShort === 'boolean') mtf5Auto.enabledShort = obj.enabledShort;
     if (obj && Number.isFinite(obj.lastFiredAt)) mtf5Auto.lastFiredAt = obj.lastFiredAt;
     if (obj && obj.lastFired && typeof obj.lastFired === 'object') mtf5Auto.lastFired = obj.lastFired;
-    if (mtf5Auto.enabled) console.log('[regime] MTF5 自动开仓状态已恢复: enabled=true');
+    if (mtf5Armed()) {
+      console.log(`[regime] MTF5 自动开仓状态已恢复: long=${mtf5Auto.enabledLong} short=${mtf5Auto.enabledShort}`);
+    }
   } catch (e) { /* 文件不存在则忽略 */ }
 }
 function saveMtf5AutoState() {
@@ -1134,7 +1146,8 @@ function saveMtf5AutoState() {
     const dir = path.dirname(MTF5_AUTO_FILE);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(MTF5_AUTO_FILE, JSON.stringify({
-      enabled: mtf5Auto.enabled,
+      enabledLong: mtf5Auto.enabledLong,
+      enabledShort: mtf5Auto.enabledShort,
       lastFiredAt: mtf5Auto.lastFiredAt,
       lastFired: mtf5Auto.lastFired,
       savedAt: new Date().toISOString(),
@@ -1144,7 +1157,7 @@ function saveMtf5AutoState() {
 loadMtf5AutoState();
 
 async function mtf5AutoTick() {
-  if (!mtf5Auto.enabled || mtf5Auto._firing) return;
+  if (!mtf5Armed() || mtf5Auto._firing) return;
   let mtf;
   try { mtf = require('./mtfModule'); } catch (e) { return; }
   const updatedAt = typeof mtf.getUpdatedAt === 'function' ? mtf.getUpdatedAt() : null;
@@ -1178,8 +1191,15 @@ async function mtf5AutoTick() {
   mtf5Auto._pendingCount = 0;
   if (cur !== '强多' && cur !== '强空') return;
 
+  // 方向开关独立：只在对应方向武装时触发
+  const direction = cur === '强多' ? 'long' : 'short';
+  const armed = direction === 'long' ? mtf5Auto.enabledLong : mtf5Auto.enabledShort;
+  if (!armed) {
+    console.log(`[regime] ⏭ MTF5 状态确认 ${from} → ${cur}, 但${direction === 'long' ? '多' : '空'}方向开关未武装, 跳过`);
+    return;
+  }
   console.log(`[regime] 🤖 MTF5 自动开仓触发条件成立: ${from} → ${cur}`);
-  await fireMtf5AutoOpen(cur === '强多' ? 'long' : 'short', tf5);
+  await fireMtf5AutoOpen(direction, tf5);
 }
 
 async function fireMtf5AutoOpen(direction, tf5) {
@@ -1202,10 +1222,11 @@ async function fireMtf5AutoOpen(direction, tf5) {
     const ok = r.status >= 200 && r.status < 300;
     if (ok) {
       mtf5Auto.lastFiredAt = now;
-      // ⭐ 单次武装：成功挂单后自动关闭开关, 避免重复开仓; 需再次手动开启才会再触发.
+      // ⭐ 单次武装：成功挂单后只自动关闭该方向的开关, 另一方向保持武装;
       //    被拒 (如同方向已有挂单/持仓、行情未就绪) 时保持武装, 等下一次状态转变.
-      mtf5Auto.enabled = false;
-      console.log('[regime] 🔒 MTF5 自动开仓已触发成功, 开关自动关闭 (单次武装)');
+      if (direction === 'long') mtf5Auto.enabledLong = false;
+      else mtf5Auto.enabledShort = false;
+      console.log(`[regime] 🔒 MTF5 自动开仓 ${direction} 已触发成功, ${direction === 'long' ? '多' : '空'}方向开关自动关闭 (单次武装)`);
     }
     const plan = r.body?.position?.pendingPlan;
     const note = ok
@@ -1225,7 +1246,7 @@ async function fireMtf5AutoOpen(direction, tf5) {
         [{ text: '🎬 动作：', bold: true }, { text: ok ? `自动挂${dirLabel}（限价待触发）` : `挂${dirLabel}失败` }],
         [{ text: '📋 结果：', bold: true }, { text: note }],
         ok
-          ? [{ text: '🔒 开关已自动关闭（单次触发防重复开仓），如需再次自动开仓请到页面重新开启', italic: true }]
+          ? [{ text: `🔒 ${direction === 'long' ? '多' : '空'}方向开关已自动关闭（单次触发防重复开仓），另一方向不受影响；如需再次自动开仓请到页面重新开启`, italic: true }]
           : [{ text: '⚠️ 本次未成交，开关保持武装，等待下一次状态转变', italic: true }],
         [{ text: '来源：MTF5 自动开仓（与手动挂单同通道：Regime plan 优先 / ATR 回退）', italic: true }],
       ],
@@ -1547,7 +1568,9 @@ router.get('/mtf-auto-open', (req, res) => {
   } catch (e) { /* mtf 不可用时返回 null */ }
   res.json({
     ok: true,
-    enabled: mtf5Auto.enabled,
+    enabledLong: mtf5Auto.enabledLong,
+    enabledShort: mtf5Auto.enabledShort,
+    enabled: mtf5Armed(),   // 兼容字段：任一方向武装即 true
     confirm: MTF5_AUTO.confirm,
     cooldownMs: MTF5_AUTO.cooldownMs,
     lastFiredAt: mtf5Auto.lastFiredAt || null,
@@ -1556,20 +1579,29 @@ router.get('/mtf-auto-open', (req, res) => {
   });
 });
 
+// body: { enabledLong?: boolean, enabledShort?: boolean, enabled?: boolean(旧, 同时设双方向) }
 router.post('/mtf-auto-open', mtf5AdminGuard, (req, res) => {
-  const want = req.body?.enabled;
-  if (typeof want !== 'boolean') {
-    return res.status(400).json({ ok: false, error: 'enabled 必须是 boolean' });
+  const b = req.body || {};
+  const patch = {};
+  if (typeof b.enabled === 'boolean') { patch.enabledLong = b.enabled; patch.enabledShort = b.enabled; }
+  if (typeof b.enabledLong === 'boolean') patch.enabledLong = b.enabledLong;
+  if (typeof b.enabledShort === 'boolean') patch.enabledShort = b.enabledShort;
+  if (!Object.keys(patch).length) {
+    return res.status(400).json({ ok: false, error: 'enabledLong / enabledShort 至少提供一个 boolean' });
   }
-  mtf5Auto.enabled = want;
-  // 重置运行时基线：开启后第一个快照只记基线, 不对已存在的强多/强空追溯下单
-  mtf5Auto._lastState = null;
-  mtf5Auto._pendingState = null;
-  mtf5Auto._pendingCount = 0;
-  mtf5Auto._lastSeenMtfAt = 0;
+  const wasArmed = mtf5Armed();
+  Object.assign(mtf5Auto, patch);
+  // 从「全关」到「武装」时重置运行时基线：第一个快照只记基线,
+  // 不对已存在的强多/强空追溯下单; 已武装状态下切另一方向不打断状态跟踪
+  if (!wasArmed && mtf5Armed()) {
+    mtf5Auto._lastState = null;
+    mtf5Auto._pendingState = null;
+    mtf5Auto._pendingCount = 0;
+    mtf5Auto._lastSeenMtfAt = 0;
+  }
   saveMtf5AutoState();
-  console.log(`[regime] MTF5 自动开仓开关 → ${want ? '✅ 开启' : '🛑 关闭'}`);
-  res.json({ ok: true, enabled: mtf5Auto.enabled });
+  console.log(`[regime] MTF5 自动开仓开关 → long=${mtf5Auto.enabledLong ? '✅' : '🛑'} short=${mtf5Auto.enabledShort ? '✅' : '🛑'}`);
+  res.json({ ok: true, enabledLong: mtf5Auto.enabledLong, enabledShort: mtf5Auto.enabledShort });
 });
 
 // Webhook 推送状态查询（便于调试）
