@@ -1443,8 +1443,11 @@ function manualPositionOverridePct(cfg) {
 //    用途: 用户场景 "我关掉自动下单, 但想自己手动开仓 + 手动点 TP/SL 平仓; 开仓后 TP/SL 仍由 riskEngine 自动管理".
 //    注意: riskEngine 的 TP/SL 自动评估本就完全不经过 cfg.enabled, 关不关都自动触发;
 //          这里加 manual_fire 是为了让"手动点 TP/SL 按钮"(走 processSignal) 在关闭总开关时也能用.
+//    mtf5_auto_open: MTF 5分钟强多/强空自动开仓 (regimeModule). 与价格触发器同语义 —
+//    用户在 UI 显式拨开关"武装"的常驻触发器, 因此归入手动来源, 不受自动下单总开关拦截.
 const MANUAL_TRADE_SOURCES = new Set([
   'manual_ui', 'manual_follow', 'price_trigger_open', 'price_trigger_follow', 'manual_fire',
+  'mtf5_auto_open',
 ]);
 function isManualTradeSource(source) {
   return MANUAL_TRADE_SOURCES.has(source);

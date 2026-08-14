@@ -1089,6 +1089,171 @@ function buildComboLines(isBull, ctx) {
   ];
 }
 
+// ---------------------- MTF 5分钟 强多/强空 自动开仓 ----------------------
+//
+// 用户在 regime 页面「手动开仓」栏拨开关武装后：
+//   - 每 30s 检查 mtfModule 的 5 分钟评分状态（只评估新快照, 按 updatedAt 去重）
+//   - 状态需连续 MTF5_AUTO_OPEN_CONFIRM 个新快照一致才确认（默认 2, 与 MTF 推送同款防抖）
+//   - 确认「转为」强多 → 自动挂多单；「转为」强空 → 自动挂空单
+//     （开启开关时只记基线不追溯, 避免对着已存在的陈旧强多/强空立刻下单）
+//   - 下单复用 trading/router.manualOpenImpl（与 UI 手动挂单/价格触发器同一实现：
+//     Regime plan 优先 / ATR 回退, 置信度小仓位, pending 限价模式）
+//   - ⭐ 单次武装：成功挂单后开关自动关闭, 避免重复开仓（被拒时保持武装）
+//   - 触发后冷却 MTF5_AUTO_OPEN_COOLDOWN_MS（默认 10 分钟, 兜底）
+//   - 开关与触发记录持久化到磁盘, 进程重启后保持
+const MTF5_AUTO_FILE = process.env.MTF5_AUTO_OPEN_STATE_PATH
+  || path.join(__dirname, 'data', 'mtf5_auto_open.json');
+const MTF5_AUTO = {
+  confirm: Math.max(1, parseInt(process.env.MTF5_AUTO_OPEN_CONFIRM, 10) || 2),
+  cooldownMs: Math.max(0, parseInt(process.env.MTF5_AUTO_OPEN_COOLDOWN_MS, 10) || 10 * 60 * 1000),
+  checkMs: 30 * 1000,
+};
+const mtf5Auto = {
+  enabled: false,
+  lastFiredAt: 0,
+  lastFired: null,      // { at, state, score, direction, status, ok, note }
+  // 运行时（不持久化）
+  _lastSeenMtfAt: 0,
+  _lastState: null,
+  _pendingState: null,
+  _pendingCount: 0,
+  _firing: false,
+};
+
+function loadMtf5AutoState() {
+  try {
+    const obj = JSON.parse(fs.readFileSync(MTF5_AUTO_FILE, 'utf8'));
+    if (obj && typeof obj.enabled === 'boolean') mtf5Auto.enabled = obj.enabled;
+    if (obj && Number.isFinite(obj.lastFiredAt)) mtf5Auto.lastFiredAt = obj.lastFiredAt;
+    if (obj && obj.lastFired && typeof obj.lastFired === 'object') mtf5Auto.lastFired = obj.lastFired;
+    if (mtf5Auto.enabled) console.log('[regime] MTF5 自动开仓状态已恢复: enabled=true');
+  } catch (e) { /* 文件不存在则忽略 */ }
+}
+function saveMtf5AutoState() {
+  try {
+    const dir = path.dirname(MTF5_AUTO_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(MTF5_AUTO_FILE, JSON.stringify({
+      enabled: mtf5Auto.enabled,
+      lastFiredAt: mtf5Auto.lastFiredAt,
+      lastFired: mtf5Auto.lastFired,
+      savedAt: new Date().toISOString(),
+    }, null, 2));
+  } catch (e) { console.error('[regime] saveMtf5AutoState 失败:', e.message); }
+}
+loadMtf5AutoState();
+
+async function mtf5AutoTick() {
+  if (!mtf5Auto.enabled || mtf5Auto._firing) return;
+  let mtf;
+  try { mtf = require('./mtfModule'); } catch (e) { return; }
+  const updatedAt = typeof mtf.getUpdatedAt === 'function' ? mtf.getUpdatedAt() : null;
+  if (!updatedAt || updatedAt === mtf5Auto._lastSeenMtfAt) return; // 只评估新快照
+  mtf5Auto._lastSeenMtfAt = updatedAt;
+
+  const tf5 = typeof mtf.getTimeframe === 'function' ? mtf.getTimeframe('5') : null;
+  if (!tf5 || !tf5.state) return;
+  const cur = tf5.state;
+
+  // 首个快照：只记基线（含刚开启开关后）
+  if (mtf5Auto._lastState == null) {
+    mtf5Auto._lastState = cur;
+    console.log(`[regime] MTF5 自动开仓基线: 5分钟=${cur}`);
+    return;
+  }
+  // 状态没变（或抖回原状态）：清待确认
+  if (cur === mtf5Auto._lastState) {
+    mtf5Auto._pendingState = null;
+    mtf5Auto._pendingCount = 0;
+    return;
+  }
+  // 状态变了：累计确认
+  if (mtf5Auto._pendingState === cur) mtf5Auto._pendingCount += 1;
+  else { mtf5Auto._pendingState = cur; mtf5Auto._pendingCount = 1; }
+  if (mtf5Auto._pendingCount < MTF5_AUTO.confirm) return;
+
+  const from = mtf5Auto._lastState;
+  mtf5Auto._lastState = cur;
+  mtf5Auto._pendingState = null;
+  mtf5Auto._pendingCount = 0;
+  if (cur !== '强多' && cur !== '强空') return;
+
+  console.log(`[regime] 🤖 MTF5 自动开仓触发条件成立: ${from} → ${cur}`);
+  await fireMtf5AutoOpen(cur === '强多' ? 'long' : 'short', tf5);
+}
+
+async function fireMtf5AutoOpen(direction, tf5) {
+  const now = Date.now();
+  if (now - mtf5Auto.lastFiredAt < MTF5_AUTO.cooldownMs) {
+    const waitS = Math.round((MTF5_AUTO.cooldownMs - (now - mtf5Auto.lastFiredAt)) / 1000);
+    console.log(`[regime] ⏭ MTF5 自动开仓冷却中 (还剩 ${waitS}s), 跳过本次 ${direction}`);
+    return;
+  }
+  mtf5Auto._firing = true;
+  const dirLabel = direction === 'long' ? '多单' : '空单';
+  const scoreStr = tf5.score > 0 ? `+${tf5.score}` : String(tf5.score);
+  try {
+    const { manualOpenImpl } = require('./trading/router');
+    if (typeof manualOpenImpl !== 'function') {
+      console.error('[regime] ❌ trading/router 未导出 manualOpenImpl, MTF5 自动开仓不可用');
+      return;
+    }
+    const r = await manualOpenImpl({ direction, source: 'mtf5_auto_open' });
+    const ok = r.status >= 200 && r.status < 300;
+    if (ok) {
+      mtf5Auto.lastFiredAt = now;
+      // ⭐ 单次武装：成功挂单后自动关闭开关, 避免重复开仓; 需再次手动开启才会再触发.
+      //    被拒 (如同方向已有挂单/持仓、行情未就绪) 时保持武装, 等下一次状态转变.
+      mtf5Auto.enabled = false;
+      console.log('[regime] 🔒 MTF5 自动开仓已触发成功, 开关自动关闭 (单次武装)');
+    }
+    const plan = r.body?.position?.pendingPlan;
+    const note = ok
+      ? (plan ? `entry=${plan.entry} sl=${plan.sl} 仓位=${plan.positionSize || '--'}` : `entry=${r.body?.position?.entryPrice ?? '--'}`)
+      : (r.body?.error || r.body?.hint || `HTTP ${r.status}`);
+    mtf5Auto.lastFired = { at: now, state: tf5.state, score: tf5.score, direction, status: r.status, ok, note };
+    saveMtf5AutoState();
+    console.log(`[regime] ${ok ? '✅' : '⏭'} MTF5 自动开仓 ${direction} status=${r.status} ${note}`);
+
+    webhook.sendRich(
+      ok
+        ? `🤖 MTF5 自动开仓：5分钟转「${tf5.state}」→ 已挂${dirLabel}`
+        : `🤖 MTF5 自动开仓被拒：5分钟转「${tf5.state}」`,
+      [
+        [{ text: '⏰ 时间：', bold: true }, { text: new Date().toLocaleString() }],
+        [{ text: '📊 5分钟 MTF：', bold: true }, { text: `${tf5.state}（评分 ${scoreStr} · ${tf5.action || '--'}）` }],
+        [{ text: '🎬 动作：', bold: true }, { text: ok ? `自动挂${dirLabel}（限价待触发）` : `挂${dirLabel}失败` }],
+        [{ text: '📋 结果：', bold: true }, { text: note }],
+        ok
+          ? [{ text: '🔒 开关已自动关闭（单次触发防重复开仓），如需再次自动开仓请到页面重新开启', italic: true }]
+          : [{ text: '⚠️ 本次未成交，开关保持武装，等待下一次状态转变', italic: true }],
+        [{ text: '来源：MTF5 自动开仓（与手动挂单同通道：Regime plan 优先 / ATR 回退）', italic: true }],
+      ],
+      { eventKey: 'mtf5AutoOpen', force: true }
+    );
+  } catch (e) {
+    mtf5Auto.lastFired = { at: now, state: tf5.state, score: tf5.score, direction, status: 0, ok: false, note: e?.message || String(e) };
+    saveMtf5AutoState();
+    console.error(`[regime] ❌ MTF5 自动开仓异常 (${direction}):`, e?.message || e);
+  } finally {
+    mtf5Auto._firing = false;
+  }
+}
+
+const mtf5AutoTimer = setInterval(() => {
+  mtf5AutoTick().catch(e => console.error('[regime] mtf5AutoTick 异常:', e?.message || e));
+}, MTF5_AUTO.checkMs);
+if (typeof mtf5AutoTimer.unref === 'function') mtf5AutoTimer.unref();
+
+/** 复用 trading 模块的管理鉴权（X-Auth-Token 等）；trading 不可用时拒绝 */
+function mtf5AdminGuard(req, res, next) {
+  try {
+    const { requireAdmin } = require('./trading/router');
+    if (typeof requireAdmin === 'function') return requireAdmin(req, res, next);
+  } catch (e) { /* fallthrough */ }
+  return res.status(503).json({ ok: false, error: 'trading 模块不可用, 无法鉴权' });
+}
+
 // ---------------------- 通知触发（状态机）----------------------
 function handleNotificationsOnSuccess(prevRegime, currentRegime, klines, tradePlan) {
   // 1) 失败恢复
@@ -1372,6 +1537,41 @@ function buildMacdRsiChartSlice(klines, ind, tail = CHART_TAIL) {
   };
 }
 
+// ---------------------- MTF5 自动开仓：状态查询 + 开关 ----------------------
+// GET 只读无需鉴权（与 /status 同级）；POST 会武装真实下单触发器, 走 trading 管理鉴权
+router.get('/mtf-auto-open', (req, res) => {
+  let tf5 = null;
+  try {
+    const mtf = require('./mtfModule');
+    tf5 = typeof mtf.getTimeframe === 'function' ? mtf.getTimeframe('5') : null;
+  } catch (e) { /* mtf 不可用时返回 null */ }
+  res.json({
+    ok: true,
+    enabled: mtf5Auto.enabled,
+    confirm: MTF5_AUTO.confirm,
+    cooldownMs: MTF5_AUTO.cooldownMs,
+    lastFiredAt: mtf5Auto.lastFiredAt || null,
+    lastFired: mtf5Auto.lastFired,
+    mtf5: tf5 ? { state: tf5.state, score: tf5.score, action: tf5.action } : null,
+  });
+});
+
+router.post('/mtf-auto-open', mtf5AdminGuard, (req, res) => {
+  const want = req.body?.enabled;
+  if (typeof want !== 'boolean') {
+    return res.status(400).json({ ok: false, error: 'enabled 必须是 boolean' });
+  }
+  mtf5Auto.enabled = want;
+  // 重置运行时基线：开启后第一个快照只记基线, 不对已存在的强多/强空追溯下单
+  mtf5Auto._lastState = null;
+  mtf5Auto._pendingState = null;
+  mtf5Auto._pendingCount = 0;
+  mtf5Auto._lastSeenMtfAt = 0;
+  saveMtf5AutoState();
+  console.log(`[regime] MTF5 自动开仓开关 → ${want ? '✅ 开启' : '🛑 关闭'}`);
+  res.json({ ok: true, enabled: mtf5Auto.enabled });
+});
+
 // Webhook 推送状态查询（便于调试）
 router.get('/webhook/status', (req, res) => {
   res.json({ ok: true, status: webhook.getStatus() });
@@ -1448,6 +1648,10 @@ module.exports = {
     buildM15ChartSlice,
     dispatch15mSignals,
     notifyState,
+    // MTF5 自动开仓（供测试复用）
+    mtf5AutoTick,
+    mtf5Auto,
+    MTF5_AUTO,
     // 同时暴露 enhanceRegime 给回测使用 (已经从 ./regime/enhancedJudge require)
     enhanceRegime,
     // 暴露常量
