@@ -1089,19 +1089,21 @@ function buildComboLines(isBull, ctx) {
   ];
 }
 
-// ---------------------- MTF 5分钟 强多/强空 自动开仓 ----------------------
+// ---------------------- MTF 短周期(5分钟/1分钟) 强多/强空 自动开仓 ----------------------
 //
-// 用户在 regime 页面「手动开仓」栏拨开关武装后：
-//   - ⭐ 多/空开关独立：「强多自动开多」(enabledLong) 与「强空自动开空」(enabledShort)
-//     分开武装、分开触发、分开自动关闭
-//   - 每 30s 检查 mtfModule 的 5 分钟评分状态（只评估新快照, 按 updatedAt 去重）
+// 用户在 regime 页面「手动开仓」栏拨开关武装后（5分钟与1分钟各一套, 互不影响）：
+//   - ⭐ 周期独立 + 多/空开关独立：每个周期各有「强多自动开多」(enabledLong)
+//     与「强空自动开空」(enabledShort), 分开武装、分开触发、分开自动关闭
+//   - 每 30s 检查 mtfModule 对应周期的评分状态（只评估新快照, 按 updatedAt 去重）
 //   - 状态需连续 MTF5_AUTO_OPEN_CONFIRM 个新快照一致才确认（默认 2, 与 MTF 推送同款防抖）
 //   - 确认「转为」强多 且多开关开 → 自动挂多单；「转为」强空 且空开关开 → 自动挂空单
 //     （从全关到武装时只记基线不追溯, 避免对着已存在的陈旧强多/强空立刻下单）
 //   - 下单复用 trading/router.manualOpenImpl（与 UI 手动挂单/价格触发器同一实现：
 //     Regime plan 优先 / ATR 回退, 置信度小仓位, pending 限价模式）
-//   - ⭐ 单次武装：成功挂单后只自动关闭该方向的开关, 另一方向保持武装（被拒时保持武装）
-//   - 触发后冷却 MTF5_AUTO_OPEN_COOLDOWN_MS（默认 10 分钟, 兜底, 两方向共用）
+//   - ⭐ 单次武装：成功挂单后只自动关闭该周期该方向的开关（被拒时保持武装）
+//   - 触发后冷却 MTF5_AUTO_OPEN_COOLDOWN_MS（默认 10 分钟, 兜底, 每周期独立计）
+//   - ⭐ 1分钟确认转为强多/强空时, 无论开关是否武装都推飞书
+//     （5分钟状态变化 mtfModule 已按 MTF_NOTIFY_TFS 推送, 这里不重复）
 //   - 开关与触发记录持久化到磁盘, 进程重启后保持
 const MTF5_AUTO_FILE = process.env.MTF5_AUTO_OPEN_STATE_PATH
   || path.join(__dirname, 'data', 'mtf5_auto_open.json');
@@ -1110,34 +1112,54 @@ const MTF5_AUTO = {
   cooldownMs: Math.max(0, parseInt(process.env.MTF5_AUTO_OPEN_COOLDOWN_MS, 10) || 10 * 60 * 1000),
   checkMs: 30 * 1000,
 };
-const mtf5Auto = {
-  enabledLong: false,   // 强多 → 自动开多
-  enabledShort: false,  // 强空 → 自动开空
-  lastFiredAt: 0,
-  lastFired: null,      // { at, state, score, direction, status, ok, note }
-  // 运行时（不持久化）
-  _lastSeenMtfAt: 0,
-  _lastState: null,
-  _pendingState: null,
-  _pendingCount: 0,
-  _firing: false,
+// 每周期行为配置：pushStrong = 确认转为强多/强空时是否由本模块推飞书
+const MTF_AUTO_TF_CFG = {
+  '5': { label: '5分钟', pushStrong: false },
+  '1': { label: '1分钟', pushStrong: true },
 };
-function mtf5Armed() { return mtf5Auto.enabledLong || mtf5Auto.enabledShort; }
+function newMtfAutoSlot() {
+  return {
+    enabledLong: false,   // 强多 → 自动开多
+    enabledShort: false,  // 强空 → 自动开空
+    lastFiredAt: 0,
+    lastFired: null,      // { at, state, score, direction, status, ok, note }
+    // 运行时（不持久化）
+    _lastSeenMtfAt: 0,
+    _lastState: null,
+    _pendingState: null,
+    _pendingCount: 0,
+    _firing: false,
+  };
+}
+const mtfAuto = { '5': newMtfAutoSlot(), '1': newMtfAutoSlot() };
+const mtf5Auto = mtfAuto['5'];   // 兼容别名（测试/旧引用）
+function mtfAutoArmed(slot) { return slot.enabledLong || slot.enabledShort; }
 
+function applyMtfAutoSlot(slot, obj) {
+  if (!obj || typeof obj !== 'object') return;
+  if (typeof obj.enabledLong === 'boolean') slot.enabledLong = obj.enabledLong;
+  if (typeof obj.enabledShort === 'boolean') slot.enabledShort = obj.enabledShort;
+  if (Number.isFinite(obj.lastFiredAt)) slot.lastFiredAt = obj.lastFiredAt;
+  if (obj.lastFired && typeof obj.lastFired === 'object') slot.lastFired = obj.lastFired;
+}
 function loadMtf5AutoState() {
   try {
     const obj = JSON.parse(fs.readFileSync(MTF5_AUTO_FILE, 'utf8'));
-    // 旧版单开关字段迁移：enabled=true → 双方向都武装
-    if (obj && typeof obj.enabled === 'boolean') {
-      mtf5Auto.enabledLong = obj.enabled;
-      mtf5Auto.enabledShort = obj.enabled;
+    if (obj && obj.tfs && typeof obj.tfs === 'object') {
+      // 新格式：{ tfs: { '5': {...}, '1': {...} } }
+      for (const key of Object.keys(mtfAuto)) applyMtfAutoSlot(mtfAuto[key], obj.tfs[key]);
+    } else if (obj) {
+      // 旧格式迁移（均只影响 5 分钟槽）：v1 { enabled } / v2 { enabledLong, enabledShort }
+      if (typeof obj.enabled === 'boolean') {
+        mtfAuto['5'].enabledLong = obj.enabled;
+        mtfAuto['5'].enabledShort = obj.enabled;
+      }
+      applyMtfAutoSlot(mtfAuto['5'], obj);
     }
-    if (obj && typeof obj.enabledLong === 'boolean') mtf5Auto.enabledLong = obj.enabledLong;
-    if (obj && typeof obj.enabledShort === 'boolean') mtf5Auto.enabledShort = obj.enabledShort;
-    if (obj && Number.isFinite(obj.lastFiredAt)) mtf5Auto.lastFiredAt = obj.lastFiredAt;
-    if (obj && obj.lastFired && typeof obj.lastFired === 'object') mtf5Auto.lastFired = obj.lastFired;
-    if (mtf5Armed()) {
-      console.log(`[regime] MTF5 自动开仓状态已恢复: long=${mtf5Auto.enabledLong} short=${mtf5Auto.enabledShort}`);
+    for (const key of Object.keys(mtfAuto)) {
+      if (mtfAutoArmed(mtfAuto[key])) {
+        console.log(`[regime] MTF${key} 自动开仓状态已恢复: long=${mtfAuto[key].enabledLong} short=${mtfAuto[key].enabledShort}`);
+      }
     }
   } catch (e) { /* 文件不存在则忽略 */ }
 }
@@ -1145,124 +1167,164 @@ function saveMtf5AutoState() {
   try {
     const dir = path.dirname(MTF5_AUTO_FILE);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(MTF5_AUTO_FILE, JSON.stringify({
-      enabledLong: mtf5Auto.enabledLong,
-      enabledShort: mtf5Auto.enabledShort,
-      lastFiredAt: mtf5Auto.lastFiredAt,
-      lastFired: mtf5Auto.lastFired,
-      savedAt: new Date().toISOString(),
-    }, null, 2));
+    const tfs = {};
+    for (const key of Object.keys(mtfAuto)) {
+      const s = mtfAuto[key];
+      tfs[key] = {
+        enabledLong: s.enabledLong,
+        enabledShort: s.enabledShort,
+        lastFiredAt: s.lastFiredAt,
+        lastFired: s.lastFired,
+      };
+    }
+    fs.writeFileSync(MTF5_AUTO_FILE, JSON.stringify({ tfs, savedAt: new Date().toISOString() }, null, 2));
   } catch (e) { console.error('[regime] saveMtf5AutoState 失败:', e.message); }
 }
 loadMtf5AutoState();
 
-async function mtf5AutoTick() {
-  if (!mtf5Armed() || mtf5Auto._firing) return;
-  let mtf;
-  try { mtf = require('./mtfModule'); } catch (e) { return; }
-  const updatedAt = typeof mtf.getUpdatedAt === 'function' ? mtf.getUpdatedAt() : null;
-  if (!updatedAt || updatedAt === mtf5Auto._lastSeenMtfAt) return; // 只评估新快照
-  mtf5Auto._lastSeenMtfAt = updatedAt;
+/** 单个周期的状态机：基线 → 变化确认 → (可选)强多强空飞书 → (武装时)自动开仓 */
+async function mtfAutoTickTf(tfKey, mtf) {
+  const slot = mtfAuto[tfKey];
+  const cfg = MTF_AUTO_TF_CFG[tfKey];
+  if (slot._firing) return;
+  // 未武装且该周期不需要强多/强空推送时, 无事可做
+  if (!mtfAutoArmed(slot) && !cfg.pushStrong) return;
 
-  const tf5 = typeof mtf.getTimeframe === 'function' ? mtf.getTimeframe('5') : null;
-  if (!tf5 || !tf5.state) return;
-  const cur = tf5.state;
+  const updatedAt = mtf.getUpdatedAt();
+  if (!updatedAt || updatedAt === slot._lastSeenMtfAt) return; // 只评估新快照
+  slot._lastSeenMtfAt = updatedAt;
+
+  const tfRow = mtf.getTimeframe(tfKey);
+  if (!tfRow || !tfRow.state) return;
+  const cur = tfRow.state;
 
   // 首个快照：只记基线（含刚开启开关后）
-  if (mtf5Auto._lastState == null) {
-    mtf5Auto._lastState = cur;
-    console.log(`[regime] MTF5 自动开仓基线: 5分钟=${cur}`);
+  if (slot._lastState == null) {
+    slot._lastState = cur;
+    console.log(`[regime] MTF${tfKey} 自动开仓基线: ${cfg.label}=${cur}`);
     return;
   }
   // 状态没变（或抖回原状态）：清待确认
-  if (cur === mtf5Auto._lastState) {
-    mtf5Auto._pendingState = null;
-    mtf5Auto._pendingCount = 0;
+  if (cur === slot._lastState) {
+    slot._pendingState = null;
+    slot._pendingCount = 0;
     return;
   }
   // 状态变了：累计确认
-  if (mtf5Auto._pendingState === cur) mtf5Auto._pendingCount += 1;
-  else { mtf5Auto._pendingState = cur; mtf5Auto._pendingCount = 1; }
-  if (mtf5Auto._pendingCount < MTF5_AUTO.confirm) return;
+  if (slot._pendingState === cur) slot._pendingCount += 1;
+  else { slot._pendingState = cur; slot._pendingCount = 1; }
+  if (slot._pendingCount < MTF5_AUTO.confirm) return;
 
-  const from = mtf5Auto._lastState;
-  mtf5Auto._lastState = cur;
-  mtf5Auto._pendingState = null;
-  mtf5Auto._pendingCount = 0;
+  const from = slot._lastState;
+  slot._lastState = cur;
+  slot._pendingState = null;
+  slot._pendingCount = 0;
   if (cur !== '强多' && cur !== '强空') return;
 
-  // 方向开关独立：只在对应方向武装时触发
+  // 强多/强空确认成立：按配置推飞书（与开关是否武装无关）
+  if (cfg.pushStrong) pushMtfStrongFeishu(tfKey, cfg.label, from, tfRow);
+
+  // 方向开关独立：只在对应周期对应方向武装时触发交易
   const direction = cur === '强多' ? 'long' : 'short';
-  const armed = direction === 'long' ? mtf5Auto.enabledLong : mtf5Auto.enabledShort;
+  const armed = direction === 'long' ? slot.enabledLong : slot.enabledShort;
   if (!armed) {
-    console.log(`[regime] ⏭ MTF5 状态确认 ${from} → ${cur}, 但${direction === 'long' ? '多' : '空'}方向开关未武装, 跳过`);
+    console.log(`[regime] ⏭ MTF${tfKey} 状态确认 ${from} → ${cur}, 但${direction === 'long' ? '多' : '空'}方向开关未武装, 跳过下单`);
     return;
   }
-  console.log(`[regime] 🤖 MTF5 自动开仓触发条件成立: ${from} → ${cur}`);
-  await fireMtf5AutoOpen(direction, tf5);
+  console.log(`[regime] 🤖 MTF${tfKey} 自动开仓触发条件成立: ${from} → ${cur}`);
+  await fireMtfAutoOpen(tfKey, direction, tfRow);
 }
 
-async function fireMtf5AutoOpen(direction, tf5) {
+async function mtfAutoTick() {
+  let mtf;
+  try { mtf = require('./mtfModule'); } catch (e) { return; }
+  if (typeof mtf.getUpdatedAt !== 'function' || typeof mtf.getTimeframe !== 'function') return;
+  for (const tfKey of Object.keys(mtfAuto)) {
+    try { await mtfAutoTickTf(tfKey, mtf); }
+    catch (e) { console.error(`[regime] MTF${tfKey} 自动开仓检测异常:`, e?.message || e); }
+  }
+}
+
+/** 1分钟(等配置了 pushStrong 的周期)确认转为强多/强空 → 飞书 */
+function pushMtfStrongFeishu(tfKey, label, from, tfRow) {
+  const isBull = tfRow.state === '强多';
+  const scoreStr = tfRow.score > 0 ? `+${tfRow.score}` : String(tfRow.score);
+  console.log(`[regime] 📣 MTF ${label} 确认转为${tfRow.state}, 推送飞书`);
+  webhook.sendRich(
+    `${isBull ? '🟢' : '🔴'} MTF ${label}转为${tfRow.state}`,
+    [
+      [{ text: `📊 ${SYMBOL} · ${label}周期` }],
+      [{ text: `状态: ${from} → ${tfRow.state}（评分 ${scoreStr}）` }],
+      [{ text: `操作建议: ${tfRow.action || '--'}` }],
+      [{ text: `⏰ ${new Date().toLocaleString()}` }],
+    ],
+    { eventKey: `mtf${tfKey}Strong_${isBull ? 'BULL' : 'BEAR'}` }
+  );
+}
+
+async function fireMtfAutoOpen(tfKey, direction, tfRow) {
+  const slot = mtfAuto[tfKey];
+  const label = MTF_AUTO_TF_CFG[tfKey].label;
   const now = Date.now();
-  if (now - mtf5Auto.lastFiredAt < MTF5_AUTO.cooldownMs) {
-    const waitS = Math.round((MTF5_AUTO.cooldownMs - (now - mtf5Auto.lastFiredAt)) / 1000);
-    console.log(`[regime] ⏭ MTF5 自动开仓冷却中 (还剩 ${waitS}s), 跳过本次 ${direction}`);
+  if (now - slot.lastFiredAt < MTF5_AUTO.cooldownMs) {
+    const waitS = Math.round((MTF5_AUTO.cooldownMs - (now - slot.lastFiredAt)) / 1000);
+    console.log(`[regime] ⏭ MTF${tfKey} 自动开仓冷却中 (还剩 ${waitS}s), 跳过本次 ${direction}`);
     return;
   }
-  mtf5Auto._firing = true;
+  slot._firing = true;
   const dirLabel = direction === 'long' ? '多单' : '空单';
-  const scoreStr = tf5.score > 0 ? `+${tf5.score}` : String(tf5.score);
+  const scoreStr = tfRow.score > 0 ? `+${tfRow.score}` : String(tfRow.score);
   try {
     const { manualOpenImpl } = require('./trading/router');
     if (typeof manualOpenImpl !== 'function') {
-      console.error('[regime] ❌ trading/router 未导出 manualOpenImpl, MTF5 自动开仓不可用');
+      console.error(`[regime] ❌ trading/router 未导出 manualOpenImpl, MTF${tfKey} 自动开仓不可用`);
       return;
     }
-    const r = await manualOpenImpl({ direction, source: 'mtf5_auto_open' });
+    const r = await manualOpenImpl({ direction, source: `mtf${tfKey}_auto_open` });
     const ok = r.status >= 200 && r.status < 300;
     if (ok) {
-      mtf5Auto.lastFiredAt = now;
-      // ⭐ 单次武装：成功挂单后只自动关闭该方向的开关, 另一方向保持武装;
+      slot.lastFiredAt = now;
+      // ⭐ 单次武装：成功挂单后只自动关闭该周期该方向的开关;
       //    被拒 (如同方向已有挂单/持仓、行情未就绪) 时保持武装, 等下一次状态转变.
-      if (direction === 'long') mtf5Auto.enabledLong = false;
-      else mtf5Auto.enabledShort = false;
-      console.log(`[regime] 🔒 MTF5 自动开仓 ${direction} 已触发成功, ${direction === 'long' ? '多' : '空'}方向开关自动关闭 (单次武装)`);
+      if (direction === 'long') slot.enabledLong = false;
+      else slot.enabledShort = false;
+      console.log(`[regime] 🔒 MTF${tfKey} 自动开仓 ${direction} 已触发成功, ${label}${direction === 'long' ? '多' : '空'}方向开关自动关闭 (单次武装)`);
     }
     const plan = r.body?.position?.pendingPlan;
     const note = ok
       ? (plan ? `entry=${plan.entry} sl=${plan.sl} 仓位=${plan.positionSize || '--'}` : `entry=${r.body?.position?.entryPrice ?? '--'}`)
       : (r.body?.error || r.body?.hint || `HTTP ${r.status}`);
-    mtf5Auto.lastFired = { at: now, state: tf5.state, score: tf5.score, direction, status: r.status, ok, note };
+    slot.lastFired = { at: now, state: tfRow.state, score: tfRow.score, direction, status: r.status, ok, note };
     saveMtf5AutoState();
-    console.log(`[regime] ${ok ? '✅' : '⏭'} MTF5 自动开仓 ${direction} status=${r.status} ${note}`);
+    console.log(`[regime] ${ok ? '✅' : '⏭'} MTF${tfKey} 自动开仓 ${direction} status=${r.status} ${note}`);
 
     webhook.sendRich(
       ok
-        ? `🤖 MTF5 自动开仓：5分钟转「${tf5.state}」→ 已挂${dirLabel}`
-        : `🤖 MTF5 自动开仓被拒：5分钟转「${tf5.state}」`,
+        ? `🤖 MTF${tfKey} 自动开仓：${label}转「${tfRow.state}」→ 已挂${dirLabel}`
+        : `🤖 MTF${tfKey} 自动开仓被拒：${label}转「${tfRow.state}」`,
       [
         [{ text: '⏰ 时间：', bold: true }, { text: new Date().toLocaleString() }],
-        [{ text: '📊 5分钟 MTF：', bold: true }, { text: `${tf5.state}（评分 ${scoreStr} · ${tf5.action || '--'}）` }],
+        [{ text: `📊 ${label} MTF：`, bold: true }, { text: `${tfRow.state}（评分 ${scoreStr} · ${tfRow.action || '--'}）` }],
         [{ text: '🎬 动作：', bold: true }, { text: ok ? `自动挂${dirLabel}（限价待触发）` : `挂${dirLabel}失败` }],
         [{ text: '📋 结果：', bold: true }, { text: note }],
         ok
-          ? [{ text: `🔒 ${direction === 'long' ? '多' : '空'}方向开关已自动关闭（单次触发防重复开仓），另一方向不受影响；如需再次自动开仓请到页面重新开启`, italic: true }]
+          ? [{ text: `🔒 ${label}${direction === 'long' ? '多' : '空'}方向开关已自动关闭（单次触发防重复开仓），其余开关不受影响；如需再次自动开仓请到页面重新开启`, italic: true }]
           : [{ text: '⚠️ 本次未成交，开关保持武装，等待下一次状态转变', italic: true }],
-        [{ text: '来源：MTF5 自动开仓（与手动挂单同通道：Regime plan 优先 / ATR 回退）', italic: true }],
+        [{ text: `来源：MTF${tfKey} 自动开仓（与手动挂单同通道：Regime plan 优先 / ATR 回退）`, italic: true }],
       ],
-      { eventKey: 'mtf5AutoOpen', force: true }
+      { eventKey: `mtf${tfKey}AutoOpen`, force: true }
     );
   } catch (e) {
-    mtf5Auto.lastFired = { at: now, state: tf5.state, score: tf5.score, direction, status: 0, ok: false, note: e?.message || String(e) };
+    slot.lastFired = { at: now, state: tfRow.state, score: tfRow.score, direction, status: 0, ok: false, note: e?.message || String(e) };
     saveMtf5AutoState();
-    console.error(`[regime] ❌ MTF5 自动开仓异常 (${direction}):`, e?.message || e);
+    console.error(`[regime] ❌ MTF${tfKey} 自动开仓异常 (${direction}):`, e?.message || e);
   } finally {
-    mtf5Auto._firing = false;
+    slot._firing = false;
   }
 }
 
 const mtf5AutoTimer = setInterval(() => {
-  mtf5AutoTick().catch(e => console.error('[regime] mtf5AutoTick 异常:', e?.message || e));
+  mtfAutoTick().catch(e => console.error('[regime] mtfAutoTick 异常:', e?.message || e));
 }, MTF5_AUTO.checkMs);
 if (typeof mtf5AutoTimer.unref === 'function') mtf5AutoTimer.unref();
 
@@ -1558,30 +1620,49 @@ function buildMacdRsiChartSlice(klines, ind, tail = CHART_TAIL) {
   };
 }
 
-// ---------------------- MTF5 自动开仓：状态查询 + 开关 ----------------------
+// ---------------------- MTF 自动开仓（5分钟/1分钟）：状态查询 + 开关 ----------------------
 // GET 只读无需鉴权（与 /status 同级）；POST 会武装真实下单触发器, 走 trading 管理鉴权
 router.get('/mtf-auto-open', (req, res) => {
-  let tf5 = null;
+  let getTf = null;
   try {
     const mtf = require('./mtfModule');
-    tf5 = typeof mtf.getTimeframe === 'function' ? mtf.getTimeframe('5') : null;
-  } catch (e) { /* mtf 不可用时返回 null */ }
+    if (typeof mtf.getTimeframe === 'function') getTf = mtf.getTimeframe;
+  } catch (e) { /* mtf 不可用时 mtf 字段返回 null */ }
+  const tfs = {};
+  for (const key of Object.keys(mtfAuto)) {
+    const s = mtfAuto[key];
+    const row = getTf ? getTf(key) : null;
+    tfs[key] = {
+      label: MTF_AUTO_TF_CFG[key].label,
+      enabledLong: s.enabledLong,
+      enabledShort: s.enabledShort,
+      lastFiredAt: s.lastFiredAt || null,
+      lastFired: s.lastFired,
+      mtf: row ? { state: row.state, score: row.score, action: row.action } : null,
+    };
+  }
   res.json({
     ok: true,
-    enabledLong: mtf5Auto.enabledLong,
-    enabledShort: mtf5Auto.enabledShort,
-    enabled: mtf5Armed(),   // 兼容字段：任一方向武装即 true
+    tfs,
     confirm: MTF5_AUTO.confirm,
     cooldownMs: MTF5_AUTO.cooldownMs,
-    lastFiredAt: mtf5Auto.lastFiredAt || null,
-    lastFired: mtf5Auto.lastFired,
-    mtf5: tf5 ? { state: tf5.state, score: tf5.score, action: tf5.action } : null,
+    // 兼容旧字段（= 5分钟槽）
+    enabledLong: mtfAuto['5'].enabledLong,
+    enabledShort: mtfAuto['5'].enabledShort,
+    enabled: mtfAutoArmed(mtfAuto['5']),
+    lastFired: mtfAuto['5'].lastFired,
+    mtf5: tfs['5'].mtf,
   });
 });
 
-// body: { enabledLong?: boolean, enabledShort?: boolean, enabled?: boolean(旧, 同时设双方向) }
+// body: { tf?: '5'|'1'(默认'5'), enabledLong?: boolean, enabledShort?: boolean, enabled?: boolean(旧, 同时设双方向) }
 router.post('/mtf-auto-open', mtf5AdminGuard, (req, res) => {
   const b = req.body || {};
+  const tfKey = b.tf != null ? String(b.tf) : '5';
+  const slot = mtfAuto[tfKey];
+  if (!slot) {
+    return res.status(400).json({ ok: false, error: `tf 必须是 ${Object.keys(mtfAuto).join(' / ')}` });
+  }
   const patch = {};
   if (typeof b.enabled === 'boolean') { patch.enabledLong = b.enabled; patch.enabledShort = b.enabled; }
   if (typeof b.enabledLong === 'boolean') patch.enabledLong = b.enabledLong;
@@ -1589,19 +1670,20 @@ router.post('/mtf-auto-open', mtf5AdminGuard, (req, res) => {
   if (!Object.keys(patch).length) {
     return res.status(400).json({ ok: false, error: 'enabledLong / enabledShort 至少提供一个 boolean' });
   }
-  const wasArmed = mtf5Armed();
-  Object.assign(mtf5Auto, patch);
-  // 从「全关」到「武装」时重置运行时基线：第一个快照只记基线,
-  // 不对已存在的强多/强空追溯下单; 已武装状态下切另一方向不打断状态跟踪
-  if (!wasArmed && mtf5Armed()) {
-    mtf5Auto._lastState = null;
-    mtf5Auto._pendingState = null;
-    mtf5Auto._pendingCount = 0;
-    mtf5Auto._lastSeenMtfAt = 0;
+  const wasArmed = mtfAutoArmed(slot);
+  Object.assign(slot, patch);
+  // 从「全关」到「武装」时重置该周期运行时基线：第一个快照只记基线,
+  // 不对已存在的强多/强空追溯下单; 已武装状态下切另一方向不打断状态跟踪.
+  // （注: 1分钟槽因需持续推强多/强空飞书, 状态机常驻, 基线通常已存在, 重置同样安全）
+  if (!wasArmed && mtfAutoArmed(slot)) {
+    slot._lastState = null;
+    slot._pendingState = null;
+    slot._pendingCount = 0;
+    slot._lastSeenMtfAt = 0;
   }
   saveMtf5AutoState();
-  console.log(`[regime] MTF5 自动开仓开关 → long=${mtf5Auto.enabledLong ? '✅' : '🛑'} short=${mtf5Auto.enabledShort ? '✅' : '🛑'}`);
-  res.json({ ok: true, enabledLong: mtf5Auto.enabledLong, enabledShort: mtf5Auto.enabledShort });
+  console.log(`[regime] MTF${tfKey} 自动开仓开关 → long=${slot.enabledLong ? '✅' : '🛑'} short=${slot.enabledShort ? '✅' : '🛑'}`);
+  res.json({ ok: true, tf: tfKey, enabledLong: slot.enabledLong, enabledShort: slot.enabledShort });
 });
 
 // Webhook 推送状态查询（便于调试）
@@ -1680,8 +1762,9 @@ module.exports = {
     buildM15ChartSlice,
     dispatch15mSignals,
     notifyState,
-    // MTF5 自动开仓（供测试复用）
-    mtf5AutoTick,
+    // MTF 自动开仓（供测试复用；mtf5Auto 为 mtfAuto['5'] 的兼容别名）
+    mtfAutoTick,
+    mtfAuto,
     mtf5Auto,
     MTF5_AUTO,
     // 同时暴露 enhanceRegime 给回测使用 (已经从 ./regime/enhancedJudge require)
