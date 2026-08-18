@@ -1131,23 +1131,23 @@
   <button id="manualOpenShortBtn" class="manual-btn short" disabled>📉 挂空单</button>
   <span style="font-size:12px;color:#8b949e;white-space:nowrap;">🤖 5M:</span>
   <label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:#c9d1d9;cursor:pointer;white-space:nowrap;"
-         title="MTF 5分钟评分连续确认转为「强多」→ 自动挂多单。单次武装: 成功挂单后本开关自动关闭 (其余开关不受影响)。与手动挂单同通道 (Regime plan 优先 / ATR 回退, 小仓位, pending 限价)。后端运行, 关闭浏览器仍生效">
+         title="MTF 5分钟评分连续确认转为「强多」→ 自动市价开多单 (立即成交)。单次武装: 成功开仓后本开关自动关闭 (其余开关不受影响)。与「一键追单」同通道 (市价成交, TP/SL 按 ATR 派生, 小仓位)。后端运行, 关闭浏览器仍生效">
     <input type="checkbox" id="mtf5AutoLongChk" style="accent-color:#2ea043;cursor:pointer;" />
     🟢强多开多
   </label>
   <label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:#c9d1d9;cursor:pointer;white-space:nowrap;"
-         title="MTF 5分钟评分连续确认转为「强空」→ 自动挂空单。单次武装: 成功挂单后本开关自动关闭 (其余开关不受影响)。与手动挂单同通道 (Regime plan 优先 / ATR 回退, 小仓位, pending 限价)。后端运行, 关闭浏览器仍生效">
+         title="MTF 5分钟评分连续确认转为「强空」→ 自动市价开空单 (立即成交)。单次武装: 成功开仓后本开关自动关闭 (其余开关不受影响)。与「一键追单」同通道 (市价成交, TP/SL 按 ATR 派生, 小仓位)。后端运行, 关闭浏览器仍生效">
     <input type="checkbox" id="mtf5AutoShortChk" style="accent-color:#f85149;cursor:pointer;" />
     🔴强空开空
   </label>
   <span style="font-size:12px;color:#8b949e;white-space:nowrap;">🤖 1M:</span>
   <label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:#c9d1d9;cursor:pointer;white-space:nowrap;"
-         title="MTF 1分钟评分连续确认转为「强多」→ 自动挂多单。单次武装: 成功挂单后本开关自动关闭 (其余开关不受影响)。1分钟确认转强多/强空时无论是否武装都会推飞书。后端运行, 关闭浏览器仍生效">
+         title="MTF 1分钟评分连续确认转为「强多」→ 自动市价开多单 (立即成交)。单次武装: 成功开仓后本开关自动关闭 (其余开关不受影响)。1分钟确认转强多/强空时无论是否武装都会推飞书。后端运行, 关闭浏览器仍生效">
     <input type="checkbox" id="mtf1AutoLongChk" style="accent-color:#2ea043;cursor:pointer;" />
     🟢强多开多
   </label>
   <label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:#c9d1d9;cursor:pointer;white-space:nowrap;"
-         title="MTF 1分钟评分连续确认转为「强空」→ 自动挂空单。单次武装: 成功挂单后本开关自动关闭 (其余开关不受影响)。1分钟确认转强多/强空时无论是否武装都会推飞书。后端运行, 关闭浏览器仍生效">
+         title="MTF 1分钟评分连续确认转为「强空」→ 自动市价开空单 (立即成交)。单次武装: 成功开仓后本开关自动关闭 (其余开关不受影响)。1分钟确认转强多/强空时无论是否武装都会推飞书。后端运行, 关闭浏览器仍生效">
     <input type="checkbox" id="mtf1AutoShortChk" style="accent-color:#f85149;cursor:pointer;" />
     🔴强空开空
   </label>
@@ -3155,10 +3155,10 @@
     const dirZh = isLong ? '强多自动开多' : '强空自动开空';
     if (want && !confirm(
       `确认开启 MTF ${tfZh}「${dirZh}」?\n` +
-      `· ${tfZh}评分连续确认「转为」${isLong ? '强多 → 自动挂多单' : '强空 → 自动挂空单'}\n` +
-      '· 与手动挂单同通道: Regime plan 优先 / ATR 回退, 置信度小仓位, pending 限价\n' +
+      `· ${tfZh}评分连续确认「转为」${isLong ? '强多 → 自动市价开多单 (立即成交)' : '强空 → 自动市价开空单 (立即成交)'}\n` +
+      '· 与「一键追单」同通道: 市价成交, TP/SL 按 ATR 动态派生, 置信度小仓位\n' +
       '· 开启时不追溯当前已有状态, 只对之后的新转变生效\n' +
-      '· ⭐ 单次武装: 成功挂单后本开关自动关闭 (其余开关不受影响); 需再次手动开启\n' +
+      '· ⭐ 单次武装: 成功开仓后本开关自动关闭 (其余开关不受影响); 需再次手动开启\n' +
       '· 后端运行, 关闭浏览器仍生效; 触发结果推飞书'
     )) { if (chk) chk.checked = false; return; }
     try {
@@ -3166,7 +3166,7 @@
         isLong ? { tf: tfKey, enabledLong: want } : { tf: tfKey, enabledShort: want });
       showToast('ok',
         want ? `🤖 已开启 ${tfZh}「${dirZh}」` : `🛑 已关闭 ${tfZh}「${dirZh}」`,
-        want ? `${tfZh}确认转${isLong ? '强多后自动挂多单' : '强空后自动挂空单'}, 结果同步推飞书` : '');
+        want ? `${tfZh}确认转${isLong ? '强多后自动市价开多单' : '强空后自动市价开空单'}, 结果同步推飞书` : '');
     } catch (e) {
       if (chk) chk.checked = !want;
       showToast('err', `❌ 切换 ${tfZh}「${dirZh}」失败`, e.message, 8000);
