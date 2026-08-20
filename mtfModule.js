@@ -545,6 +545,61 @@ function evaluateTfStateChange(tfKey, tf, summary) {
   ], { eventKey: `mtf${tfKey}StateChange`, force: true });
 }
 
+// ---------------------- 总建议变化 → 飞书推送 ----------------------
+//
+// 监控聚合汇总的「建议」(只找多/回调做多/观望/反弹做空/只找空, 与总分状态一一对应),
+// 与单周期推送同款 confirm 防抖: 新建议连续 STATE_CONFIRM 轮一致才确认;
+// 启动首轮只记基线不推送。
+const suggestionNotify = { lastSuggestion: null, pendingSuggestion: null, pendingCount: 0 };
+const SUGGESTION_EMOJI = { 只找多: '🟢', 回调做多: '🟩', 观望: '🟡', 反弹做空: '🟧', 只找空: '🔴' };
+
+function evaluateSuggestionChange(summary, tfRows) {
+  if (!summary || !summary.suggestion) return;
+  const cur = summary.suggestion;
+  const st = suggestionNotify;
+
+  if (st.lastSuggestion == null) {
+    st.lastSuggestion = cur;
+    console.log(`[mtf] 总建议基线: ${cur}`);
+    return;
+  }
+  if (cur === st.lastSuggestion) {
+    st.pendingSuggestion = null;
+    st.pendingCount = 0;
+    return;
+  }
+  if (st.pendingSuggestion === cur) {
+    st.pendingCount += 1;
+  } else {
+    st.pendingSuggestion = cur;
+    st.pendingCount = 1;
+  }
+  if (st.pendingCount < STATE_CONFIRM) return;
+
+  const from = st.lastSuggestion;
+  st.lastSuggestion = cur;
+  st.pendingSuggestion = null;
+  st.pendingCount = 0;
+
+  const emoji = SUGGESTION_EMOJI[cur] || '📌';
+  const totalStr = summary.totalScore > 0 ? `+${summary.totalScore}` : String(summary.totalScore);
+  // 各周期一行速览: 周线 强多+5 · 日线 偏多+2 · ...
+  const tfOverview = (tfRows || [])
+    .map((t) => `${TF_CN_LABEL[t.key] || t.label || t.key} ${t.state}${t.score > 0 ? '+' + t.score : t.score}`)
+    .join(' · ');
+
+  console.log(`[mtf] 📣 总建议变化: ${from} → ${cur} (总分 ${totalStr}), 推送飞书`);
+  feishu.sendRich(`${emoji} MTF 总建议变化: ${from} → ${cur}`, [
+    [{ text: `📊 ${SYMBOL} · 多周期共振汇总` }],
+    [{ text: `建议: ${from} → ${cur}${summary.execTf ? '   (建议执行周期 ' + (TF_CN_LABEL[summary.execTf] || summary.execTf) + ')' : ''}`, bold: true }],
+    [{ text: `总分: ${summary.totalState} ${totalStr}   (多 ${summary.bullCount} / 空 ${summary.bearCount} / 中 ${summary.neutralCount})` }],
+    [{ text: `共振: ${summary.resonanceLabel}${summary.overall ? ' · ' + summary.overall : ''}${summary.candleSync ? ' · ' + summary.candleSync : ''}` }],
+    [{ text: `各周期: ${tfOverview || '--'}` }],
+    [{ text: `现价: ${summary.currentPrice != null ? Number(summary.currentPrice).toFixed(1) : '--'}` }],
+    [{ text: `⏰ ${cnTime()}` }],
+  ], { eventKey: 'mtfSuggestionChange', force: true });
+}
+
 // ---------------------- 数据拉取与刷新 ----------------------
 
 let cache = {
@@ -603,6 +658,12 @@ async function refresh() {
         console.error(`[mtf] ${tfKey} 状态推送检测异常:`, e?.message || e);
       }
     }
+    // 总建议 (只找多/回调做多/观望/反弹做空/只找空) 变化检测 → 飞书 (同款 confirm 防抖)
+    try {
+      evaluateSuggestionChange(summary, tfRows);
+    } catch (e) {
+      console.error('[mtf] 总建议推送检测异常:', e?.message || e);
+    }
   } catch (e) {
     cache.error = e?.message || String(e);
     console.error('[mtf] 刷新失败:', cache.error);
@@ -645,4 +706,4 @@ function getUpdatedAt() {
   return cache.updatedAt;
 }
 
-module.exports = { router, refresh, getTimeframe, getUpdatedAt, _test: { evaluateTfStateChange, notifyStates } };
+module.exports = { router, refresh, getTimeframe, getUpdatedAt, _test: { evaluateTfStateChange, notifyStates, evaluateSuggestionChange, suggestionNotify } };
