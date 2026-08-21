@@ -208,6 +208,71 @@ Regime 面板快照（含 K 线 + 所有指标系列 + MACD/RSI 最近 50 根专
 
 ---
 
+## 📺 TradingView 策略警报接入（Webhook 执行止盈1）
+
+接收 TradingView 的策略/指标警报，对当前持仓**执行止盈1（TP1）**，支持多空双向。
+
+### Webhook URL
+
+```
+POST http://<你的服务器地址>:3001/api/auto-trade/tv-alert
+```
+
+> 端口以 `.env` 中 `PORT` 为准（默认 3001）；若有域名/反代则用 `https://<域名>/api/auto-trade/tv-alert`。
+> ⚠️ TradingView 云端警报要求服务器可公网访问，且仅支持 80/443 端口 —— 建议通过 Nginx 反代 + HTTPS 暴露。
+
+### 警报消息 JSON
+
+多单执行止盈1：
+
+```json
+{"token": "<AUTO_TRADE_WEBHOOK_TOKEN>", "action": "tp1", "direction": "long"}
+```
+
+空单执行止盈1：
+
+```json
+{"token": "<AUTO_TRADE_WEBHOOK_TOKEN>", "action": "tp1", "direction": "short"}
+```
+
+字段说明：
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `token` | ✅ | 鉴权令牌，须与 `.env` 的 `AUTO_TRADE_WEBHOOK_TOKEN` 一致 |
+| `action` | ✅ | 固定 `"tp1"`（当前仅支持执行止盈1） |
+| `direction` | ✅ | `"long"`（多单）或 `"short"`（空单） |
+| `set_protection_sl` | 可选 | TP1 后是否将止损上移到入场价保本；不传则跟随系统配置 `tp1Protection`（默认开启） |
+
+### TradingView 设置步骤
+
+1. 在图表上打开策略/指标的「创建警报」对话框；
+2. 勾选「Webhook URL」，填入上面的 URL；
+3. 在「消息」框里粘贴上面的 JSON（多单策略填 `long`，空单策略填 `short`），把 `<AUTO_TRADE_WEBHOOK_TOKEN>` 替换为真实令牌；
+4. 保存警报。策略条件触发时 TradingView 会 POST 该 JSON 到本服务。
+
+### 行为说明
+
+- 完全复用内部 `take_profit` 处理链路：按 TP1 比例（50%）市价部分平仓并转发下单 webhook，与风控引擎/页面手动按钮共享同一把幂等锁 —— **TP1 已触发过或该方向无 active 持仓时返回 409，不会重复平仓**；
+- 平仓类动作不受「自动下单总开关」影响，总开关关闭时警报照常执行；
+- 兼容 TradingView 的两种 Content-Type（消息为合法 JSON 时发 `application/json`，否则 `text/plain`，服务端均可解析）；
+- 触发结果同步推送飞书通知（标题「外部触发止盈 (tp_1)，来源 tradingview_alert」）。
+
+### 响应示例
+
+```json
+// 200 成功
+{"ok": true, "action": "tp1", "direction": "long"}
+
+// 409 无持仓或 TP1 已触发过（幂等拒绝）
+{"ok": false, "error": "no_active_position", "action": "tp1", "direction": "long"}
+
+// 401 token 错误
+{"ok": false, "error": "invalid_token"}
+```
+
+---
+
 ## 📦 依赖安装与运行
 
 本次迭代 **未新增** npm 依赖（仅用到 `crypto` 内置模块），已有的 `axios + express + moment + dotenv` 即可。

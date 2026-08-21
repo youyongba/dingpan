@@ -28,6 +28,7 @@ function attach(app, opts = {}) {
     app.post('/api/close-all-positions', router.requireAdmin, async (req, res) => {
       const r = await router.manualCloseAllImpl({
         source: req.body?.source || 'manual_ui_alias',
+        direction: req.body?.direction || null,
       });
       res.json(r);
     });

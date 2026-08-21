@@ -5,6 +5,7 @@
  *
  *  对外接口：
  *    POST /api/auto-trade/signal          接收外部 webhook 入仓/平仓信号 (body.token 校验)
+ *    POST /api/auto-trade/tv-alert        📺 TradingView 策略警报 → 执行止盈1 (多空双向, body.token 校验)
  *    POST /api/auto-trade/pending-order   ⭐ 对外挂单交易信号 (body.direction, X-Auth-Token 鉴权)
  *                                          - 限价挂单, 价格回踩到 entry 才真下单
  *                                          - 价位用 regime plan 优先 / ATR 回退 (与 manual-open 同源)
@@ -868,6 +869,54 @@ router.post('/signal', async (req, res) => {
   res.status(r.status).json(r.body);
 });
 
+// ============ POST /tv-alert: TradingView 策略警报 → 执行止盈1 ============
+//
+// 供 TradingView「警报 → Webhook URL」直连:
+//   URL:  http(s)://<host>/api/auto-trade/tv-alert
+//   消息: {"token":"<AUTO_TRADE_WEBHOOK_TOKEN>","action":"tp1","direction":"long"}
+//
+// 设计:
+//   - 兼容 TradingView 两种 Content-Type: 消息为合法 JSON 时 TV 发 application/json
+//     (全局 express.json 已解析); 否则为 text/plain, 这里路由级 express.text 接住再手动 JSON.parse
+//   - 仅支持平仓类动作 action='tp1' (执行止盈1), 多空双向由 direction 指定
+//   - 完全复用 processSignal 的 take_profit 分支: 与 riskEngine / 手动按钮共享同一把
+//     幂等锁 (state.markTpHit) — TP1 已触发过或无 active 持仓时返回 409, 不会重复 fire
+//   - set_protection_sl 默认跟随 cfg.tp1Protection (TP1 后止损上移保本), 可在消息里显式传值覆盖
+//   - source='tradingview_alert' 在手动来源白名单内: 自动下单总开关关闭时平仓动作照常放行
+router.post('/tv-alert', express.text({ type: '*/*' }), async (req, res) => {
+  let body = req.body;
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch (e) {
+      return res.status(400).json({ ok: false, error: 'invalid_json', hint: 'TradingView 警报消息必须是合法 JSON' });
+    }
+  }
+  if (!body || typeof body !== 'object') body = {};
+
+  const cfg = config.get();
+  if (!body.token || body.token !== cfg.token) {
+    return res.status(401).json({ ok: false, error: 'invalid_token' });
+  }
+  const action = String(body.action || '').toLowerCase();
+  if (action !== 'tp1') {
+    return res.status(400).json({ ok: false, error: `unsupported_action: ${body.action || ''}`, hint: "当前仅支持 action='tp1' (执行止盈1)" });
+  }
+  const direction = body.direction;
+  if (!['long', 'short'].includes(direction)) {
+    return res.status(400).json({ ok: false, error: 'direction must be long|short' });
+  }
+
+  const setProt = body.set_protection_sl != null
+    ? !!body.set_protection_sl
+    : (cfg.tp1Protection !== false);
+  const sig = {
+    token: cfg.token, action: 'take_profit', symbol: cfg.symbol,
+    direction, trigger: 'tp_1', set_protection_sl: setProt,
+  };
+  const r = await processSignal(sig, { source: 'tradingview_alert' });
+  console.log(`[auto-trade] 📺 TradingView 警报: tp1 ${direction} → status=${r.status} ${r.body?.error || 'ok'}`);
+  res.status(r.status).json({ ...r.body, action: 'tp1', direction });
+});
+
 // ============ POST /reset: 手动重置（解锁 + 取消所有 TP/SL） ============
 router.post('/reset', requireAdmin, (req, res) => {
   const direction = req.body?.direction;
@@ -1449,6 +1498,8 @@ function manualPositionOverridePct(cfg) {
 const MANUAL_TRADE_SOURCES = new Set([
   'manual_ui', 'manual_follow', 'price_trigger_open', 'price_trigger_follow', 'manual_fire',
   'mtf5_auto_open', 'mtf1_auto_open',
+  // TradingView 警报 (/tv-alert): 仅发平仓类动作 (tp_1), 总开关关闭时也应放行
+  'tradingview_alert',
 ]);
 function isManualTradeSource(source) {
   return MANUAL_TRADE_SOURCES.has(source);
@@ -2172,19 +2223,22 @@ router.post('/manual-fire', requireAdmin, async (req, res) => {
 
 // ============ POST /close-all-positions: 一键全平 ============
 //
-// 遍历 long/short 两个 slot, 对 active=true 的方向:
+// body.direction 可选: 'long' | 'short' → 只平该方向 (前端「全部止盈多单/空单」分按钮);
+// 不传则遍历 long/short 两个方向 (老行为, 兼容既有调用方).
+// 对 active=true 的方向:
 //   1) 先 state.closeAndUnlock 写盘 (active=false), 后续 tick 立即不再 evaluate
 //   2) 再 exec.fireStopLoss(trigger='manual_close_all') 把 100% market 平仓 webhook 发出去
 //   3) notify 飞书 + 控制台
 //
 // 顺序与 riskEngine.fireSl 保持一致 (先写盘后发 webhook), 即便 webhook 失败也不会
 // 因 _inFlight 异常没释放而陷入僵尸状态. 该方向被解锁, 用户可重新接信号.
-async function manualCloseAllImpl({ source = 'manual_ui' } = {}) {
+async function manualCloseAllImpl({ source = 'manual_ui', direction = null } = {}) {
   const positions = state.get();
   const cfg = config.get();
   const results = [];
+  const dirs = ['long', 'short'].includes(direction) ? [direction] : ['long', 'short'];
 
-  for (const dir of ['long', 'short']) {
+  for (const dir of dirs) {
     const before = positions[dir];
     if (!before || !before.active) {
       results.push({ direction: dir, skipped: true, reason: 'no_position' });
@@ -2246,7 +2300,10 @@ async function manualCloseAllImpl({ source = 'manual_ui' } = {}) {
 }
 
 router.post('/close-all-positions', requireAdmin, async (req, res) => {
-  const r = await manualCloseAllImpl({ source: req.body?.source || 'manual_ui' });
+  const r = await manualCloseAllImpl({
+    source: req.body?.source || 'manual_ui',
+    direction: req.body?.direction || null,
+  });
   res.json(r);
 });
 
