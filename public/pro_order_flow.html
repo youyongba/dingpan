@@ -1,0 +1,893 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PRO ORDER FLOW</title>
+    <style>
+        :root {
+            --bg-color: #0b0e11;
+            --panel-bg: #111316;
+            --border-color: #2b3139;
+            --text-main: #EAECEF;
+            --text-muted: #848E9C;
+            --up-color: #0ecb81;
+            --up-bg: rgba(14, 203, 129, 0.15);
+            --down-color: #f6465d;
+            --down-bg: rgba(246, 70, 93, 0.15);
+            --poc-color: #fcd535;
+            --poc-bg: rgba(252, 213, 53, 0.2);
+            --font-mono: 'JetBrains Mono', 'Consolas', monospace;
+            --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: var(--font-sans);
+            font-size: 12px;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            /* 禁用圆角和花哨渐变，追求严谨专业 */
+        }
+
+        /* 顶部导航栏 */
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            height: 40px;
+            padding: 0 16px;
+            border-bottom: 1px solid var(--border-color);
+            background-color: var(--panel-bg);
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .logo {
+            font-size: 14px;
+            font-weight: bold;
+            letter-spacing: 1px;
+            color: #fff;
+        }
+
+        .timeframes {
+            display: flex;
+            gap: 4px;
+        }
+
+        .timeframe-btn {
+            background: transparent;
+            border: 1px solid transparent;
+            color: var(--text-muted);
+            padding: 4px 8px;
+            cursor: pointer;
+            font-family: var(--font-sans);
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+
+        .timeframe-btn:hover {
+            color: var(--text-main);
+        }
+
+        .timeframe-btn.active {
+            background: #2b3139;
+            color: #fff;
+            border-color: #474d57;
+        }
+
+        .toggles {
+            display: flex;
+            gap: 8px;
+        }
+
+        .toggle-btn {
+            background: #1e2329;
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 4px 12px;
+            cursor: pointer;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .toggle-btn.active {
+            background: #2b3139;
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            color: var(--poc-color);
+            font-size: 12px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background-color: var(--poc-color);
+            border-radius: 50%; /* 仅指示灯保留圆角 */
+        }
+
+        /* 副导航栏 */
+        .sub-header {
+            display: flex;
+            align-items: center;
+            height: 30px;
+            padding: 0 16px;
+            border-bottom: 1px solid var(--border-color);
+            font-family: var(--font-mono);
+            color: var(--text-muted);
+            gap: 16px;
+        }
+
+        .symbol {
+            color: var(--text-main);
+            font-weight: bold;
+        }
+
+        /* 主体布局 */
+        .main-container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        .left-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid var(--border-color);
+            position: relative;
+        }
+
+        .right-panel {
+            width: 320px;
+            display: flex;
+            flex-direction: column;
+            background-color: var(--panel-bg);
+        }
+
+        /* 足迹图区域 */
+        .footprint-area {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+            background: #0b0e11;
+        }
+        
+        /* 足迹图网格和刻度 */
+        .y-axis {
+            position: absolute;
+            right: 0;
+            top: 0;
+            bottom: 0;
+            width: 60px;
+            border-left: 1px solid var(--border-color);
+            background: var(--panel-bg);
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            font-family: var(--font-mono);
+            color: var(--text-muted);
+            text-align: right;
+            padding-right: 8px;
+            z-index: 10;
+        }
+
+        .chart-content {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 60px;
+            bottom: 0;
+            display: flex;
+            align-items: flex-end;
+            padding: 20px 40px;
+            gap: 30px;
+            overflow-x: auto;
+        }
+
+        /* 单个足迹 K 线 */
+        .fp-candle {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            position: relative;
+        }
+
+        .fp-wick {
+            width: 1px;
+            background: #474d57;
+            position: absolute;
+            top: -20px;
+            bottom: 20px;
+            z-index: 0;
+        }
+
+        .fp-body {
+            display: flex;
+            flex-direction: column;
+            border: 1px solid;
+            z-index: 1;
+            background: var(--bg-color);
+        }
+        
+        .fp-body.up { border-color: var(--up-color); }
+        .fp-body.down { border-color: var(--down-color); }
+
+        .fp-row {
+            display: flex;
+            font-family: var(--font-mono);
+            font-size: 10px;
+            border-bottom: 1px solid rgba(71, 77, 87, 0.3);
+            height: 18px;
+            line-height: 18px;
+        }
+        .fp-row:last-child { border-bottom: none; }
+
+        .fp-cell {
+            padding: 0 4px;
+            min-width: 32px;
+            text-align: right;
+        }
+        
+        .fp-cell.bid { 
+            border-right: 1px solid rgba(71, 77, 87, 0.5); 
+            color: var(--down-color);
+        }
+        .fp-cell.ask { 
+            color: var(--up-color);
+        }
+
+        /* 强弱背景色 */
+        .bg-up-strong { background-color: rgba(14, 203, 129, 0.3); }
+        .bg-up-light { background-color: rgba(14, 203, 129, 0.1); }
+        .bg-down-strong { background-color: rgba(246, 70, 93, 0.3); }
+        .bg-down-light { background-color: rgba(246, 70, 93, 0.1); }
+        
+        .poc-row {
+            border: 1px solid var(--poc-color) !important;
+            background-color: var(--poc-bg);
+            color: var(--poc-color) !important;
+            font-weight: bold;
+        }
+        
+        .poc-row .fp-cell { color: var(--poc-color); }
+
+        .fp-delta {
+            margin-top: 4px;
+            font-family: var(--font-mono);
+            font-size: 11px;
+        }
+        .delta-up { color: var(--up-color); }
+        .delta-down { color: var(--down-color); }
+
+        /* 底部指标区域 */
+        .bottom-chart {
+            height: 160px;
+            border-top: 1px solid var(--border-color);
+            background: var(--panel-bg);
+            position: relative;
+        }
+
+        .chart-title {
+            position: absolute;
+            top: 8px;
+            left: 12px;
+            color: var(--text-muted);
+            font-size: 11px;
+            z-index: 10;
+        }
+
+        /* 右侧面板通用 */
+        .right-section {
+            flex: 1;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .right-section:last-child {
+            border-bottom: none;
+        }
+
+        .section-header {
+            padding: 6px 12px;
+            background: #1e2329;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        /* DOM 深度 */
+        .dom-table, .tape-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-family: var(--font-mono);
+            font-size: 11px;
+        }
+
+        .dom-table th, .tape-table th {
+            text-align: right;
+            padding: 4px 12px;
+            color: var(--text-muted);
+            font-weight: normal;
+        }
+        
+        .dom-table td, .tape-table td {
+            padding: 2px 12px;
+            text-align: right;
+            position: relative;
+        }
+
+        .dom-price { color: var(--down-color); } /* 卖盘价格 */
+        .dom-price.buy { color: var(--up-color); } /* 买盘价格 */
+        
+        .dom-vol-bg {
+            position: absolute;
+            right: 0;
+            top: 1px;
+            bottom: 1px;
+            background: rgba(246, 70, 93, 0.15);
+            z-index: 0;
+        }
+        .dom-vol-bg.buy { background: rgba(14, 203, 129, 0.15); }
+        
+        .dom-val { position: relative; z-index: 1; }
+
+        .current-price-banner {
+            background: var(--poc-color);
+            color: #000;
+            text-align: center;
+            font-weight: bold;
+            padding: 2px 0;
+            font-family: var(--font-mono);
+            margin: 4px 0;
+        }
+
+        /* Volume Profile */
+        .vp-container {
+            flex: 1;
+            padding: 8px 12px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            gap: 2px;
+        }
+
+        .vp-row {
+            display: flex;
+            height: 10px;
+            align-items: center;
+        }
+
+        .vp-bar-sell {
+            height: 100%;
+            background: var(--down-color);
+            opacity: 0.7;
+        }
+        
+        .vp-bar-buy {
+            height: 100%;
+            background: var(--up-color);
+            opacity: 0.7;
+        }
+        
+        .vp-poc-line {
+            border-top: 1px dashed var(--poc-color);
+            width: 100%;
+            margin: 2px 0;
+        }
+
+        /* Smart Tape */
+        .tape-table {
+            display: block;
+            height: 100%;
+            overflow-y: auto;
+        }
+        .tape-table tbody {
+            display: table;
+            width: 100%;
+        }
+        .tape-time { color: var(--text-muted); text-align: left !important; }
+        .tape-price.up { color: var(--up-color); }
+        .tape-price.down { color: var(--down-color); }
+        .tape-size { color: #b7bdc6; }
+        .tape-size.large { color: #c484f3; font-weight: bold; }
+
+        /* 水平基准线 */
+        .hline {
+            position: absolute;
+            left: 0;
+            right: 0;
+            border-top: 1px dashed #474d57;
+            z-index: 0;
+        }
+        
+        .hline-price {
+            position: absolute;
+            right: 0;
+            transform: translateY(-50%);
+            background: #2b3139;
+            padding: 2px 4px;
+            font-family: var(--font-mono);
+            font-size: 10px;
+            border: 1px solid #474d57;
+        }
+
+        /* 画布 */
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 顶部导航 -->
+    <header>
+        <div class="header-left">
+            <div class="logo">PRO ORDER FLOW</div>
+            <div class="timeframes">
+                <button class="timeframe-btn">1m</button>
+                <button class="timeframe-btn active">5m</button>
+                <button class="timeframe-btn">15m</button>
+                <button class="timeframe-btn">1h</button>
+                <button class="timeframe-btn">4h</button>
+                <button class="timeframe-btn">1D</button>
+            </div>
+            <div class="toggles">
+                <button class="toggle-btn"><span style="display:inline-block;width:8px;height:8px;background:#848E9C;"></span> 实时</button>
+                <button class="toggle-btn active">▶ 回放</button>
+            </div>
+        </div>
+        <div class="header-right">
+            <div class="status-dot"></div>
+            <span>回放/浏览模式</span>
+        </div>
+    </header>
+
+    <!-- 副导航 -->
+    <div class="sub-header">
+        <span class="symbol">BTCUSDT.P</span>
+        <span>|</span>
+        <span>Footprint (Bid x Ask)</span>
+        <span>|</span>
+        <span>Tick Size: 10.0</span>
+    </div>
+
+    <!-- 主体区域 -->
+    <div class="main-container">
+        
+        <!-- 左侧图表区 -->
+        <div class="left-panel">
+            
+            <!-- 足迹图 -->
+            <div class="footprint-area" id="footprintArea">
+                <div class="y-axis">
+                    <span>64000.0</span>
+                    <span>63900.0</span>
+                    <span>63800.0</span>
+                </div>
+                
+                <!-- 背景刻度线 -->
+                <div class="hline" style="top: 30%;"></div>
+                <div class="hline" style="top: 60%;"></div>
+                
+                <div class="chart-content" id="chartContent">
+                    <!-- JS动态渲染K线 -->
+                </div>
+            </div>
+
+            <!-- 底部 Delta & CVD -->
+            <div class="bottom-chart">
+                <div class="chart-title">Bar Delta (买卖差) & CVD</div>
+                <canvas id="bottomCanvas"></canvas>
+            </div>
+        </div>
+
+        <!-- 右侧数据面板 -->
+        <div class="right-panel">
+            
+            <!-- DOM -->
+            <div class="right-section">
+                <div class="section-header">
+                    <span>DOM (市场深度)</span>
+                    <span>Q / P</span>
+                </div>
+                <table class="dom-table" id="domTable">
+                    <!-- JS渲染 -->
+                </table>
+            </div>
+
+            <!-- Volume Profile -->
+            <div class="right-section">
+                <div class="section-header">
+                    <span>Volume Profile & Buy/Sell Walls</span>
+                    <span>VA 70%</span>
+                </div>
+                <div class="vp-container" id="vpContainer">
+                    <!-- JS渲染 -->
+                </div>
+            </div>
+
+            <!-- Smart Tape -->
+            <div class="right-section">
+                <div class="section-header">
+                    <span>大单追踪 (Smart Tape)</span>
+                    <span style="color:#c484f3;">> 50.0</span>
+                </div>
+                <table class="tape-table">
+                    <tbody id="tapeTable">
+                        <!-- JS渲染 -->
+                    </tbody>
+                </table>
+            </div>
+            
+        </div>
+    </div>
+
+    <script>
+        const SYMBOL = 'btcusdt';
+        const WS_URL = `wss://fstream.binance.com/stream?streams=${SYMBOL}@depth20@100ms/${SYMBOL}@aggTrade`;
+        
+        let currentPrice = 0;
+        let orderBook = { bids: [], asks: [] };
+        let smartTape = [];
+        
+        // 实时 Volume Profile 累加器 (按价格区间 10 为单位)
+        let vpData = {};
+        const VP_BIN_SIZE = 10;
+        let maxVpVol = 0;
+
+        document.addEventListener('DOMContentLoaded', () => {
+            initBinanceWS();
+            // 初始渲染静态主图以保持视觉完整性 (注: 真实全量订单流需后端历史数据支持)
+            renderFootprint();
+            renderBottomChart();
+        });
+
+        function initBinanceWS() {
+            const ws = new WebSocket(WS_URL);
+            
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                if (!msg.data) return;
+
+                const stream = msg.stream;
+                const data = msg.data;
+
+                if (stream === `${SYMBOL}@depth20@100ms`) {
+                    orderBook.bids = data.b;
+                    orderBook.asks = data.a;
+                    if(currentPrice === 0 && data.a.length > 0) {
+                        currentPrice = parseFloat(data.a[0][0]);
+                    }
+                    renderDOM();
+                } else if (stream === `${SYMBOL}@aggTrade`) {
+                    handleAggTrade(data);
+                }
+            };
+
+            ws.onopen = () => console.log('Binance WS Connected');
+            ws.onerror = (e) => console.error('Binance WS Error', e);
+        }
+
+        function handleAggTrade(data) {
+            const price = parseFloat(data.p);
+            const qty = parseFloat(data.q);
+            const isBuyerMaker = data.m; // m=true 意味着做市方是买方，即这笔是卖单成交
+            const time = data.T;
+            
+            currentPrice = price;
+
+            // 1. 更新 Smart Tape
+            const d = new Date(time);
+            const timeStr = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`;
+            
+            smartTape.unshift({
+                t: timeStr,
+                p: price.toFixed(1),
+                q: qty.toFixed(3),
+                type: isBuyerMaker ? 'down' : 'up'
+            });
+            if (smartTape.length > 50) smartTape.pop();
+            renderSmartTape();
+
+            // 2. 更新 Volume Profile 累加器
+            const bin = Math.floor(price / VP_BIN_SIZE) * VP_BIN_SIZE;
+            if (!vpData[bin]) vpData[bin] = { buy: 0, sell: 0, total: 0 };
+            
+            if (isBuyerMaker) {
+                vpData[bin].sell += qty;
+            } else {
+                vpData[bin].buy += qty;
+            }
+            vpData[bin].total += qty;
+            if (vpData[bin].total > maxVpVol) maxVpVol = vpData[bin].total;
+            
+            renderRealtimeVP();
+        }
+
+        // --- 渲染函数 ---
+
+        function renderDOM() {
+            const tbody = document.getElementById('domTable');
+            if (!orderBook.asks.length || !orderBook.bids.length) return;
+
+            let html = '';
+            
+            // Asks (卖盘，价格从高到低显示，取前 15 档)
+            const asks = [...orderBook.asks].slice(0, 15).reverse();
+            let maxAskVol = Math.max(...asks.map(a => parseFloat(a[1])));
+            
+            asks.forEach(item => {
+                const p = parseFloat(item[0]).toFixed(1);
+                const q = parseFloat(item[1]).toFixed(3);
+                const w = Math.min((parseFloat(item[1]) / maxAskVol) * 100, 100);
+                html += `
+                    <tr>
+                        <td class="dom-price">${p}</td>
+                        <td>
+                            <div class="dom-vol-bg" style="width: ${w}%"></div>
+                            <span class="dom-val">${q}</span>
+                        </td>
+                    </tr>
+                `;
+            });
+            
+            // 当前价格
+            html += `
+                <tr>
+                    <td colspan="2" style="padding:0">
+                        <div class="current-price-banner">${currentPrice.toFixed(1)}</div>
+                    </td>
+                </tr>
+            `;
+
+            // Bids (买盘，价格从高到低显示，取前 15 档)
+            const bids = orderBook.bids.slice(0, 15);
+            let maxBidVol = Math.max(...bids.map(b => parseFloat(b[1])));
+            
+            bids.forEach(item => {
+                const p = parseFloat(item[0]).toFixed(1);
+                const q = parseFloat(item[1]).toFixed(3);
+                const w = Math.min((parseFloat(item[1]) / maxBidVol) * 100, 100);
+                html += `
+                    <tr>
+                        <td class="dom-price buy">${p}</td>
+                        <td>
+                            <div class="dom-vol-bg buy" style="width: ${w}%"></div>
+                            <span class="dom-val">${q}</span>
+                        </td>
+                    </tr>
+                `;
+            });
+
+            tbody.innerHTML = html;
+        }
+
+        function renderSmartTape() {
+            const tbody = document.getElementById('tapeTable');
+            let html = '';
+            smartTape.forEach(item => {
+                const qClass = parseFloat(item.q) > 2 ? 'large' : ''; // BTC > 2 个标为大单(紫色)
+                html += `
+                    <tr>
+                        <td class="tape-time">${item.t}</td>
+                        <td class="tape-price ${item.type}">${item.p}</td>
+                        <td class="tape-size ${qClass}">${item.q}</td>
+                    </tr>
+                `;
+            });
+            tbody.innerHTML = html;
+        }
+
+        function renderRealtimeVP() {
+            const container = document.getElementById('vpContainer');
+            let html = '';
+            
+            // 获取所有存在的价格区间并排序 (从高到低)
+            const bins = Object.keys(vpData).map(Number).sort((a, b) => b - a);
+            
+            bins.forEach(bin => {
+                const data = vpData[bin];
+                // 计算比例，确保买卖墙可以占满宽度
+                const wSell = (data.sell / maxVpVol) * 100;
+                const wBuy = (data.buy / maxVpVol) * 100;
+                
+                html += `
+                    <div class="vp-row" title="Price: ${bin}">
+                        <div class="vp-bar-sell" style="width: ${wSell}%"></div>
+                        <div class="vp-bar-buy" style="width: ${wBuy}%"></div>
+                    </div>
+                `;
+            });
+
+            container.innerHTML = html;
+        }
+
+        // 1. 渲染足迹图 (保留原有静态渲染以提供视觉骨架)
+        function renderFootprint() {
+            const container = document.getElementById('chartContent');
+            const candles = [
+                { type: 'up', delta: '+65', rows: [
+                    {b: 9.3, a: 4.4}, {b: 47.2, a: 61.1}, {b: 75.5, a: 83.2}, 
+                    {b: 143.1, a: 174.6, poc: true}, {b: 51.2, a: 51.2}, {b: 40.6, a: 57.0}
+                ]},
+                { type: 'down', delta: '-36', rows: [
+                    {b: 63.5, a: 55.0}, {b: 180.5, a: 165.5, poc: true}, {b: 81.0, a: 42.6}, {b: 60.8, a: 80.4}
+                ]},
+                { type: 'up', delta: '-26', rows: [
+                    {b: 82.8, a: 47.9}, {b: 140.8, a: 86.7, poc: true}, {b: 62.0, a: 133.0}, {b: 91.9, a: 55.6}, {b: 32.9, a: 35.8}, {b: 3.4, a: 13.0}
+                ]},
+                { type: 'up', delta: '+75', rows: [
+                    {b: 6.8, a: 11.7}, {b: 110.4, a: 105.4}, {b: 115.2, a: 123.3, poc: true}, {b: 85.7, a: 89.4}, {b: 25.8, a: 65.6}
+                ]},
+                { type: 'up', delta: '+106', rows: [
+                    {b: 3.2, a: 10.0}, {b: 50.0, a: 53.2}, {b: 32.6, a: 45.1}, {b: 139.1, a: 183.7, poc: true}, {b: 96.6, a: 145.4}, {b: 23.9, a: 24.4}
+                ]},
+                { type: 'down', delta: '-34', rows: [
+                    {b: 65.1, a: 49.9}, {b: 97.9, a: 80.6}, {b: 56.0, a: 67.8}, {b: 98.6, a: 91.0}, {b: 115.5, a: 104.6, poc: true}, {b: 19.1, a: 24.5}
+                ]},
+                { type: 'up', delta: '+63', rows: [
+                    {b: 10.5, a: 3.8}, {b: 30.6, a: 33.3}, {b: 86.1, a: 86.6}, {b: 51.5, a: 71.3}, {b: 162.2, a: 171.7, poc: true}, {b: 40.7, a: 34.3}
+                ]},
+                { type: 'up', delta: '+63', rows: [
+                    {b: 30.9, a: 45.7}, {b: 15.8, a: 41.7}, {b: 9.4, a: 13.5}, {b: 22.9, a: 37.6}, {b: 109.1, a: 108.2}, {b: 164.1, a: 147.8, poc: true}, {b: 31.5, a: 52.6}
+                ]},
+                { type: 'down', delta: '-20', rows: [
+                    {b: 19.6, a: 4.0}, {b: 40.7, a: 52.0}, {b: 102.7, a: 90.8, poc: true}, {b: 31.4, a: 35.0}, {b: 12.0, a: 36.0}, {b: 76.6, a: 36.7}, {b: 72.3, a: 70.5}, {b: 62.6, a: 73.2}
+                ]},
+                { type: 'down', delta: '-39', rows: [
+                    {b: 15.0, a: 18.4}, {b: 2.0, a: 7.9}, {b: 27.9, a: 52.9}, {b: 51.6, a: 50.1}, {b: 90.6, a: 58.1}, {b: 105.3, a: 136.7, poc: true}, {b: 104.0, a: 37.9}, {b: 17.0, a: 12.2}
+                ]},
+                { type: 'up', delta: '+39', rows: [
+                    {b: 15.7, a: 36.3}, {b: 74.9, a: 72.4}, {b: 182.9, a: 221.2, poc: true}, {b: 67.8, a: 88.7}, {b: 38.1, a: 0}
+                ]},
+                { type: 'up', delta: '-177', rows: [
+                    {b: 44.3, a: 85.2}, {b: 183.5, a: 182.1, poc: true}, {b: 156.4, a: 166.0}, {b: 27.4, a: 25.5}
+                ]},
+                { type: 'down', delta: '-177', rows: [
+                    {b: 310.4, a: 139.3}, {b: 168.8, a: 289.2, poc: true}, {b: 84.3, a: 133.3}
+                ]}
+            ];
+
+            let html = '';
+            let currentOffset = 50; 
+
+            candles.forEach((candle, idx) => {
+                let rowsHtml = '';
+                candle.rows.forEach(r => {
+                    const isPoc = r.poc ? 'poc-row' : '';
+                    let bBg = r.b > 100 ? 'bg-down-strong' : (r.b > 50 ? 'bg-down-light' : '');
+                    let aBg = r.a > 100 ? 'bg-up-strong' : (r.a > 50 ? 'bg-up-light' : '');
+                    
+                    rowsHtml += `
+                        <div class="fp-row ${isPoc}">
+                            <div class="fp-cell bid ${bBg}">${r.b}</div>
+                            <div class="fp-cell ask ${aBg}">${r.a}</div>
+                        </div>
+                    `;
+                });
+
+                const deltaClass = candle.delta.startsWith('+') ? 'delta-up' : 'delta-down';
+                const bodyClass = candle.type;
+                if(idx > 0) currentOffset += (idx % 2 === 0 ? 30 : 20);
+
+                html += `
+                    <div class="fp-candle" style="transform: translateY(-${currentOffset}px)">
+                        <div class="fp-wick"></div>
+                        <div class="fp-body ${bodyClass}">
+                            ${rowsHtml}
+                        </div>
+                        <div class="fp-delta ${deltaClass}">Δ: ${candle.delta}</div>
+                    </div>
+                `;
+            });
+
+            container.innerHTML = html;
+        }
+
+        // 2. 渲染底部 Delta & CVD (保留原有静态渲染)
+        function renderBottomChart() {
+            const canvas = document.getElementById('bottomCanvas');
+            const ctx = canvas.getContext('2d');
+            
+            const rect = canvas.parentElement.getBoundingClientRect();
+            canvas.width = rect.width;
+            canvas.height = rect.height;
+            
+            const w = canvas.width;
+            const h = canvas.height;
+            const rightPad = 60;
+
+            const deltas = [65, -36, -26, 75, 106, -34, 63, 63, -20, -39, 39, -177, -177];
+            let cvd = [];
+            let currentCvd = 0;
+            deltas.forEach(d => {
+                currentCvd += d;
+                cvd.push(currentCvd);
+            });
+
+            const barWidth = 14;
+            const spacing = 46;
+            const startX = 60;
+            const zeroY = h * 0.6;
+
+            ctx.beginPath();
+            ctx.moveTo(0, zeroY);
+            ctx.lineTo(w - rightPad, zeroY);
+            ctx.strokeStyle = '#474d57';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            const maxDelta = Math.max(...deltas.map(Math.abs));
+            const barScale = (h * 0.3) / maxDelta;
+
+            deltas.forEach((d, i) => {
+                const x = startX + i * spacing;
+                const barH = Math.abs(d) * barScale;
+                const y = d > 0 ? zeroY - barH : zeroY;
+                
+                ctx.fillStyle = d > 0 ? '#0ecb81' : '#f6465d';
+                ctx.fillRect(x - barWidth/2, y, barWidth, barH);
+            });
+
+            const minCvd = Math.min(...cvd);
+            const maxCvd = Math.max(...cvd);
+            const cvdRange = maxCvd - minCvd;
+            const cvdScale = (h * 0.8) / (cvdRange || 1);
+            
+            ctx.beginPath();
+            cvd.forEach((c, i) => {
+                const x = startX + i * spacing;
+                const y = h * 0.9 - (c - minCvd) * cvdScale;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.strokeStyle = '#fcd535';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            
+            ctx.fillStyle = '#1e2329';
+            ctx.fillRect(w - rightPad, 0, rightPad, h);
+            
+            ctx.fillStyle = '#848E9C';
+            ctx.font = '11px "JetBrains Mono", Consolas, monospace';
+            ctx.textAlign = 'right';
+            ctx.fillText('Δ', w - 12, zeroY - 20);
+            ctx.fillStyle = '#f6465d';
+            ctx.fillText('-177', w - 12, zeroY - 4);
+            
+            ctx.fillStyle = '#fcd535';
+            ctx.fillText('CVD', w - 12, zeroY + 16);
+            ctx.fillText('+232', w - 12, zeroY + 32);
+        }
+        
+        window.addEventListener('resize', () => {
+            renderBottomChart();
+        });
+    </script>
+</body>
+</html>
