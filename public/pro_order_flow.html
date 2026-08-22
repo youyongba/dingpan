@@ -892,8 +892,8 @@ function drawFootprints(ctx, w, h) {
     if (strongestBuyPrice > 0) {
         const by = priceToY(strongestBuyPrice) + rh/2;
         
-        // 如果在可视范围内，画横向虚线射线
-        if (by > 0 && by < h) {
+        // 确保即使由于边界判断导致 y 坐标计算有点误差，只要存在墙，就画出它的射线（放宽限制）
+        if (by > -h * 2 && by < h * 3) {
             ctx.strokeStyle = '#26a69a';
             ctx.lineWidth = 1.5;
             ctx.setLineDash([4, 4]);
@@ -902,7 +902,8 @@ function drawFootprints(ctx, w, h) {
         }
         
         // 确保标签始终在视图内可见 (限制在 12 ~ h - 12 之间)
-        const labelY = Math.max(12, Math.min(h - 12, by));
+        // 注意：如果是处于视野极上方(by<0)，需要避免和卖单墙重叠；在极下方同理。
+        let labelY = Math.max(12, Math.min(h - 12, by));
         
         // 画标签背景和文字
         ctx.fillStyle = '#26a69a';
@@ -929,7 +930,7 @@ function drawFootprints(ctx, w, h) {
     if (strongestSellPrice > 0) {
         const sy = priceToY(strongestSellPrice) + rh/2;
         
-        if (sy > 0 && sy < h) {
+        if (sy > -h * 2 && sy < h * 3) {
             ctx.strokeStyle = '#ef5350';
             ctx.lineWidth = 1.5;
             ctx.setLineDash([4, 4]);
@@ -937,7 +938,14 @@ function drawFootprints(ctx, w, h) {
             ctx.setLineDash([]);
         }
         
-        const labelY = Math.max(12, Math.min(h - 12, sy));
+        let labelY = Math.max(12, Math.min(h - 12, sy));
+        
+        // 如果买卖墙都在上方或下方极值处挤压，给卖单墙一点偏移避免重叠
+        if (strongestBuyPrice > 0) {
+            const by = priceToY(strongestBuyPrice) + rh/2;
+            if (by < 0 && sy < 0) labelY += 26; // 都在上方，卖单墙往下挪
+            if (by > h && sy > h) labelY -= 26; // 都在下方，卖单墙往上挪
+        }
         
         // 画标签背景和文字
         ctx.fillStyle = '#ef5350';
