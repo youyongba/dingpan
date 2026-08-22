@@ -565,7 +565,43 @@
             // 初始渲染静态主图以保持视觉完整性 (注: 真实全量订单流需后端历史数据支持)
             renderFootprint();
             renderBottomChart();
+            
+            // 初始化顶部导航栏的切换交互
+            initNavToggles();
         });
+
+        function initNavToggles() {
+            // 1. 时间周期切换
+            const timeframes = document.querySelectorAll('.timeframe-btn');
+            timeframes.forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    timeframes.forEach(b => b.classList.remove('active'));
+                    e.target.classList.add('active');
+                });
+            });
+
+            // 2. 模式切换 (实时 / 回放)
+            const toggles = document.querySelectorAll('.toggle-btn');
+            const statusDot = document.querySelector('.status-dot');
+            const statusText = document.querySelector('.header-right span');
+            
+            toggles.forEach((btn, index) => {
+                btn.addEventListener('click', (e) => {
+                    toggles.forEach(b => b.classList.remove('active'));
+                    e.currentTarget.classList.add('active');
+                    
+                    // 根据点击的按钮更新右侧状态指示器
+                    // index === 0 是 "实时", index === 1 是 "回放"
+                    if (index === 0) {
+                        statusDot.style.backgroundColor = 'var(--up-color)';
+                        statusText.textContent = '实时监控模式';
+                    } else {
+                        statusDot.style.backgroundColor = 'var(--poc-color)';
+                        statusText.textContent = '回放/浏览模式';
+                    }
+                });
+            });
+        }
 
         function initBinanceWS() {
             const ws = new WebSocket(WS_URL);
