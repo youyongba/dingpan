@@ -873,13 +873,15 @@ function drawFootprints(ctx, w, h) {
     const buffer = CONFIG.tickSize * 2; // 缓冲带：2个 tick
     
     STATE.globalVolumeProfile.forEach((vData, pLevel) => {
-        // 买单墙：必须在当前价格之下 (加上缓冲带)
-        if (pLevel <= currentP + buffer && vData.buy > maxBuyVol) { 
+        // 买单墙：必须在当前价格之下 (不加向上的缓冲带，避免买单墙跑到现价上方)
+        // 允许等于当前价格
+        if (pLevel <= currentP && vData.buy > maxBuyVol) { 
             maxBuyVol = vData.buy; 
             strongestBuyPrice = pLevel; 
         }
-        // 卖单墙：必须在当前价格之上 (减去缓冲带)
-        if (pLevel >= currentP - buffer && vData.sell > maxSellVol) { 
+        // 卖单墙：必须在当前价格之上 (不加向下的缓冲带，避免卖单墙跑到现价下方)
+        // 允许等于当前价格
+        if (pLevel >= currentP && vData.sell > maxSellVol) { 
             maxSellVol = vData.sell; 
             strongestSellPrice = pLevel; 
         }
