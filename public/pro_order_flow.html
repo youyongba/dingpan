@@ -856,6 +856,9 @@ function drawFootprints(ctx, w, h) {
         if (vData.sell > maxSellVol && pLevel > STATE.currentPrice) { maxSellVol = vData.sell; strongestSellPrice = pLevel; }
     });
 
+    // 记录标签的点击区域，用于鼠标事件
+    STATE.wallLabels = [];
+
     // 在主图表上画出最强买卖单墙的射线和价格标签
     if (strongestBuyPrice > 0) {
         const by = priceToY(strongestBuyPrice) + rh/2;
@@ -869,12 +872,12 @@ function drawFootprints(ctx, w, h) {
             ctx.setLineDash([]);
         }
         
-        // 确保标签始终在视图内可见 (限制在 0 ~ h 之间)
-        const labelY = Math.max(10, Math.min(h - 10, by));
+        // 确保标签始终在视图内可见 (限制在 12 ~ h - 12 之间)
+        const labelY = Math.max(12, Math.min(h - 12, by));
         
         // 画标签背景和文字
         ctx.fillStyle = '#26a69a';
-        ctx.fillRect(w - 180, labelY - 12, 120, 24); // 加宽标签以显示周期信息
+        ctx.fillRect(w - 200, labelY - 12, 140, 24); // 进一步加宽标签，防止文字重叠
         ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 11px Consolas';
         ctx.textAlign = 'center';
@@ -882,11 +885,16 @@ function drawFootprints(ctx, w, h) {
         
         // 显示周期和价格
         const tfLabel = document.querySelector('.btn-group .btn.active[data-tf]').innerText;
-        ctx.fillText(`${tfLabel}买单墙 ${strongestBuyPrice.toFixed(1)}`, w - 120, labelY);
+        ctx.fillText(`${tfLabel}买单墙 ${strongestBuyPrice.toFixed(1)}`, w - 130, labelY);
         
-        // 如果墙在视野外，画个小箭头指示方向
-        if (by < 0) ctx.fillText('▲', w - 165, labelY);
-        if (by > h) ctx.fillText('▼', w - 165, labelY);
+        // 如果墙在视野外，画个小箭头指示方向，并调整箭头位置
+        if (by < 0) ctx.fillText('▲', w - 190, labelY);
+        if (by > h) ctx.fillText('▼', w - 190, labelY);
+        
+        STATE.wallLabels.push({
+            x: w - 200, y: labelY - 12, width: 140, height: 24,
+            targetPrice: strongestBuyPrice
+        });
     }
     
     if (strongestSellPrice > 0) {
@@ -900,22 +908,27 @@ function drawFootprints(ctx, w, h) {
             ctx.setLineDash([]);
         }
         
-        const labelY = Math.max(10, Math.min(h - 10, sy));
+        const labelY = Math.max(12, Math.min(h - 12, sy));
         
         // 画标签背景和文字
         ctx.fillStyle = '#ef5350';
-        ctx.fillRect(w - 180, labelY - 12, 120, 24);
+        ctx.fillRect(w - 200, labelY - 12, 140, 24);
         ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 11px Consolas';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         
         const tfLabel = document.querySelector('.btn-group .btn.active[data-tf]').innerText;
-        ctx.fillText(`${tfLabel}卖单墙 ${strongestSellPrice.toFixed(1)}`, w - 120, labelY);
+        ctx.fillText(`${tfLabel}卖单墙 ${strongestSellPrice.toFixed(1)}`, w - 130, labelY);
         
-        // 如果墙在视野外，画个小箭头指示方向
-        if (sy < 0) ctx.fillText('▲', w - 165, labelY);
-        if (sy > h) ctx.fillText('▼', w - 165, labelY);
+        // 如果墙在视野外，画个小箭头指示方向，并调整箭头位置
+        if (sy < 0) ctx.fillText('▲', w - 190, labelY);
+        if (sy > h) ctx.fillText('▼', w - 190, labelY);
+        
+        STATE.wallLabels.push({
+            x: w - 200, y: labelY - 12, width: 140, height: 24,
+            targetPrice: strongestSellPrice
+        });
     }
 
     // 只画可视区域内的 K 线
@@ -1197,6 +1210,32 @@ let lastMouseX = 0;
 let lastMouseY = 0;
 
 fpContainer.addEventListener('mousedown', e => {
+    const rect = fpContainer.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    // 检查是否点击了单墙标签
+    if (STATE.wallLabels && STATE.wallLabels.length > 0) {
+        for (let label of STATE.wallLabels) {
+            if (x >= label.x && x <= label.x + label.width &&
+                y >= label.y && y <= label.y + label.height) {
+                // 点击了标签，自动滚动到该价格居中
+                const rectHeight = fpContainer.getBoundingClientRect().height;
+                STATE.offsetY = (rectHeight / 2) - (label.targetPrice / CONFIG.tickSize) * CONFIG.rowHeight;
+                
+                // 暂停自动跟随
+                STATE.isRunning = false;
+                document.getElementById('btn-play').classList.remove('active');
+                document.getElementById('btn-pause').classList.add('active');
+                document.getElementById('conn-status').textContent = '回放/浏览模式';
+                document.getElementById('conn-dot').style.backgroundColor = '#ff9800';
+                
+                renderAll();
+                return; // 结束事件，不触发拖拽
+            }
+        }
+    }
+
     isDragging = true;
     lastMouseX = e.clientX;
     lastMouseY = e.clientY;
