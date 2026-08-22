@@ -653,17 +653,18 @@ function updateGlobalProfile(price, qty, isSell) {
 // ================= DOM 与 Tape UI 更新 =================
 
 function handleDepth(data) {
-    if (!STATE.isRunning) return;
+    if (!STATE.isRunning || !data || !data.asks || !data.bids) return;
     
     let html = '';
     const cp = STATE.currentPrice;
     
+    // 币安的部分深度流推送字段为 asks 和 bids，而不是 a 和 b
     // Asks (Sells)
-    const asks = data.a.slice(0, CONFIG.domLevels).reverse();
+    const asks = data.asks.slice(0, CONFIG.domLevels).reverse();
     
     let maxVol = 0;
-    data.a.slice(0, CONFIG.domLevels).forEach(a => maxVol = Math.max(maxVol, parseFloat(a[1])));
-    data.b.slice(0, CONFIG.domLevels).forEach(b => maxVol = Math.max(maxVol, parseFloat(b[1])));
+    data.asks.slice(0, CONFIG.domLevels).forEach(a => maxVol = Math.max(maxVol, parseFloat(a[1])));
+    data.bids.slice(0, CONFIG.domLevels).forEach(b => maxVol = Math.max(maxVol, parseFloat(b[1])));
     if (maxVol === 0) maxVol = 1;
 
     asks.forEach(ask => {
@@ -679,7 +680,7 @@ function handleDepth(data) {
     
     html += `<div class="dom-spread">${cp.toFixed(1)}</div>`;
     
-    const bids = data.b.slice(0, CONFIG.domLevels);
+    const bids = data.bids.slice(0, CONFIG.domLevels);
     bids.forEach(bid => {
         const p = parseFloat(bid[0]);
         const vol = parseFloat(bid[1]);
@@ -826,60 +827,75 @@ function drawFootprints(ctx, w, h) {
     const cw = CONFIG.candleWidth * STATE.scaleX;
     const rh = CONFIG.rowHeight * STATE.scaleY;
     
-    // 找出在可视范围内的最强买卖单墙的价格
+    // 找出当前周期全局最强买单墙和卖单墙的价格
     let maxBuyVol = 0; let strongestBuyPrice = 0;
     let maxSellVol = 0; let strongestSellPrice = 0;
     
-    // 获取主图可视范围的价格区间
-    const viewMaxP = yToPrice(0);
-    const viewMinP = yToPrice(canvasFPMain.height);
-    
     STATE.globalVolumeProfile.forEach((vData, pLevel) => {
-        if (pLevel >= viewMinP && pLevel <= viewMaxP) {
-            if (vData.buy > maxBuyVol && pLevel < STATE.currentPrice) { maxBuyVol = vData.buy; strongestBuyPrice = pLevel; }
-            if (vData.sell > maxSellVol && pLevel > STATE.currentPrice) { maxSellVol = vData.sell; strongestSellPrice = pLevel; }
-        }
+        if (vData.buy > maxBuyVol && pLevel < STATE.currentPrice) { maxBuyVol = vData.buy; strongestBuyPrice = pLevel; }
+        if (vData.sell > maxSellVol && pLevel > STATE.currentPrice) { maxSellVol = vData.sell; strongestSellPrice = pLevel; }
     });
 
     // 在主图表上画出最强买卖单墙的射线和价格标签
     if (strongestBuyPrice > 0) {
         const by = priceToY(strongestBuyPrice) + rh/2;
         
-        // 画横向虚线射线
-        ctx.strokeStyle = '#26a69a'; // 使用固定颜色替换 var()
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([4, 4]);
-        ctx.beginPath(); ctx.moveTo(0, by); ctx.lineTo(w - 60, by); ctx.stroke();
-        ctx.setLineDash([]);
+        // 如果在可视范围内，画横向虚线射线
+        if (by > 0 && by < h) {
+            ctx.strokeStyle = '#26a69a';
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath(); ctx.moveTo(0, by); ctx.lineTo(w - 60, by); ctx.stroke();
+            ctx.setLineDash([]);
+        }
+        
+        // 确保标签始终在视图内可见 (限制在 0 ~ h 之间)
+        const labelY = Math.max(10, Math.min(h - 10, by));
         
         // 画标签背景和文字
-        ctx.fillStyle = '#26a69a'; // 使用固定颜色替换 var()
-        ctx.fillRect(w - 140, by - 10, 80, 20); // 在价格轴左侧一点绘制标签
+        ctx.fillStyle = '#26a69a';
+        ctx.fillRect(w - 180, labelY - 12, 120, 24); // 加宽标签以显示周期信息
         ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 11px Consolas';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(`买单墙 ${strongestBuyPrice.toFixed(1)}`, w - 100, by);
+        
+        // 显示周期和价格
+        const tfLabel = document.querySelector('.btn-group .btn.active[data-tf]').innerText;
+        ctx.fillText(`${tfLabel}买单墙 ${strongestBuyPrice.toFixed(1)}`, w - 120, labelY);
+        
+        // 如果墙在视野外，画个小箭头指示方向
+        if (by < 0) ctx.fillText('▲', w - 165, labelY);
+        if (by > h) ctx.fillText('▼', w - 165, labelY);
     }
     
     if (strongestSellPrice > 0) {
         const sy = priceToY(strongestSellPrice) + rh/2;
         
-        // 画横向虚线射线
-        ctx.strokeStyle = '#ef5350'; // 使用固定颜色替换 var()
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([4, 4]);
-        ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(w - 60, sy); ctx.stroke();
-        ctx.setLineDash([]);
+        if (sy > 0 && sy < h) {
+            ctx.strokeStyle = '#ef5350';
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(w - 60, sy); ctx.stroke();
+            ctx.setLineDash([]);
+        }
+        
+        const labelY = Math.max(10, Math.min(h - 10, sy));
         
         // 画标签背景和文字
-        ctx.fillStyle = '#ef5350'; // 使用固定颜色替换 var()
-        ctx.fillRect(w - 140, sy - 10, 80, 20);
+        ctx.fillStyle = '#ef5350';
+        ctx.fillRect(w - 180, labelY - 12, 120, 24);
         ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 11px Consolas';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(`卖单墙 ${strongestSellPrice.toFixed(1)}`, w - 100, sy);
+        
+        const tfLabel = document.querySelector('.btn-group .btn.active[data-tf]').innerText;
+        ctx.fillText(`${tfLabel}卖单墙 ${strongestSellPrice.toFixed(1)}`, w - 120, labelY);
+        
+        // 如果墙在视野外，画个小箭头指示方向
+        if (sy < 0) ctx.fillText('▲', w - 165, labelY);
+        if (sy > h) ctx.fillText('▼', w - 165, labelY);
     }
 
     // 只画可视区域内的 K 线
