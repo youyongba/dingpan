@@ -711,6 +711,30 @@ function addTapeRecord(price, qty, isSell, timeMs) {
 
 // ================= Canvas 渲染引擎 =================
 
+function resizeCanvas() {
+    const rect = fpContainer.getBoundingClientRect();
+    canvasFPMain.width = rect.width; canvasFPMain.height = rect.height;
+    canvasFPUI.width = rect.width; canvasFPUI.height = rect.height;
+    
+    const vpRect = vpContainer.getBoundingClientRect();
+    if(vpRect.width > 0 && vpRect.height > 0) {
+        canvasVP.width = vpRect.width; canvasVP.height = vpRect.height;
+    }
+
+    const deltaRect = deltaContainer.getBoundingClientRect();
+    if(deltaRect.width > 0 && deltaRect.height > 0) {
+        canvasDelta.width = deltaRect.width; canvasDelta.height = deltaRect.height;
+    }
+
+    // 初始化居中偏移 (让最新价格在中间偏右)
+    if (STATE.offsetY === 0) {
+        STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
+        STATE.offsetX = 100; // 留出右侧价格轴空间
+    }
+    renderAll();
+}
+window.addEventListener('resize', resizeCanvas);
+
 function renderLoop() {
     renderAll();
     if (STATE.isRunning) {
@@ -802,13 +826,19 @@ function drawFootprints(ctx, w, h) {
     const cw = CONFIG.candleWidth * STATE.scaleX;
     const rh = CONFIG.rowHeight * STATE.scaleY;
     
-    // 找出全局最强买单墙和卖单墙的价格
+    // 找出在可视范围内的最强买卖单墙的价格
     let maxBuyVol = 0; let strongestBuyPrice = 0;
     let maxSellVol = 0; let strongestSellPrice = 0;
     
+    // 获取主图可视范围的价格区间
+    const viewMaxP = yToPrice(0);
+    const viewMinP = yToPrice(canvasFPMain.height);
+    
     STATE.globalVolumeProfile.forEach((vData, pLevel) => {
-        if (vData.buy > maxBuyVol && pLevel < STATE.currentPrice) { maxBuyVol = vData.buy; strongestBuyPrice = pLevel; }
-        if (vData.sell > maxSellVol && pLevel > STATE.currentPrice) { maxSellVol = vData.sell; strongestSellPrice = pLevel; }
+        if (pLevel >= viewMinP && pLevel <= viewMaxP) {
+            if (vData.buy > maxBuyVol && pLevel < STATE.currentPrice) { maxBuyVol = vData.buy; strongestBuyPrice = pLevel; }
+            if (vData.sell > maxSellVol && pLevel > STATE.currentPrice) { maxSellVol = vData.sell; strongestSellPrice = pLevel; }
+        }
     });
 
     // 在主图表上画出最强买卖单墙的射线和价格标签
@@ -828,6 +858,7 @@ function drawFootprints(ctx, w, h) {
         ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 11px Consolas';
         ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
         ctx.fillText(`买单墙 ${strongestBuyPrice.toFixed(1)}`, w - 100, by);
     }
     
@@ -847,6 +878,7 @@ function drawFootprints(ctx, w, h) {
         ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 11px Consolas';
         ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
         ctx.fillText(`卖单墙 ${strongestSellPrice.toFixed(1)}`, w - 100, sy);
     }
 
