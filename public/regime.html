@@ -2586,6 +2586,8 @@
         <div style="margin-top:8px;text-align:right;">
           <button class="pos-edit-toggle" onclick="recalcLevels('${dir}')"
                   title="按最新指标 (ATR+HV+ROC) 重算并更新一次止盈止损。手动编辑过的价位保持不变; 已触发的 TP 与保本后的 SL 不会调整。每次点击只更新一次, 不会持续跟随">🔄 更新TP/SL</button>
+          <button class="pos-edit-toggle" onclick="recalcLevels('${dir}', true)"
+                  title="先解除该方向所有手动编辑锁定, 再按 ATR+HV+ROC 全量重算 — 编辑过的价位也会被覆盖更新。已触发的 TP 与保本后的 SL 仍不会调整">♻️ 恢复自动TP/SL</button>
           <button class="pos-edit-toggle ${editOpen ? 'active' : ''}" onclick="togglePosEdit('${dir}')">${editOpen ? '▴ 收起编辑' : '✏️ 编辑止盈止损'}</button>
         </div>
         ${editOpen ? renderPosEditPanel(dir, 'active', { entry: p.entryPrice, tp1: p.tp1, tp2: p.tp2, tp3: p.tp3, sl: p.currentStopLoss, tpHit }) : ''}
@@ -2600,28 +2602,44 @@
   // 各方向编辑面板的展开状态; renderPositions 每帧重画都读这个 map
   const posEditOpen = { long: false, short: false };
 
-  // 持仓卡「🔄 更新TP/SL」: 按 ATR+HV+ROC 重算并应用一次 (手动锁定/已触发的价位后端自动跳过)
-  window.recalcLevels = async function recalcLevels(direction) {
+  // 持仓卡「🔄 更新TP/SL」/「♻️ 恢复自动TP/SL」共用:
+  //   resetManual=false → 按 ATR+HV+ROC 重算一次, 手动锁定/已触发的价位后端自动跳过
+  //   resetManual=true  → 先解除全部手动编辑锁定再重算, 编辑过的价位也会被覆盖
+  window.recalcLevels = async function recalcLevels(direction, resetManual = false) {
     const dirZh = direction === 'long' ? '多头' : '空头';
-    if (!confirm(
-      `确认按最新指标重算${dirZh}止盈止损?\n` +
-      '· 公式: ATR 基础价位 × HV 波动率缩放 (0.8~1.3x) × ROC 动量止盈拉伸 (0.75~1.25x)\n' +
-      '· 手动编辑过的价位保持不变, 只更新未编辑过的\n' +
-      '· 已触发的 TP 与保本后的 SL 不会调整\n' +
-      '· 每次点击只更新一次, 不会持续跟随'
-    )) return;
+    const confirmText = resetManual
+      ? `确认恢复${dirZh}止盈止损为自动计算?\n` +
+        '· 将解除该方向所有手动编辑锁定 — 编辑过的价位也会被覆盖更新\n' +
+        '· 公式: ATR 基础价位 × HV 波动率缩放 (0.8~1.3x) × ROC 动量止盈拉伸 (0.75~1.25x)\n' +
+        '· 已触发的 TP 与保本后的 SL 仍不会调整\n' +
+        '· 解锁后价位重新交给自动更新管理'
+      : `确认按最新指标重算${dirZh}止盈止损?\n` +
+        '· 公式: ATR 基础价位 × HV 波动率缩放 (0.8~1.3x) × ROC 动量止盈拉伸 (0.75~1.25x)\n' +
+        '· 手动编辑过的价位保持不变, 只更新未编辑过的\n' +
+        '· 已触发的 TP 与保本后的 SL 不会调整\n' +
+        '· 每次点击只更新一次, 不会持续跟随';
+    if (!confirm(confirmText)) return;
     try {
-      const j = await callAdminApi('/api/auto-trade/recalc-levels', { direction });
+      const j = await callAdminApi('/api/auto-trade/recalc-levels', { direction, resetManual });
+      const label = { tp1: 'TP1', tp2: 'TP2', tp3: 'TP3', sl: 'SL' };
       if (!j.changed) {
-        showToast('warn', `ℹ️ ${dirZh}止盈止损无需更新`, j.hint || '重算结果与当前价位一致', 6000);
+        const extra = resetManual && j.clearedLocks && j.clearedLocks.length
+          ? ` (已解除锁定: ${j.clearedLocks.map(k => label[k]).join(', ')})`
+          : '';
+        showToast('warn', `ℹ️ ${dirZh}止盈止损无需更新${extra}`, j.hint || '重算结果与当前价位一致', 6000);
       } else {
-        const label = { tp1: 'TP1', tp2: 'TP2', tp3: 'TP3', sl: 'SL' };
         const lines = (j.changes || [])
           .map(k => `${label[k]}: ${j.prev[k]} → ${j.next[k]}`);
         if (j.hvRoc) lines.push(`因子: HV×${j.hvRoc.volFactor} · ROC止盈×${j.hvRoc.tpStretch}`);
+        if (resetManual && j.clearedLocks && j.clearedLocks.length)
+          lines.push(`🔓 已解除手动锁定: ${j.clearedLocks.map(k => label[k]).join(', ')}`);
         if (j.skippedLocked && j.skippedLocked.length) lines.push(`🔒 锁定跳过: ${j.skippedLocked.map(k => label[k]).join(', ')}`);
         if (j.warning) lines.push(`⚠️ ${j.warning}`);
-        showToast('ok', `🔄 ${dirZh}止盈止损已更新 (ATR+HV+ROC)`, lines, 9000);
+        showToast('ok',
+          resetManual
+            ? `♻️ ${dirZh}止盈止损已恢复自动更新 (ATR+HV+ROC)`
+            : `🔄 ${dirZh}止盈止损已更新 (ATR+HV+ROC)`,
+          lines, 9000);
       }
       await fetchAutoTradeStatus();
     } catch (e) {

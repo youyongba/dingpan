@@ -135,6 +135,13 @@
     </div>
     <!-- 状态标签行 -->
     <div class="tags" id="tagRow"></div>
+    <!-- 回调/反弹入场参考行 (仅建议为方向性时显示) -->
+    <div class="vol-grid" id="entryGrid" style="display:none;border-bottom:1px solid var(--border);">
+      <div class="sum-cell"><span class="k" id="entryZoneLabel">回调区间</span><span class="v" id="entryZone">-</span></div>
+      <div class="sum-cell"><span class="k" id="entryPriceLabel">建议挂单</span><span class="v" id="entryPrice">-</span></div>
+      <div class="sum-cell"><span class="k">止损参考 (1.5×ATR)</span><span class="v" id="entrySl">-</span></div>
+      <div class="sum-cell"><span class="k">TP1参考 (1R)</span><span class="v" id="entryTp1">-</span></div>
+    </div>
     <!-- 波动率行 -->
     <div class="vol-grid">
       <div class="sum-cell"><span class="k">ATR%</span><span class="v" id="atrPct">-</span></div>
@@ -207,6 +214,29 @@
     document.getElementById('tagRow').innerHTML = tags.length
       ? tags.map((t) => `<span class="tag ${t.cls}">${esc(t.text)}</span>`).join('')
       : '<span class="tag">暂无信号标签</span>';
+
+    // 回调/反弹入场参考 (建议为方向性且执行周期指标齐全时才有)
+    const er = s.entryRef;
+    const eg = document.getElementById('entryGrid');
+    if (er) {
+      const dirZh = er.side === 'long' ? '回调' : '反弹';
+      const cls = 'v ' + (er.side === 'long' ? 'bull' : 'bear');
+      document.getElementById('entryZoneLabel').textContent =
+        `${dirZh}区间 (${er.tf}分 · 0.5×ATR~EMA20)`;
+      document.getElementById('entryZone').textContent = `${er.zoneNear} ~ ${er.zoneFar}`;
+      document.getElementById('entryZone').className = cls;
+      document.getElementById('entryPriceLabel').textContent =
+        `建议挂单 (深度 ${er.depthAtr}×ATR)`;
+      document.getElementById('entryPrice').textContent = er.entry;
+      document.getElementById('entryPrice').className = cls;
+      document.getElementById('entrySl').textContent = er.sl;
+      document.getElementById('entrySl').className = 'v bear';
+      document.getElementById('entryTp1').textContent = er.tp1;
+      document.getElementById('entryTp1').className = 'v bull';
+      eg.style.display = '';
+    } else {
+      eg.style.display = 'none';
+    }
 
     // 波动率
     const v = s.vol || {};

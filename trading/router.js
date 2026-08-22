@@ -2374,18 +2374,33 @@ async function dynamicLevelsTickDirection(direction) {
 
 // ============ POST /recalc-levels: 手动一键更新持仓 TP/SL (ATR+HV+ROC) ============
 //
-// body: { direction: 'long'|'short' }
+// body: { direction: 'long'|'short', resetManual?: boolean }
 //
-// 持仓卡片「🔄 更新TP/SL」按钮专用 — 每次点击只重算并应用**一次** (非持续跟随):
+// 持仓卡片两个按钮共用 — 每次点击只重算并应用**一次** (非持续跟随):
+//   「🔄 更新TP/SL」    (resetManual 不传/false): 手动编辑过的价位 (manualLevels 锁定) 跳过不动
+//   「♻️ 恢复自动TP/SL」(resetManual=true):     先清掉该方向全部手动锁定标记再重算 —
+//                        编没编辑过都更新, 且之后恢复可被动态/按钮更新
+// 共同规则:
 //   - 强制用 ATR+HV+ROC 全量公式 (无论全局 hvRocLevels 开关是否开启)
-//   - 手动编辑过的价位 (manualLevels 锁定) 跳过不动; 已触发的 TP 跳过;
-//     TP1 触发/保本后 SL 不动 (归风控套件管)
+//   - 已触发的 TP 跳过; TP1 触发/保本后 SL 不动 (归风控套件管) — resetManual 也不例外
 //   - minChangePct=0: 只要重算结果与现值不同就更新 (无防抖阈值)
 //   - hardSlCap / 全量校验与动态止盈止损同一套
 router.post('/recalc-levels', requireAdmin, (req, res) => {
   const direction = req.body?.direction;
   if (!['long', 'short'].includes(direction)) {
     return res.status(400).json({ ok: false, error: 'direction must be long|short' });
+  }
+  const resetManual = !!req.body?.resetManual;
+  let clearedLocks = null;
+  if (resetManual) {
+    const c = state.clearManualLevelFlags(direction);
+    if (c.ok) {
+      clearedLocks = ['tp1', 'tp2', 'tp3', 'sl'].filter((k) => c.prev[k]);
+      if (clearedLocks.length) {
+        console.log(`[trade.recalc] ♻️ ${direction} 已清除手动锁定标记: ${clearedLocks.join(', ')}`);
+      }
+    }
+    // c 失败 (无持仓) 时不提前返回, 交给下方 computeDynamicLevelChanges 统一报 409
   }
   const out = computeDynamicLevelChanges(direction, { hvRoc: true, minChangePct: 0 });
   if (!out.ok) {
@@ -2394,7 +2409,8 @@ router.post('/recalc-levels', requireAdmin, (req, res) => {
   }
   if (!out.changed) {
     return res.json({
-      ok: true, changed: false, reason: out.reason,
+      ok: true, changed: false, reason: out.reason, resetManual,
+      clearedLocks: clearedLocks || [],
       hint: out.reason === 'all_locked_or_hit'
         ? '全部价位已手动锁定或已触发, 无可更新项'
         : '重算结果与当前价位一致, 无需更新',
@@ -2402,10 +2418,16 @@ router.post('/recalc-levels', requireAdmin, (req, res) => {
     });
   }
   console.log(
-    `[trade.recalc] 🔄 ${direction} 手动更新 TP/SL (ATR+HV+ROC): `
+    `[trade.recalc] ${resetManual ? '♻️' : '🔄'} ${direction} ${resetManual ? '恢复自动更新' : '手动更新'} TP/SL (ATR+HV+ROC): `
     + Object.keys(out.changes).map((k) => `${k}=${out.changes[k]}`).join(' ')
   );
-  notifyLevelsRecalc(direction, out, {
+  notifyLevelsRecalc(direction, out, resetManual ? {
+    title: `♻️ ${direction.toUpperCase()} 持仓 TP/SL 已恢复自动更新 (ATR+HV+ROC)`,
+    sourceComment: '恢复自动更新止盈止损 · reset_button',
+    extraLine: clearedLocks && clearedLocks.length
+      ? `来源: 持仓卡片「恢复自动TP/SL」按钮 (已解除手动锁定: ${clearedLocks.map((k) => k.toUpperCase()).join(' / ')})`
+      : '来源: 持仓卡片「恢复自动TP/SL」按钮 (原本无手动锁定)',
+  } : {
     title: `🔄 ${direction.toUpperCase()} 持仓 TP/SL 已手动更新 (ATR+HV+ROC)`,
     sourceComment: '手动更新止盈止损 · recalc_button',
     extraLine: '来源: 持仓卡片「更新TP/SL」按钮 (单次重算, 不持续跟随)',
@@ -2416,7 +2438,8 @@ router.post('/recalc-levels', requireAdmin, (req, res) => {
     ? '动态止盈止损定时器仍在运行且未开启 HV/ROC 全局开关, 本次更新稍后可能被自动调整覆盖; 按钮模式建议设 AUTO_TRADE_DYNAMIC_LEVELS=0'
     : null;
   res.json({
-    ok: true, changed: true, entry: out.entry,
+    ok: true, changed: true, entry: out.entry, resetManual,
+    clearedLocks: clearedLocks || [],
     prev: { tp1: out.r.prev.tp1, tp2: out.r.prev.tp2, tp3: out.r.prev.tp3, sl: out.r.prev.currentStopLoss },
     next: { tp1: out.r.next.tp1, tp2: out.r.next.tp2, tp3: out.r.next.tp3, sl: out.r.next.currentStopLoss },
     changes: Object.keys(out.changes),

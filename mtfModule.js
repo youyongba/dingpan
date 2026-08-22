@@ -427,6 +427,42 @@ function buildSummary(tfMap, tfRows) {
     }
   }
 
+  // 回调/反弹入场参考价: 按建议执行周期 (execTf) 的指标综合计算.
+  //   区间上沿(近) = 现价 ∓ 0.5×ATR       — 浅回调最少要回踩半个 ATR
+  //   区间下沿(远) = 该周期 EMA20 (趋势动态支撑/阻力)
+  //       · EMA20 距现价不足 0.5×ATR (太近, 刚回踩过) → 用 1.0×ATR 兜底
+  //       · EMA20 距现价超过 1.5×ATR (太远, 均线滞后) → 封顶在 1.5×ATR
+  //   建议挂单价 = 区间中点; SL/TP1 = 挂单价 ∓/± 1.5×ATR (与交易模块 1R 口径一致)
+  let entryRef = null;
+  if (execTf && tfMap[execTf]) {
+    const t = tfMap[execTf];
+    const atr = last(t._atr);
+    const e20 = last(t._ema20);
+    const close = t._close;
+    if (atr != null && atr > 0 && close != null && e20 != null) {
+      const sign = totalScore > 0 ? 1 : -1;                     // 1=回调做多 / -1=反弹做空
+      const depthOf = (px) => (sign * (close - px)) / atr;      // 相对现价的回调深度 (单位 ATR, 正=方向正确)
+      const near = close - sign * 0.5 * atr;
+      let far = e20;
+      if (depthOf(far) <= 0.5) far = close - sign * 1.0 * atr;
+      else if (depthOf(far) > 1.5) far = close - sign * 1.5 * atr;
+      const entry = (near + far) / 2;
+      const risk = 1.5 * atr;
+      const r1 = (n) => Math.round(n * 10) / 10;
+      entryRef = {
+        tf: execTf,
+        side: sign > 0 ? 'long' : 'short',
+        close: r1(close), atr: r1(atr), ema20: r1(e20),
+        zoneNear: r1(near),                                     // 区间上沿 (离现价近)
+        zoneFar: r1(far),                                       // 区间下沿 (离现价远)
+        entry: r1(entry),                                       // 建议挂单价 (区间中点)
+        sl: r1(entry - sign * risk),
+        tp1: r1(entry + sign * risk),
+        depthAtr: +(depthOf(entry)).toFixed(2),                 // 建议价对应的回调深度 (×ATR)
+      };
+    }
+  }
+
   // 先行周期: 最近 2 根内 MACD 交叉且方向与总分一致的周期
   const leaders = tfRows
     .filter((t) => t.recentCross && ((totalScore < 0 && t.recentCross === 'death') || (totalScore > 0 && t.recentCross === 'golden')))
@@ -472,6 +508,7 @@ function buildSummary(tfMap, tfRows) {
   return {
     bullCount, bearCount, neutralCount, total: tfRows.length,
     totalScore, totalState, suggestion, execTf,
+    entryRef,                                      // 回调/反弹入场参考 { tf, side, entry, zoneNear, zoneFar, sl, tp1, ... } | null
     resonance,                                     // 'bull' | 'bear' | null
     resonanceLabel: resonance === 'bear' ? '空头共振 (4H+1H+15M)' : resonance === 'bull' ? '多头共振 (4H+1H+15M)' : '无共振',
     overall,                                       // '全面偏空' | '全面偏多' | null
@@ -589,9 +626,14 @@ function evaluateSuggestionChange(summary, tfRows) {
     .join(' · ');
 
   console.log(`[mtf] 📣 总建议变化: ${from} → ${cur} (总分 ${totalStr}), 推送飞书`);
+  const er = summary.entryRef;
+  const entryLine = er
+    ? `${er.side === 'long' ? '回调' : '反弹'}区间: ${er.zoneNear} ~ ${er.zoneFar}   建议挂单 ${er.entry} (深度 ${er.depthAtr}×ATR) · SL ${er.sl} · TP1 ${er.tp1}`
+    : null;
   feishu.sendRich(`${emoji} MTF 总建议变化: ${from} → ${cur}`, [
     [{ text: `📊 ${SYMBOL} · 多周期共振汇总` }],
     [{ text: `建议: ${from} → ${cur}${summary.execTf ? '   (建议执行周期 ' + (TF_CN_LABEL[summary.execTf] || summary.execTf) + ')' : ''}`, bold: true }],
+    ...(entryLine ? [[{ text: entryLine }]] : []),
     [{ text: `总分: ${summary.totalState} ${totalStr}   (多 ${summary.bullCount} / 空 ${summary.bearCount} / 中 ${summary.neutralCount})` }],
     [{ text: `共振: ${summary.resonanceLabel}${summary.overall ? ' · ' + summary.overall : ''}${summary.candleSync ? ' · ' + summary.candleSync : ''}` }],
     [{ text: `各周期: ${tfOverview || '--'}` }],
@@ -706,4 +748,4 @@ function getUpdatedAt() {
   return cache.updatedAt;
 }
 
-module.exports = { router, refresh, getTimeframe, getUpdatedAt, _test: { evaluateTfStateChange, notifyStates, evaluateSuggestionChange, suggestionNotify } };
+module.exports = { router, refresh, getTimeframe, getUpdatedAt, _test: { evaluateTfStateChange, notifyStates, evaluateSuggestionChange, suggestionNotify, buildSummary } };

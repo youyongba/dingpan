@@ -477,6 +477,21 @@ function updateActiveLevels(direction, levels, opts = {}) {
 }
 
 /**
+ * 清除 active 持仓的全部手动编辑锁定标记 (manualLevels 全 false).
+ * 「♻️ 恢复自动更新TP/SL」按钮用: 清锁后所有价位重新交给动态/手动重算管理.
+ * ⚠️ 只清锁定标记, 不改价位本身; 已触发 TP / 保本 SL 的保护约束不受影响 (那在重算层判定).
+ */
+function clearManualLevelFlags(direction) {
+  if (!state) load();
+  const p = state[direction];
+  if (!p || !p.active) return { ok: false, error: 'no_active_position' };
+  const prev = { tp1: false, tp2: false, tp3: false, sl: false, ...(p.manualLevels || {}) };
+  state[direction] = { ...p, manualLevels: { tp1: false, tp2: false, tp3: false, sl: false } };
+  save();
+  return { ok: true, prev };
+}
+
+/**
  * 修改 pending 挂单的 entry/TP1/TP2/TP3/SL 价位.
  *
  * 设计要点:
@@ -732,7 +747,7 @@ module.exports = {
   // pending 限价待触发
   armPending, cancelPending, markPendingFilled,
   // 手动调整止盈止损
-  updateActiveLevels, updatePendingLevels,
+  updateActiveLevels, updatePendingLevels, clearManualLevelFlags,
   // ⭐ 价格触发器 (与浏览器无关, 由 riskEngine 监听 WS 直接 evaluate)
   // 多触发器 + 成交锁: items[] 数组, fire 成功 → markPriceTriggerFiredLock 锁整方向
   armPriceTrigger,
