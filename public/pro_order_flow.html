@@ -433,9 +433,9 @@ function resizeCanvas() {
     }
 
     // 初始化居中偏移 (让最新价格在中间偏右)
-    if (STATE.offsetY === 0) {
+    if (STATE.offsetY === 0 || STATE.isRunning) {
         STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
-        STATE.offsetX = 100; // 留出右侧价格轴空间
+        if (STATE.offsetY === 0) STATE.offsetX = 100; // 初次加载留出右侧价格轴空间
     }
     renderAll();
 }
@@ -594,6 +594,12 @@ function buildHistoricalFootprint(klines) {
 }
 
 function connectWebSocket() {
+    // 启动时同时拉取一次后端的 MTF 墙数据
+    fetch('/api/mtf_walls')
+        .then(res => res.json())
+        .then(data => { STATE.mtfWallsData = data; })
+        .catch(e => console.warn("Failed to fetch initial MTF walls:", e));
+
     const streams = `${currentSymbol}@aggTrade/${currentSymbol}@depth20@100ms`;
     ws = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
     
@@ -792,6 +798,17 @@ function renderAll() {
     const w = canvasFPMain.width;
     const h = canvasFPMain.height;
     
+    // --- 自动回中逻辑：防止图表运行中跑出屏幕 ---
+    if (STATE.isRunning && STATE.currentPrice > 0) {
+        const currentY = priceToY(STATE.currentPrice);
+        // 如果最新价格跑出了屏幕上下 15% 的范围，就自动平滑移动 Y 轴
+        if (currentY < h * 0.15 || currentY > h * 0.85) {
+            const targetOffsetY = (h / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
+            // 每次移动差值的 10%（平滑滚动）
+            STATE.offsetY += (targetOffsetY - STATE.offsetY) * 0.1;
+        }
+    }
+    
     // 清空主画布
     ctxFP.clearRect(0, 0, w, h);
     ctxUI.clearRect(0, 0, w, h);
@@ -940,6 +957,70 @@ function drawFootprints(ctx, w, h) {
         STATE.wallLabels.push({
             x: w - 200, y: labelY - 12, width: 140, height: 24,
             targetPrice: strongestSellPrice
+        });
+    }
+
+    // 存储当前周期的最强单墙到后端
+    const tfLabel = document.querySelector('.btn-group .btn.active[data-tf]').innerText;
+    if (strongestBuyPrice > 0 || strongestSellPrice > 0) {
+        // 使用防抖避免每帧都发送请求
+        if (!STATE._lastWallUpdate || Date.now() - STATE._lastWallUpdate > 5000) {
+            STATE._lastWallUpdate = Date.now();
+            fetch('/api/mtf_walls', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    tf: tfLabel,
+                    buy: strongestBuyPrice,
+                    sell: strongestSellPrice
+                })
+            }).catch(e => console.warn("Backend wall sync failed:", e));
+        }
+    }
+
+    // 读取并绘制其他周期的最强单墙 (多周期共振对比)
+    if (STATE.mtfWallsData) {
+        Object.keys(STATE.mtfWallsData).forEach(tf => {
+            if (tf === tfLabel) return; // 跳过当前周期
+            
+            const data = STATE.mtfWallsData[tf];
+            if (Date.now() - data.ts > 24 * 60 * 60 * 1000) return; // 超过24小时的数据过期
+            
+            ctx.font = '10px Consolas';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            
+            // 绘制买单墙
+            if (data.buy > 0) {
+                const by = priceToY(data.buy) + rh/2;
+                if (by > 0 && by < h) {
+                    ctx.strokeStyle = 'rgba(38, 166, 154, 0.3)';
+                    ctx.setLineDash([2, 2]);
+                    ctx.beginPath(); ctx.moveTo(0, by); ctx.lineTo(w - 60, by); ctx.stroke();
+                    ctx.setLineDash([]);
+                    
+                    ctx.fillStyle = 'rgba(38, 166, 154, 0.7)';
+                    ctx.fillRect(5, by - 8, 45, 16);
+                    ctx.fillStyle = '#fff';
+                    ctx.fillText(`${tf}买`, 10, by);
+                }
+            }
+            
+            // 绘制卖单墙
+            if (data.sell > 0) {
+                const sy = priceToY(data.sell) + rh/2;
+                if (sy > 0 && sy < h) {
+                    ctx.strokeStyle = 'rgba(239, 83, 80, 0.3)';
+                    ctx.setLineDash([2, 2]);
+                    ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(w - 60, sy); ctx.stroke();
+                    ctx.setLineDash([]);
+                    
+                    ctx.fillStyle = 'rgba(239, 83, 80, 0.7)';
+                    ctx.fillRect(5, sy - 8, 45, 16);
+                    ctx.fillStyle = '#fff';
+                    ctx.fillText(`${tf}卖`, 10, sy);
+                }
+            }
         });
     }
 
@@ -1351,6 +1432,24 @@ fpContainer.addEventListener('mousemove', e => {
 fpContainer.addEventListener('mouseleave', () => {
     STATE.hoveredCell = null;
     tooltip.style.display = 'none';
+    renderAll();
+});
+
+// 双击重置视角和缩放
+fpContainer.addEventListener('dblclick', () => {
+    STATE.scaleX = 1.0;
+    STATE.scaleY = 1.0;
+    const rect = fpContainer.getBoundingClientRect();
+    STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
+    STATE.offsetX = 100;
+    
+    // 恢复实时跟随模式
+    STATE.isRunning = true;
+    document.getElementById('btn-play').classList.add('active');
+    document.getElementById('btn-pause').classList.remove('active');
+    document.getElementById('conn-status').textContent = '实时数据同步中...';
+    document.getElementById('conn-dot').style.backgroundColor = 'var(--buy-color)';
+    
     renderAll();
 });
 

@@ -516,6 +516,48 @@ app.get('/api/status', (req, res) => {
     res.json(state);
 });
 
+// ================= MTF Walls Backend Storage =================
+const MTF_WALLS_FILE = path.join(__dirname, 'data', 'mtf_walls.json');
+
+function loadMtfWalls() {
+    try {
+        if (fs.existsSync(MTF_WALLS_FILE)) {
+            return JSON.parse(fs.readFileSync(MTF_WALLS_FILE, 'utf8'));
+        }
+    } catch (e) {
+        console.error('Failed to load MTF walls:', e);
+    }
+    return {};
+}
+
+function saveMtfWalls(data) {
+    try {
+        const dir = path.dirname(MTF_WALLS_FILE);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(MTF_WALLS_FILE, JSON.stringify(data, null, 2));
+    } catch (e) {
+        console.error('Failed to save MTF walls:', e);
+    }
+}
+
+app.get('/api/mtf_walls', (req, res) => {
+    res.json(loadMtfWalls());
+});
+
+app.post('/api/mtf_walls', (req, res) => {
+    const { tf, buy, sell } = req.body;
+    if (!tf) return res.status(400).json({ error: 'Missing timeframe (tf)' });
+    
+    const walls = loadMtfWalls();
+    walls[tf] = {
+        buy: buy || 0,
+        sell: sell || 0,
+        ts: Date.now()
+    };
+    saveMtfWalls(walls);
+    res.json({ success: true, walls });
+});
+
 // 清空历史数据 (仅保留给前端的"重置图表"使用)
 app.post('/api/reset', authMiddleware, (req, res) => {
     state.historyData = [];
