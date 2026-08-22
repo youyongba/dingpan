@@ -848,14 +848,24 @@ function drawFootprints(ctx, w, h) {
     const rh = CONFIG.rowHeight * STATE.scaleY;
     
     // 找出当前周期全局最强买单墙和卖单墙的价格
+    // 为了防止当前价格在支撑/阻力位附近频繁波动导致单墙标识闪烁跳跃，引入缓冲带 (Hysteresis) 机制
     let maxBuyVol = 0; let strongestBuyPrice = 0;
     let maxSellVol = 0; let strongestSellPrice = 0;
     
+    const currentP = STATE.currentPrice;
+    const buffer = CONFIG.tickSize * 2; // 缓冲带：2个 tick
+    
     STATE.globalVolumeProfile.forEach((vData, pLevel) => {
-        // 移除 < STATE.currentPrice 和 > STATE.currentPrice 的限制
-        // 直接寻找全局绝对买卖量最大的价格点
-        if (vData.buy > maxBuyVol) { maxBuyVol = vData.buy; strongestBuyPrice = pLevel; }
-        if (vData.sell > maxSellVol) { maxSellVol = vData.sell; strongestSellPrice = pLevel; }
+        // 买单墙：必须在当前价格之下 (加上缓冲带)
+        if (pLevel <= currentP + buffer && vData.buy > maxBuyVol) { 
+            maxBuyVol = vData.buy; 
+            strongestBuyPrice = pLevel; 
+        }
+        // 卖单墙：必须在当前价格之上 (减去缓冲带)
+        if (pLevel >= currentP - buffer && vData.sell > maxSellVol) { 
+            maxSellVol = vData.sell; 
+            strongestSellPrice = pLevel; 
+        }
     });
 
     // 记录标签的点击区域，用于鼠标事件
