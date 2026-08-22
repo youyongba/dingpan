@@ -822,6 +822,12 @@ function renderAll() {
     // 3. 画右侧面板的 Volume Profile (最强买卖单墙)
     drawVolumeProfileWalls();
     
+    // 如果鼠标在主图上悬停，同步在 VP 上画出对应价格的提示框
+    if (STATE.hoveredCell) {
+        const hoverPriceRaw = yToPrice(STATE.hoveredCell.y);
+        drawVPHoverByPrice(hoverPriceRaw);
+    }
+    
     // 4. 画底部指标面板 (Delta 柱状图)
     drawDeltaIndicator();
 
@@ -1306,24 +1312,21 @@ function drawUI(ctx, w, h) {
     }
 }
 
-// 绘制 Volume Profile 上的悬浮提示
-function drawVPHover(y) {
+// 绘制 Volume Profile 上的悬浮提示 (通过价格联动)
+function drawVPHoverByPrice(hoverPriceRaw) {
     const w = canvasVP.width;
     const h = canvasVP.height;
     
-    // 清除并重绘 VP 基础内容
-    drawVolumeProfileWalls();
-    
-    if (y < 0 || y > h) return;
-
     const viewMaxP = yToPrice(0);
     const viewMinP = yToPrice(canvasFPMain.height);
     const priceRange = viewMaxP - viewMinP;
     
-    // 将局部 Y 坐标反算回价格
-    const hoverPriceRaw = viewMinP + ((h - y) / h) * priceRange;
-    const pLevel = Math.floor(hoverPriceRaw / CONFIG.tickSize) * CONFIG.tickSize;
+    // 将价格映射回 VP 的局部 Y 坐标
+    const y = h - ((hoverPriceRaw - viewMinP) / priceRange) * h;
     
+    if (y < 0 || y > h) return;
+
+    const pLevel = Math.floor(hoverPriceRaw / CONFIG.tickSize) * CONFIG.tickSize;
     const vData = STATE.globalVolumeProfile.get(pLevel) || { buy: 0, sell: 0, total: 0 };
     
     // 画水平提示线
@@ -1550,7 +1553,16 @@ function showToast(msg) {
 vpContainer.addEventListener('mousemove', e => {
     const rect = vpContainer.getBoundingClientRect();
     const y = e.clientY - rect.top;
-    drawVPHover(y);
+    
+    const viewMaxP = yToPrice(0);
+    const viewMinP = yToPrice(canvasFPMain.height);
+    const priceRange = viewMaxP - viewMinP;
+    
+    // 从 VP 局部坐标推算出悬停价格
+    const hoverPriceRaw = viewMinP + ((canvasVP.height - y) / canvasVP.height) * priceRange;
+    
+    drawVolumeProfileWalls(); // 先清空并重绘基础图形
+    drawVPHoverByPrice(hoverPriceRaw); // 再画提示框
 });
 
 vpContainer.addEventListener('mouseleave', () => {
