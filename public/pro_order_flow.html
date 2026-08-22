@@ -187,16 +187,33 @@
         /* DOM 深度样式 */
         .dom-container {
             flex: 1;
-            overflow: hidden;
+            overflow-y: auto; /* 允许滚动以适应不同的行数 */
             display: flex;
             flex-direction: column;
+            font-size: 11px; /* 稍微缩小字体以适应更多行 */
         }
         
+        .dom-half {
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end; /* 卖盘靠下对齐，买盘靠上对齐（默认） */
+        }
+        
+        .dom-sell-half {
+            justify-content: flex-end; /* 让卖盘贴着中间价差 */
+        }
+
+        .dom-buy-half {
+            justify-content: flex-start; /* 让买盘贴着中间价差 */
+        }
+
         .dom-row {
             display: flex;
             justify-content: space-between;
-            padding: 2px 10px;
+            padding: 1px 10px; /* 减小内边距 */
             position: relative;
+            min-height: 18px; /* 固定最小高度 */
+            align-items: center;
         }
         
         .dom-row::before {
@@ -667,6 +684,8 @@ function handleDepth(data) {
     data.bids.slice(0, CONFIG.domLevels).forEach(b => maxVol = Math.max(maxVol, parseFloat(b[1])));
     if (maxVol === 0) maxVol = 1;
 
+    html += '<div class="dom-half dom-sell-half">';
+    
     asks.forEach(ask => {
         const p = parseFloat(ask[0]);
         const vol = parseFloat(ask[1]);
@@ -678,7 +697,7 @@ function handleDepth(data) {
         </div>`;
     });
     
-    html += `<div class="dom-spread">${cp.toFixed(1)}</div>`;
+    html += `</div><div class="dom-spread">${cp.toFixed(1)}</div><div class="dom-half dom-buy-half">`;
     
     const bids = data.bids.slice(0, CONFIG.domLevels);
     bids.forEach(bid => {
@@ -692,6 +711,7 @@ function handleDepth(data) {
         </div>`;
     });
     
+    html += '</div>';
     domList.innerHTML = html;
 }
 
