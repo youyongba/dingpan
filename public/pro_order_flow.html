@@ -852,8 +852,10 @@ function drawFootprints(ctx, w, h) {
     let maxSellVol = 0; let strongestSellPrice = 0;
     
     STATE.globalVolumeProfile.forEach((vData, pLevel) => {
-        if (vData.buy > maxBuyVol && pLevel < STATE.currentPrice) { maxBuyVol = vData.buy; strongestBuyPrice = pLevel; }
-        if (vData.sell > maxSellVol && pLevel > STATE.currentPrice) { maxSellVol = vData.sell; strongestSellPrice = pLevel; }
+        // 移除 < STATE.currentPrice 和 > STATE.currentPrice 的限制
+        // 直接寻找全局绝对买卖量最大的价格点
+        if (vData.buy > maxBuyVol) { maxBuyVol = vData.buy; strongestBuyPrice = pLevel; }
+        if (vData.sell > maxSellVol) { maxSellVol = vData.sell; strongestSellPrice = pLevel; }
     });
 
     // 记录标签的点击区域，用于鼠标事件
@@ -1286,6 +1288,14 @@ fpContainer.addEventListener('mouseleave', () => {
 // 滚轮缩放
 fpContainer.addEventListener('wheel', e => {
     e.preventDefault();
+    
+    const rect = fpContainer.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    
+    const oldScaleX = STATE.scaleX;
+    const oldScaleY = STATE.scaleY;
+    
     const zoomFactor = 0.1;
     if (e.deltaY < 0) {
         // 放大
@@ -1296,8 +1306,67 @@ fpContainer.addEventListener('wheel', e => {
         STATE.scaleX = Math.max(0.5, STATE.scaleX - zoomFactor);
         STATE.scaleY = Math.max(0.5, STATE.scaleY - zoomFactor);
     }
+    
+    // 基于鼠标当前位置进行居中缩放计算
+    const h = canvasFPMain.height;
+    const w = canvasFPMain.width;
+    const rightMargin = 80;
+    
+    // 调整 Y 轴平移，保持鼠标下方的价格不变
+    STATE.offsetY = STATE.offsetY + (h - mouseY) / STATE.scaleY - (h - mouseY) / oldScaleY;
+    
+    // 调整 X 轴平移，保持鼠标下方的时间位置不变
+    STATE.offsetX = mouseX - (w - rightMargin) + (w - rightMargin + STATE.offsetX - mouseX) * (STATE.scaleX / oldScaleX);
+    
     renderAll();
 }, { passive: false });
+
+// 右键复制价格
+fpContainer.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    
+    const rect = fpContainer.getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    const price = yToPrice(y);
+    
+    // 按照 tickSize 对齐价格
+    const roundedPrice = Math.floor(price / CONFIG.tickSize) * CONFIG.tickSize;
+    
+    navigator.clipboard.writeText(roundedPrice.toFixed(1)).then(() => {
+        showToast(`已复制价格: ${roundedPrice.toFixed(1)}`);
+    }).catch(err => {
+        console.error('Failed to copy text: ', err);
+    });
+});
+
+// Toast 提示
+function showToast(msg) {
+    let toast = document.getElementById('toast');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'toast';
+        toast.style.position = 'absolute';
+        toast.style.top = '50px';
+        toast.style.left = '50%';
+        toast.style.transform = 'translateX(-50%)';
+        toast.style.background = 'rgba(38, 166, 154, 0.9)';
+        toast.style.color = '#fff';
+        toast.style.padding = '8px 16px';
+        toast.style.borderRadius = '4px';
+        toast.style.zIndex = '1000';
+        toast.style.pointerEvents = 'none';
+        toast.style.transition = 'opacity 0.3s';
+        document.body.appendChild(toast);
+    }
+    toast.textContent = msg;
+    toast.style.display = 'block';
+    toast.style.opacity = '1';
+    
+    setTimeout(() => {
+        toast.style.opacity = '0';
+        setTimeout(() => toast.style.display = 'none', 300);
+    }, 2000);
+}
 
 function updateTooltip(x, y) {
     // 找出对应的 K 线 index 和价格
