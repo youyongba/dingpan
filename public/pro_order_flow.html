@@ -1215,6 +1215,65 @@ function drawUI(ctx, w, h) {
     }
 }
 
+// 绘制 Volume Profile 上的悬浮提示
+function drawVPHover(y) {
+    const w = canvasVP.width;
+    const h = canvasVP.height;
+    
+    // 清除并重绘 VP 基础内容
+    drawVolumeProfileWalls();
+    
+    if (y < 0 || y > h) return;
+
+    const viewMaxP = yToPrice(0);
+    const viewMinP = yToPrice(canvasFPMain.height);
+    const priceRange = viewMaxP - viewMinP;
+    
+    // 将局部 Y 坐标反算回价格
+    const hoverPriceRaw = viewMinP + ((h - y) / h) * priceRange;
+    const pLevel = Math.floor(hoverPriceRaw / CONFIG.tickSize) * CONFIG.tickSize;
+    
+    const vData = STATE.globalVolumeProfile.get(pLevel) || { buy: 0, sell: 0, total: 0 };
+    
+    // 画水平提示线
+    ctxVP.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+    ctxVP.setLineDash([2, 2]);
+    ctxVP.beginPath();
+    ctxVP.moveTo(0, y);
+    ctxVP.lineTo(w, y);
+    ctxVP.stroke();
+    ctxVP.setLineDash([]);
+    
+    // 准备提示文字
+    const pText = `P: ${pLevel.toFixed(1)}`;
+    const vText = `V: ${vData.total.toFixed(2)}`;
+    
+    ctxVP.font = '10px Consolas';
+    const pWidth = ctxVP.measureText(pText).width;
+    const vWidth = ctxVP.measureText(vText).width;
+    const boxW = Math.max(pWidth, vWidth) + 10;
+    const boxH = 28;
+    
+    // 确保提示框不会超出边界
+    let boxX = w / 2 - boxW / 2;
+    let boxY = y - boxH - 5;
+    if (boxY < 0) boxY = y + 5;
+    
+    // 画背景框
+    ctxVP.fillStyle = 'rgba(19, 23, 34, 0.9)';
+    ctxVP.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+    ctxVP.fillRect(boxX, boxY, boxW, boxH);
+    ctxVP.strokeRect(boxX, boxY, boxW, boxH);
+    
+    // 画文字
+    ctxVP.fillStyle = '#ffffff';
+    ctxVP.textAlign = 'center';
+    ctxVP.textBaseline = 'top';
+    ctxVP.fillText(pText, boxX + boxW/2, boxY + 4);
+    ctxVP.fillStyle = '#787b86';
+    ctxVP.fillText(vText, boxX + boxW/2, boxY + 16);
+}
+
 // ================= 交互事件控制 (拖拽、缩放、悬停) =================
 
 let isDragging = false;
@@ -1377,6 +1436,18 @@ function showToast(msg) {
         setTimeout(() => toast.style.display = 'none', 300);
     }, 2000);
 }
+
+// VP 面板悬停事件
+vpContainer.addEventListener('mousemove', e => {
+    const rect = vpContainer.getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    drawVPHover(y);
+});
+
+vpContainer.addEventListener('mouseleave', () => {
+    // 鼠标离开时重绘基础 VP 面板，清除 hover 线
+    drawVolumeProfileWalls();
+});
 
 function updateTooltip(x, y) {
     // 找出对应的 K 线 index 和价格
