@@ -118,7 +118,7 @@ if (MANUAL_FALLBACK_PCT < MANUAL_FALLBACK_PCT_MIN || MANUAL_FALLBACK_PCT > MANUA
  * @returns {{tp1, tp2, tp3, sl, pct}}
  * @throws Error 当 pct 非法 / entryPrice 非法时
  */
-function computeManualFallbackLevels(direction, entryPrice, isPending = false) {
+function computeManualFallbackLevels(direction, entryPrice, isPending = false, opts = {}) {
   let getLatestPlan;
   try {
     getLatestPlan = require('../regimeModule').getLatestPlan;
@@ -136,19 +136,44 @@ function computeManualFallbackLevels(direction, entryPrice, isPending = false) {
     ? (direction === 'long' ? entryPrice - 0.5 * atr : entryPrice + 0.5 * atr)
     : entryPrice;
 
-  const risk = 1.5 * atr;
-  const tp1 = entry + sign * 1 * risk;
-  const tp2 = entry + sign * 2 * risk;
-  const tp3 = entry + sign * 3 * risk;
+  // ⭐ HV/ROC 增强 (实验性, 两个因子都有硬边界):
+  //   opts.hvRoc 显式传值时优先 (手动「更新TP/SL」按钮强制 true), 否则跟随 cfg.hvRocLevels 开关
+  //   volFactor: HV 相对近 120 根均值的比值 → 缩放风险距离
+  //     高波动 (HV 高于常态) → SL/TP 距离放宽, 减少被噪音扫损; 低波动 → 收紧
+  //   tpStretch: ROC(14) 与交易方向的一致度 → 只拉伸/收缩止盈 (SL 不受影响)
+  //     动量同向 → TP 放远让利润多跑; 动量逆向 → TP 收近尽早落袋
+  let volFactor = 1;
+  let tpStretch = 1;
+  const hvRocEnabled = opts.hvRoc != null ? !!opts.hvRoc : !!config.get().hvRocLevels;
+  if (hvRocEnabled) {
+    const hv = planInfo?.latest?.hv;
+    const hvRef = planInfo?.latest?.hvRef;
+    if (Number.isFinite(hv) && Number.isFinite(hvRef) && hvRef > 0) {
+      volFactor = Math.min(1.3, Math.max(0.8, hv / hvRef));
+    }
+    const roc = planInfo?.latest?.roc;
+    if (Number.isFinite(roc)) {
+      const rocNorm = Math.min(1, Math.max(-1, roc / 2));   // ROC ±2% 视为满幅
+      tpStretch = Math.min(1.25, Math.max(0.75, 1 + 0.25 * sign * rocNorm));
+    }
+  }
+
+  const risk = 1.5 * atr * volFactor;
+  const tp1 = entry + sign * 1 * risk * tpStretch;
+  const tp2 = entry + sign * 2 * risk * tpStretch;
+  const tp3 = entry + sign * 3 * risk * tpStretch;
   const sl = direction === 'long' ? entry - risk : entry + risk;
 
   const round2 = (n) => Math.round(n * 100) / 100;
+  const round3 = (n) => Math.round(n * 1000) / 1000;
   return {
     entry: round2(entry),
     tp1: round2(tp1),
     tp2: round2(tp2),
     tp3: round2(tp3),
     sl: round2(sl),
+    // 审计: 开关开着时返回实际使用的因子 (关着为 null, 调用方可用于日志/通知)
+    hvRoc: hvRocEnabled ? { volFactor: round3(volFactor), tpStretch: round3(tpStretch) } : null,
   };
 }
 
@@ -958,6 +983,8 @@ router.get('/status', (req, res) => {
     autoPositionPct: confidencePositionPct(),
     effectivePositionPct: manualPositionPctByConfidence(),
     maxManualPositionPct: config.MAX_MANUAL_POSITION_PCT,
+    // ⭐ HV/ROC 增强止盈止损开关 (实验性): 影响手动开仓回退/追单/动态止盈止损的价位公式
+    hvRocLevels: !!cfg.hvRocLevels,
     // ⭐ 价格围栏 (自动方向开关) — 配置 + 实时自动状态:
     //   directionGuard:    { long:{enabled,threshold}, short:{enabled,threshold}, hysteresisPct, minSwitchIntervalMs }
     //   autoDisableLong/Short: riskEngine 实时评估写入, 与手动 disable* 取或决定 processSignal 是否拦截
@@ -2070,6 +2097,7 @@ router.post('/adjust-levels', requireAdmin, (req, res) => {
         `TP1 : ${r.prev.tp1} → ${r.next.tp1}`,
         `TP2 : ${r.prev.tp2} → ${r.next.tp2}`,
         `TP3 : ${r.prev.tp3} → ${r.next.tp3}`,
+        `🔒 本次编辑过的 TP/SL 成交转持仓后保持锁定, 不被动态止盈止损 (ATR) 自动调整`,
         `操作来源: ${req.body?.source || 'manual_ui'}`,
       ],
     });
@@ -2144,6 +2172,7 @@ router.post('/adjust-levels', requireAdmin, (req, res) => {
       `TP2: ${r.prev.tp2} → ${r.next.tp2}` + (before.tpHit?.tp2 ? ' (已触发, 跳过)' : ''),
       `TP3: ${r.prev.tp3} → ${r.next.tp3}` + (before.tpHit?.tp3 ? ' (已触发, 跳过)' : ''),
       r.skipped.length ? `跳过项: ${r.skipped.join(', ')}` : null,
+      `🔒 本次编辑过的价位已锁定, 不再被动态止盈止损 (ATR) 自动调整; 未编辑过的价位继续跟随`,
       `操作来源: ${req.body?.source || 'manual_ui'}`,
     ].filter(Boolean),
   });
@@ -2173,8 +2202,239 @@ router.post('/adjust-levels', requireAdmin, (req, res) => {
     prev: { tp1: r.prev.tp1, tp2: r.prev.tp2, tp3: r.prev.tp3, sl: r.prev.currentStopLoss },
     next: { tp1: r.next.tp1, tp2: r.next.tp2, tp3: r.next.tp3, sl: r.next.currentStopLoss },
     skipped: r.skipped,
+    manualLevels: r.next.manualLevels,   // 已锁定 (不再动态调整) 的价位标记
   });
 });
+
+// ============ 动态止盈止损: 未手动编辑过的价位按 regime ATR 实时重算 ============
+//
+// 用户需求: 多/空 active 持仓的 TP1/TP2/TP3/SL 默认跟随行情动态调整 (regime 1H ATR),
+//           但凡是用户手动编辑过的价位 (adjust-levels) 就永久锁定, 不再自动动.
+//
+// 规则:
+//   - 重算公式与手动追单一致 (computeManualFallbackLevels 锚定**原入场价**):
+//       risk = 1.5 * ATR;  TP1/2/3 = entry ± 1/2/3 * risk;  SL = entry ∓ risk
+//   - 逐价位判定: manualLevels[k]=true (手动锁定) 或 tpHit[k]=true (已触发) 的跳过
+//   - SL 额外约束: TP1 已触发 / protectionArmed 后不再动态调 (保本/trailing 由风控套件接管);
+//     hardSlCap 与开仓路径同样生效 (SL 距离 ≤ maxDistancePct%)
+//   - 调整前过 validateAdjustActiveLevels 全量校验, 不合法整组放弃
+//   - 单价位变化 < minChangePct% 视为无变化 (防抖, ATR 5min 才随 regime 刷新)
+//   - 改后推飞书通知 + fireMonitorOpen 同步监控通道, riskEngine 下一 tick 即按新价位 evaluate
+const DYNAMIC_LEVELS = {
+  enabled: process.env.AUTO_TRADE_DYNAMIC_LEVELS !== '0',
+  checkMs: Math.max(15 * 1000, parseInt(process.env.AUTO_TRADE_DYNAMIC_LEVELS_CHECK_MS, 10) || 60 * 1000),
+  minChangePct: (() => {
+    const raw = parseFloat(process.env.AUTO_TRADE_DYNAMIC_LEVELS_MIN_CHANGE_PCT);
+    return Number.isFinite(raw) && raw >= 0 ? raw : 0.05;
+  })(),
+};
+
+let _dynamicLevelsRunning = false;
+
+async function dynamicLevelsTick() {
+  if (!DYNAMIC_LEVELS.enabled || _dynamicLevelsRunning) return;
+  _dynamicLevelsRunning = true;
+  try {
+    for (const direction of ['long', 'short']) {
+      try { await dynamicLevelsTickDirection(direction); }
+      catch (e) { console.error(`[trade.dynamic] ${direction} 动态止盈止损异常:`, e?.message || e); }
+    }
+  } finally {
+    _dynamicLevelsRunning = false;
+  }
+}
+
+/**
+ * 计算并应用一次动态止盈止损 (核心, 定时器与手动「更新TP/SL」按钮共用).
+ *
+ * @param {'long'|'short'} direction
+ * @param {object} [opts]
+ * @param {boolean} [opts.hvRoc]        显式指定是否用 HV/ROC 增强 (undefined=跟随 cfg.hvRocLevels)
+ * @param {number}  [opts.minChangePct] 单价位最小变化阈值% (默认 DYNAMIC_LEVELS.minChangePct; 0=有变化就更新)
+ * @returns {{ok:false, reason:string, hint?:string} | {ok:true, changed:false, reason:string, skippedLocked?:string[]}
+ *          | {ok:true, changed:true, entry:number, r:object, changes:object, flags:object, tpHit:object, hvRoc:object|null}}
+ */
+function computeDynamicLevelChanges(direction, opts = {}) {
+  const p = state.getPosition(direction);
+  if (!p || !p.active) return { ok: false, reason: 'no_active_position' };
+  const entry = Number(p.entryPrice);
+  if (!Number.isFinite(entry) || entry <= 0) return { ok: false, reason: 'invalid_entry' };
+
+  const flags = { tp1: false, tp2: false, tp3: false, sl: false, ...(p.manualLevels || {}) };
+  const tpHit = p.tpHit || {};
+  const skippedLocked = ['tp1', 'tp2', 'tp3', 'sl'].filter((k) => flags[k]);
+
+  // 可调价位: 未手动锁定且未触发; SL 额外要求 TP1 未触发且未进入保本 (之后归风控套件管)
+  const slAdjustable = !flags.sl && !tpHit.tp1 && !p.protectionArmed;
+  const tpAdjustable = ['tp1', 'tp2', 'tp3'].filter((k) => !flags[k] && !tpHit[k]);
+  if (!slAdjustable && tpAdjustable.length === 0) {
+    return { ok: true, changed: false, reason: 'all_locked_or_hit', skippedLocked };
+  }
+
+  // 按最新指标锚定原入场价重算 (无 ATR 数据时跳过)
+  let lv;
+  try { lv = computeManualFallbackLevels(direction, entry, false, { hvRoc: opts.hvRoc }); }
+  catch (e) { return { ok: false, reason: 'no_atr_data', hint: e.message }; }
+
+  // hardSlCap 与开仓路径一致
+  const cfg = config.get();
+  let freshSl = lv.sl;
+  if (cfg.riskGuardEnabled !== false && cfg.hardSlCap?.enabled
+      && Number.isFinite(cfg.hardSlCap.maxDistancePct)) {
+    freshSl = applyHardSlCap(direction, entry, freshSl, cfg.hardSlCap.maxDistancePct).sl;
+  }
+  const fresh = { tp1: lv.tp1, tp2: lv.tp2, tp3: lv.tp3, sl: freshSl };
+
+  // 逐价位取变化足够大的 (相对入场价 ≥ minChangePct%; 阈值 0 时任何非零变化都算)
+  const minPct = Number.isFinite(opts.minChangePct) && opts.minChangePct >= 0
+    ? opts.minChangePct
+    : DYNAMIC_LEVELS.minChangePct;
+  const bigEnough = (cur, next) => {
+    if (!Number.isFinite(Number(next))) return false;
+    if (!Number.isFinite(Number(cur))) return true;
+    const diffPct = Math.abs(Number(next) - Number(cur)) / entry * 100;
+    return diffPct > 0 && diffPct >= minPct;
+  };
+  const changes = {};
+  for (const k of tpAdjustable) {
+    if (bigEnough(p[k], fresh[k])) changes[k] = fresh[k];
+  }
+  if (slAdjustable && bigEnough(p.currentStopLoss, fresh.sl)) changes.sl = fresh.sl;
+  if (Object.keys(changes).length === 0) {
+    return { ok: true, changed: false, reason: 'no_meaningful_change', skippedLocked };
+  }
+
+  // 全量校验 (含未动的现值), 不合法整组放弃
+  const merged = {
+    tp1: changes.tp1 != null ? changes.tp1 : Number(p.tp1),
+    tp2: changes.tp2 != null ? changes.tp2 : Number(p.tp2),
+    tp3: changes.tp3 != null ? changes.tp3 : Number(p.tp3),
+    sl:  changes.sl  != null ? changes.sl  : Number(p.currentStopLoss),
+  };
+  const v = validateAdjustActiveLevels(direction, entry, merged, tpHit);
+  if (!v.ok) {
+    return { ok: false, reason: 'invalid_levels:' + v.reason, hint: v.hint };
+  }
+
+  const r = state.updateActiveLevels(direction, changes, { markManual: false });
+  if (!r.ok || !r.applied) return { ok: false, reason: r.error || 'apply_failed' };
+
+  return { ok: true, changed: true, entry, r, changes, flags, tpHit, hvRoc: lv.hvRoc || null };
+}
+
+/** 通知/监控通用: 把一次调整结果格式化推出去 */
+function notifyLevelsRecalc(direction, out, { title, sourceComment, extraLine }) {
+  const { entry, r, changes, flags, tpHit, hvRoc } = out;
+  const fmtChange = (k, prevV, nextV) =>
+    changes[k] != null ? `${k.toUpperCase()}: ${prevV} → ${nextV}` : null;
+  exec.notify({
+    type: 'open_ok',
+    title,
+    lines: [
+      `symbol: ${config.get().symbol}`,
+      `方向: ${direction} (active) · 入场价: ${entry}`,
+      fmtChange('tp1', r.prev.tp1, r.next.tp1),
+      fmtChange('tp2', r.prev.tp2, r.next.tp2),
+      fmtChange('tp3', r.prev.tp3, r.next.tp3),
+      fmtChange('sl', r.prev.currentStopLoss, r.next.currentStopLoss),
+      hvRoc ? `因子: HV波动率×${hvRoc.volFactor} · ROC止盈拉伸×${hvRoc.tpStretch}` : null,
+      `锁定跳过: ${['tp1', 'tp2', 'tp3', 'sl'].filter((k) => flags[k]).join(', ') || '无'}`
+      + ` · 已触发跳过: ${['tp1', 'tp2', 'tp3'].filter((k) => tpHit[k]).join(', ') || '无'}`,
+      extraLine || null,
+    ].filter(Boolean),
+  });
+  exec.fireMonitorOpen({
+    direction,
+    entry,
+    tp1: r.next.tp1, tp2: r.next.tp2, tp3: r.next.tp3,
+    sl: r.next.currentStopLoss,
+    comment: `${sourceComment} · entry=${entry}`,
+  });
+}
+
+async function dynamicLevelsTickDirection(direction) {
+  const out = computeDynamicLevelChanges(direction);
+  if (!out.ok) {
+    if (String(out.reason).startsWith('invalid_levels')) {
+      console.warn(`[trade.dynamic] ${direction} 动态价位校验未通过 (${out.reason}), 本轮跳过: ${out.hint || ''}`);
+    }
+    return;
+  }
+  if (!out.changed) return;
+  console.log(
+    `[trade.dynamic] 🤖 ${direction} 动态止盈止损已调整 (ATR): `
+    + Object.keys(out.changes).map((k) => `${k}=${out.changes[k]}`).join(' ')
+  );
+  notifyLevelsRecalc(direction, out, {
+    title: `🤖 ${direction.toUpperCase()} 动态止盈止损已调整 (跟随 ATR)`,
+    sourceComment: '动态止盈止损调整 · dynamic_atr',
+    extraLine: '说明: 手动编辑过的价位不会被动态调整; 其余价位按最新指标锚定入场价重算',
+  });
+}
+
+// ============ POST /recalc-levels: 手动一键更新持仓 TP/SL (ATR+HV+ROC) ============
+//
+// body: { direction: 'long'|'short' }
+//
+// 持仓卡片「🔄 更新TP/SL」按钮专用 — 每次点击只重算并应用**一次** (非持续跟随):
+//   - 强制用 ATR+HV+ROC 全量公式 (无论全局 hvRocLevels 开关是否开启)
+//   - 手动编辑过的价位 (manualLevels 锁定) 跳过不动; 已触发的 TP 跳过;
+//     TP1 触发/保本后 SL 不动 (归风控套件管)
+//   - minChangePct=0: 只要重算结果与现值不同就更新 (无防抖阈值)
+//   - hardSlCap / 全量校验与动态止盈止损同一套
+router.post('/recalc-levels', requireAdmin, (req, res) => {
+  const direction = req.body?.direction;
+  if (!['long', 'short'].includes(direction)) {
+    return res.status(400).json({ ok: false, error: 'direction must be long|short' });
+  }
+  const out = computeDynamicLevelChanges(direction, { hvRoc: true, minChangePct: 0 });
+  if (!out.ok) {
+    const status = out.reason === 'no_active_position' ? 409 : out.reason === 'no_atr_data' ? 503 : 400;
+    return res.status(status).json({ ok: false, error: out.reason, hint: out.hint });
+  }
+  if (!out.changed) {
+    return res.json({
+      ok: true, changed: false, reason: out.reason,
+      hint: out.reason === 'all_locked_or_hit'
+        ? '全部价位已手动锁定或已触发, 无可更新项'
+        : '重算结果与当前价位一致, 无需更新',
+      skippedLocked: out.skippedLocked || [],
+    });
+  }
+  console.log(
+    `[trade.recalc] 🔄 ${direction} 手动更新 TP/SL (ATR+HV+ROC): `
+    + Object.keys(out.changes).map((k) => `${k}=${out.changes[k]}`).join(' ')
+  );
+  notifyLevelsRecalc(direction, out, {
+    title: `🔄 ${direction.toUpperCase()} 持仓 TP/SL 已手动更新 (ATR+HV+ROC)`,
+    sourceComment: '手动更新止盈止损 · recalc_button',
+    extraLine: '来源: 持仓卡片「更新TP/SL」按钮 (单次重算, 不持续跟随)',
+  });
+  // ⚠️ 冲突提醒: 动态定时器开着且全局 HV/ROC 关着时, 按钮更新的 HV/ROC 价位
+  //    会在下一轮 tick 被纯 ATR 公式覆盖 — 按钮模式建议 AUTO_TRADE_DYNAMIC_LEVELS=0
+  const warning = DYNAMIC_LEVELS.enabled && !config.get().hvRocLevels
+    ? '动态止盈止损定时器仍在运行且未开启 HV/ROC 全局开关, 本次更新稍后可能被自动调整覆盖; 按钮模式建议设 AUTO_TRADE_DYNAMIC_LEVELS=0'
+    : null;
+  res.json({
+    ok: true, changed: true, entry: out.entry,
+    prev: { tp1: out.r.prev.tp1, tp2: out.r.prev.tp2, tp3: out.r.prev.tp3, sl: out.r.prev.currentStopLoss },
+    next: { tp1: out.r.next.tp1, tp2: out.r.next.tp2, tp3: out.r.next.tp3, sl: out.r.next.currentStopLoss },
+    changes: Object.keys(out.changes),
+    hvRoc: out.hvRoc,
+    skippedLocked: out.skippedLocked || ['tp1', 'tp2', 'tp3', 'sl'].filter((k) => out.flags[k]),
+    warning,
+  });
+});
+
+if (DYNAMIC_LEVELS.enabled) {
+  const _dynamicTimer = setInterval(() => {
+    dynamicLevelsTick().catch((e) => console.error('[trade.dynamic] tick 异常:', e?.message || e));
+  }, DYNAMIC_LEVELS.checkMs);
+  if (typeof _dynamicTimer.unref === 'function') _dynamicTimer.unref();
+  console.log(`[trade.dynamic] 动态止盈止损已启用: 每 ${DYNAMIC_LEVELS.checkMs / 1000}s 检查, 变化阈值 ${DYNAMIC_LEVELS.minChangePct}% (手动编辑过的价位锁定不调)`);
+} else {
+  console.log('[trade.dynamic] 动态止盈止损已通过 AUTO_TRADE_DYNAMIC_LEVELS=0 关闭');
+}
 
 // ============ POST /manual-fire: 一键触发 TP1/TP2/TP3/SL ============
 //
@@ -2322,6 +2582,28 @@ router.post('/toggle', (req, res) => {
     ],
   });
   res.json({ ok: true, enabled: updated.enabled });
+});
+
+// ============ POST /toggle-hvroc-levels: HV/ROC 增强止盈止损开关 ============
+// body: { enabled: true|false }
+// 与 /toggle 同风格 (只切一个布尔). 开启后 computeManualFallbackLevels 的 ATR 公式
+// 加入 HV 波动率缩放 + ROC 动量止盈拉伸 (详见 config.hvRocLevels 注释), 作用范围:
+// 手动开仓回退方案 / 手动追单 / MTF 自动开仓 / 动态止盈止损. 配置持久化, 重启保留.
+router.post('/toggle-hvroc-levels', (req, res) => {
+  const next = !!(req.body && req.body.enabled);
+  config.patch({ hvRocLevels: next });
+  exec.notify({
+    type: next ? 'unlock' : 'reset',
+    title: next ? '🧮 HV/ROC 增强止盈止损已开启' : '🧮 HV/ROC 增强止盈止损已关闭',
+    lines: [
+      next
+        ? '新算的 TP/SL 将加入: HV 波动率缩放风险距离 (0.8~1.3x) + ROC 动量拉伸止盈 (0.75~1.25x)'
+        : 'TP/SL 恢复纯 ATR 公式 (risk = 1.5×ATR, TP=1/2/3R)',
+      '作用范围: 手动开仓回退 / 追单 / MTF 自动开仓 / 动态止盈止损',
+      '⚠️ 实验性功能, 对胜率的影响未经回测验证, 建议自行对比',
+    ],
+  });
+  res.json({ ok: true, hvRocLevels: config.get().hvRocLevels });
 });
 
 // ============ POST /toggle-direction: 方向开关 (禁止做多 / 禁止做空) ============
@@ -2867,3 +3149,6 @@ module.exports.marketOrderImpl = marketOrderImpl;
 // 在 regime.html 内有 validateAdjustLevelsClient 同算法实现 (UX 提前拦截)
 module.exports.validateManualLevels = validateManualLevels;
 module.exports.validateAdjustActiveLevels = validateAdjustActiveLevels;
+// 动态止盈止损 (供测试直接驱动 tick)
+module.exports.dynamicLevelsTick = dynamicLevelsTick;
+module.exports.computeManualFallbackLevels = computeManualFallbackLevels;

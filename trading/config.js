@@ -29,6 +29,12 @@ const DEFAULT_CONFIG = {
   // 想恢复: POST /api/auto-trade/config { disableLong:false } 或 POST /toggle-direction.
   disableLong: false,
   disableShort: false,
+  // ⭐ HV/ROC 增强止盈止损 (默认关闭, regime 页面可开关):
+  //   开启后 ATR 价位公式加入两个有界因子 (作用于手动开仓回退/追单/动态止盈止损):
+  //     volFactor = clamp(HV / HV近120根均值, 0.8~1.3)  → 缩放风险距离 (高波动放宽 SL/TP, 低波动收紧)
+  //     tpStretch = clamp(1 + 0.25 * 方向 * (ROC/2%), 0.75~1.25) → 动量同向拉伸止盈, 逆向收缩 (SL 不受影响)
+  //   ⚠️ 对胜率的影响未经回测验证, 属实验性开关, 建议自行 A/B 对比
+  hvRocLevels: false,
   // ⭐ 价格围栏 (自动方向开关) — riskEngine 每帧 tick 评估, 自动切换 autoDisableLong/Short:
   //   long.threshold  (做多基准价): 市价 < threshold → 自动禁止做多 (跌破不追低)
   //                                  市价 ≥ threshold * (1 + hysteresisPct/100) → 自动解除

@@ -1158,6 +1158,11 @@
   <button id="manualFollowLongBtn" class="manual-btn follow long" disabled>🚀 一键追多</button>
   <button id="manualFollowShortBtn" class="manual-btn follow short" disabled>🚀 一键追空</button>
   <span id="manualActionMeta" class="ta-meta">挂单优先 Regime, 否则 0.5%~1.2% / 10%仓; 追单一律 0.5%~1.2% / 10%仓</span>
+  <label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:#c9d1d9;cursor:pointer;white-space:nowrap;"
+         title="⚗️ 实验性: 开启后 TP/SL 在纯 ATR 公式基础上加两个有界因子 — HV 波动率缩放风险距离 (0.8~1.3x, 高波动放宽 SL/TP 减少被噪音扫损, 低波动收紧), ROC 动量拉伸止盈 (0.75~1.25x, 动量同向 TP 放远让利润跑, 逆向收近落袋; SL 不受影响)。作用范围: 手动开仓回退 / 追单 / MTF 自动开仓 / 动态止盈止损。对胜率的影响未经回测验证, 建议自行 A/B 对比。后端持久化, 重启保留">
+    <input type="checkbox" id="hvRocLevelsChk" style="accent-color:#58a6ff;cursor:pointer;" />
+    🧮 HV/ROC增强TP/SL
+  </label>
   <button id="closeLongAllBtn" class="manual-btn close-all" disabled>🛑 全部止盈多单</button>
   <button id="closeShortAllBtn" class="manual-btn close-all" disabled>🛑 全部止盈空单</button>
 </div>
@@ -1674,6 +1679,9 @@
       // 方向开关从 /status 同步: 影响 updateManualActions 对"挂多/追多/挂空/追空"按钮的禁用判断
       autoTrade.disableLong = !!j.disableLong;
       autoTrade.disableShort = !!j.disableShort;
+      // HV/ROC 增强止盈止损开关同步 (后端持久化, 多端一致)
+      const hvRocChk = document.getElementById('hvRocLevelsChk');
+      if (hvRocChk && !hvRocChk._busy) hvRocChk.checked = !!j.hvRocLevels;
       renderPositions(lastPositionsSnapshot, lastPriceForCard);
       updateManualActions(lastPositionsSnapshot, autoTrade.enabled);
 
@@ -2576,6 +2584,8 @@
         </div>
         ${fireBar}
         <div style="margin-top:8px;text-align:right;">
+          <button class="pos-edit-toggle" onclick="recalcLevels('${dir}')"
+                  title="按最新指标 (ATR+HV+ROC) 重算并更新一次止盈止损。手动编辑过的价位保持不变; 已触发的 TP 与保本后的 SL 不会调整。每次点击只更新一次, 不会持续跟随">🔄 更新TP/SL</button>
           <button class="pos-edit-toggle ${editOpen ? 'active' : ''}" onclick="togglePosEdit('${dir}')">${editOpen ? '▴ 收起编辑' : '✏️ 编辑止盈止损'}</button>
         </div>
         ${editOpen ? renderPosEditPanel(dir, 'active', { entry: p.entryPrice, tp1: p.tp1, tp2: p.tp2, tp3: p.tp3, sl: p.currentStopLoss, tpHit }) : ''}
@@ -2589,6 +2599,35 @@
 
   // 各方向编辑面板的展开状态; renderPositions 每帧重画都读这个 map
   const posEditOpen = { long: false, short: false };
+
+  // 持仓卡「🔄 更新TP/SL」: 按 ATR+HV+ROC 重算并应用一次 (手动锁定/已触发的价位后端自动跳过)
+  window.recalcLevels = async function recalcLevels(direction) {
+    const dirZh = direction === 'long' ? '多头' : '空头';
+    if (!confirm(
+      `确认按最新指标重算${dirZh}止盈止损?\n` +
+      '· 公式: ATR 基础价位 × HV 波动率缩放 (0.8~1.3x) × ROC 动量止盈拉伸 (0.75~1.25x)\n' +
+      '· 手动编辑过的价位保持不变, 只更新未编辑过的\n' +
+      '· 已触发的 TP 与保本后的 SL 不会调整\n' +
+      '· 每次点击只更新一次, 不会持续跟随'
+    )) return;
+    try {
+      const j = await callAdminApi('/api/auto-trade/recalc-levels', { direction });
+      if (!j.changed) {
+        showToast('warn', `ℹ️ ${dirZh}止盈止损无需更新`, j.hint || '重算结果与当前价位一致', 6000);
+      } else {
+        const label = { tp1: 'TP1', tp2: 'TP2', tp3: 'TP3', sl: 'SL' };
+        const lines = (j.changes || [])
+          .map(k => `${label[k]}: ${j.prev[k]} → ${j.next[k]}`);
+        if (j.hvRoc) lines.push(`因子: HV×${j.hvRoc.volFactor} · ROC止盈×${j.hvRoc.tpStretch}`);
+        if (j.skippedLocked && j.skippedLocked.length) lines.push(`🔒 锁定跳过: ${j.skippedLocked.map(k => label[k]).join(', ')}`);
+        if (j.warning) lines.push(`⚠️ ${j.warning}`);
+        showToast('ok', `🔄 ${dirZh}止盈止损已更新 (ATR+HV+ROC)`, lines, 9000);
+      }
+      await fetchAutoTradeStatus();
+    } catch (e) {
+      showToast('err', `❌ ${dirZh}止盈止损更新失败`, e.message, 8000);
+    }
+  };
 
   window.togglePosEdit = function togglePosEdit(direction) {
     posEditOpen[direction] = !posEditOpen[direction];
@@ -3493,6 +3532,33 @@
     }
   }
 
+  async function toggleHvRocLevels() {
+    const chk = document.getElementById('hvRocLevelsChk');
+    if (!chk) return;
+    const want = chk.checked;
+    if (want && !confirm(
+      '确认开启 HV/ROC 增强止盈止损 (实验性)?\n' +
+      '· 在纯 ATR 公式基础上加两个有界因子:\n' +
+      '  - HV 波动率缩放风险距离 (0.8~1.3x): 高波动放宽 SL/TP, 低波动收紧\n' +
+      '  - ROC 动量拉伸止盈 (0.75~1.25x): 动量同向 TP 放远, 逆向收近 (SL 不受影响)\n' +
+      '· 作用范围: 手动开仓回退 / 追单 / MTF 自动开仓 / 动态止盈止损\n' +
+      '· ⚠️ 对胜率的影响未经回测验证, 建议自行 A/B 对比\n' +
+      '· 后端持久化, 重启保留; 已持仓的手动锁定价位不受影响'
+    )) { chk.checked = false; return; }
+    chk._busy = true;
+    try {
+      await callAdminApi('/api/auto-trade/toggle-hvroc-levels', { enabled: want });
+      showToast('ok',
+        want ? '🧮 HV/ROC 增强止盈止损已开启' : '🧮 HV/ROC 增强止盈止损已关闭',
+        want ? '新算的 TP/SL 将加入 HV 波动率缩放 + ROC 动量拉伸因子' : '恢复纯 ATR 公式 (risk=1.5×ATR, TP=1/2/3R)');
+    } catch (e) {
+      chk.checked = !want;
+      showToast('err', '❌ 切换失败', e.message);
+    } finally {
+      chk._busy = false;
+    }
+  }
+
   async function closeDirectionPositions(direction) {
     const isLong = direction === 'long';
     const dirZh = isLong ? '多单' : '空单';
@@ -4229,6 +4295,7 @@
   if (followShortBtn) followShortBtn.addEventListener('click', () => manualFollow('short'));
   document.getElementById('closeLongAllBtn').addEventListener('click', () => closeDirectionPositions('long'));
   document.getElementById('closeShortAllBtn').addEventListener('click', () => closeDirectionPositions('short'));
+  document.getElementById('hvRocLevelsChk').addEventListener('change', () => toggleHvRocLevels());
 
   // 价格触发器: 添加 / 全部取消 按钮 + 单条取消事件委托
   ['long', 'short'].forEach((dir) => {

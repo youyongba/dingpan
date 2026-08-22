@@ -1741,9 +1741,18 @@ function getLatestPlan() {
   let latest = null;
   if (cache.indicators && cache.indicators.atr) {
     const lastIdx = cache.indicators.atr.length - 1;
+    // hvRef: HV 近 120 根均值, 供 trading 侧「HV/ROC 增强止盈止损」计算相对波动率
+    const hvValid = (cache.indicators.hv || []).filter((v) => v != null && Number.isFinite(v));
+    const recentHv = hvValid.slice(-120);
+    const hvRef = recentHv.length
+      ? recentHv.reduce((s, v) => s + v, 0) / recentHv.length
+      : null;
     latest = {
       atr: cache.indicators.atr[lastIdx],
-      adx: cache.indicators.adx[lastIdx]
+      adx: cache.indicators.adx[lastIdx],
+      hv: cache.indicators.hv ? cache.indicators.hv[lastIdx] : null,
+      hvRef,
+      roc: cache.indicators.roc ? cache.indicators.roc[lastIdx] : null,
     };
   }
   return {

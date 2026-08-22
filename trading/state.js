@@ -127,6 +127,9 @@ const EMPTY_POSITION = () => ({
   // 触发标记
   tpHit: { tp1: false, tp2: false, tp3: false },
   slHit: false,
+  // ⭐ 手动编辑标记: 用户通过 adjust-levels 改过的价位永久锁定,
+  //    动态止盈止损 (dynamicLevelsTick, 按 regime ATR 实时重算) 只调整未锁定的价位
+  manualLevels: { tp1: false, tp2: false, tp3: false, sl: false },
   closedAt: null,
   // 用于"价格回到入场价"判定：仅在 TP1 触发后开启
   protectionArmed: false,
@@ -171,6 +174,8 @@ function load() {
   // 兼容旧字段
   ['long', 'short'].forEach(k => {
     state[k].tpHit = state[k].tpHit || { tp1: false, tp2: false, tp3: false };
+    // 旧 disk state 无 manualLevels → 视为全部未手动编辑 (允许动态调整)
+    state[k].manualLevels = state[k].manualLevels || { tp1: false, tp2: false, tp3: false, sl: false };
   });
   console.log(
     `[trade.state] 已加载: long.locked=${state.long.locked}, short.locked=${state.short.locked}` +
@@ -299,6 +304,8 @@ function markPendingFilled(direction, fillPrice) {
     tp1: plan.tp1, tp2: plan.tp2, tp3: plan.tp3,
     initialStopLoss: plan.sl,
     currentStopLoss: plan.sl,
+    // pending 阶段手动改过的价位, 转 active 后继续锁定 (不被动态止盈止损调整)
+    manualLevels: { tp1: false, tp2: false, tp3: false, sl: false, ...(plan.manualLevels || {}) },
     raw: plan.raw,
     priceSource: plan.source,
     planEntry: plan.entry,
@@ -413,16 +420,22 @@ function manualReset(direction) {
  * @param {{tp1?:number, tp2?:number, tp3?:number, sl?:number}} levels
  * @returns {{ok:true, prev:object, next:object} | {ok:false, error:string}}
  */
-function updateActiveLevels(direction, levels) {
+function updateActiveLevels(direction, levels, opts = {}) {
   if (!state) load();
   const p = state[direction];
   if (!p || !p.active) return { ok: false, error: 'no_active_position' };
+
+  // markManual=true (默认, 手动编辑入口): 改过的价位打上锁定标记
+  // markManual=false (动态止盈止损): 已锁定的价位跳过不改
+  const markManual = opts.markManual !== false;
+  const flags = { tp1: false, tp2: false, tp3: false, sl: false, ...(p.manualLevels || {}) };
 
   const next = { ...p };
   const prevSnapshot = { tp1: p.tp1, tp2: p.tp2, tp3: p.tp3,
     initialStopLoss: p.initialStopLoss, currentStopLoss: p.currentStopLoss };
   const tpHit = p.tpHit || { tp1: false, tp2: false, tp3: false };
   const skipped = [];
+  let applied = 0;
 
   ['tp1', 'tp2', 'tp3'].forEach((k) => {
     if (levels[k] == null) return;
@@ -435,21 +448,32 @@ function updateActiveLevels(direction, levels) {
       skipped.push(`${k}_already_hit`);
       return;
     }
+    if (!markManual && flags[k]) {
+      skipped.push(`${k}_manual_locked`);
+      return;
+    }
     next[k] = v;
+    applied += 1;
+    if (markManual) flags[k] = true;
   });
 
   if (levels.sl != null) {
     const v = Number(levels.sl);
-    if (Number.isFinite(v) && v > 0) {
-      next.currentStopLoss = v;
-    } else {
+    if (!Number.isFinite(v) || v <= 0) {
       skipped.push('sl_invalid');
+    } else if (!markManual && flags.sl) {
+      skipped.push('sl_manual_locked');
+    } else {
+      next.currentStopLoss = v;
+      applied += 1;
+      if (markManual) flags.sl = true;
     }
   }
 
+  next.manualLevels = flags;
   state[direction] = next;
   save();
-  return { ok: true, prev: prevSnapshot, next, skipped };
+  return { ok: true, prev: prevSnapshot, next, skipped, applied };
 }
 
 /**
@@ -472,6 +496,8 @@ function updatePendingLevels(direction, levels) {
   const plan = { ...p.pendingPlan };
   const prev = { entry: plan.entry, tp1: plan.tp1, tp2: plan.tp2, tp3: plan.tp3, sl: plan.sl };
   const skipped = [];
+  // 手动改过的 TP/SL 打锁定标记, fill 转 active 后动态止盈止损不再调整这些价位
+  const flags = { tp1: false, tp2: false, tp3: false, sl: false, ...(plan.manualLevels || {}) };
 
   ['entry', 'tp1', 'tp2', 'tp3', 'sl'].forEach((k) => {
     if (levels[k] == null) return;
@@ -481,8 +507,10 @@ function updatePendingLevels(direction, levels) {
       return;
     }
     plan[k] = v;
+    if (k !== 'entry') flags[k] = true;
   });
 
+  plan.manualLevels = flags;
   state[direction] = { ...p, pendingPlan: plan };
   save();
   return { ok: true, prev, next: plan, skipped };
