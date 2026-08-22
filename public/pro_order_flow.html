@@ -3,152 +3,106 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PRO ORDER FLOW</title>
+    <title>深度订单流专业版 (Pro Order Flow System)</title>
     <style>
         :root {
-            --bg-color: #0b0e11;
-            --panel-bg: #111316;
-            --border-color: #2b3139;
-            --text-main: #EAECEF;
-            --text-muted: #848E9C;
-            --up-color: #0ecb81;
-            --up-bg: rgba(14, 203, 129, 0.15);
-            --down-color: #f6465d;
-            --down-bg: rgba(246, 70, 93, 0.15);
-            --poc-color: #fcd535;
-            --poc-bg: rgba(252, 213, 53, 0.2);
-            --font-mono: 'JetBrains Mono', 'Consolas', monospace;
-            --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            --bg-dark: #0b0e14;
+            --bg-panel: #131722;
+            --bg-hover: #2a2e39;
+            --text-main: #d1d4dc;
+            --text-muted: #787b86;
+            --border-color: #2a2e39;
+            
+            /* 交易颜色 */
+            --buy-color: #26a69a;
+            --buy-bg: rgba(38, 166, 154, 0.15);
+            --sell-color: #ef5350;
+            --sell-bg: rgba(239, 83, 80, 0.15);
+            
+            /* 特殊高亮 */
+            --poc-color: #ffca28;
+            --poc-bg: rgba(255, 202, 40, 0.2);
+            --imbalance-color: #2962ff;
+            --large-order: #ab47bc;
+            
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 12px;
         }
 
         * {
             box-sizing: border-box;
             margin: 0;
             padding: 0;
+            user-select: none;
         }
 
         body {
-            background-color: var(--bg-color);
+            background-color: var(--bg-dark);
             color: var(--text-main);
-            font-family: var(--font-sans);
-            font-size: 12px;
             height: 100vh;
             display: flex;
             flex-direction: column;
             overflow: hidden;
-            /* 禁用圆角和花哨渐变，追求严谨专业 */
         }
 
-        /* 顶部导航栏 */
-        header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
+        /* 顶部工具栏 */
+        .toolbar {
             height: 40px;
-            padding: 0 16px;
+            background-color: var(--bg-panel);
             border-bottom: 1px solid var(--border-color);
-            background-color: var(--panel-bg);
-        }
-
-        .header-left {
             display: flex;
             align-items: center;
-            gap: 16px;
+            padding: 0 15px;
+            gap: 15px;
         }
 
-        .logo {
+        .title {
             font-size: 14px;
             font-weight: bold;
-            letter-spacing: 1px;
             color: #fff;
+            margin-right: 20px;
         }
 
-        .timeframes {
+        .btn-group {
             display: flex;
-            gap: 4px;
+            gap: 5px;
         }
 
-        .timeframe-btn {
+        .btn {
             background: transparent;
-            border: 1px solid transparent;
-            color: var(--text-muted);
-            padding: 4px 8px;
-            cursor: pointer;
-            font-family: var(--font-sans);
-            font-size: 12px;
-            transition: all 0.2s;
-        }
-
-        .timeframe-btn:hover {
+            border: 1px solid var(--border-color);
             color: var(--text-main);
+            padding: 4px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: inherit;
         }
 
-        .timeframe-btn.active {
-            background: #2b3139;
-            color: #fff;
-            border-color: #474d57;
-        }
+        .btn:hover { background-color: var(--bg-hover); }
+        .btn.active { background-color: var(--bg-hover); border-color: var(--buy-color); color: #fff; }
 
-        .toggles {
+        .status-indicator {
+            margin-left: auto;
             display: flex;
+            align-items: center;
             gap: 8px;
         }
 
-        .toggle-btn {
-            background: #1e2329;
-            border: 1px solid var(--border-color);
-            color: var(--text-main);
-            padding: 4px 12px;
-            cursor: pointer;
-            font-size: 12px;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        
-        .toggle-btn.active {
-            background: #2b3139;
-        }
-
-        .header-right {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            color: var(--poc-color);
-            font-size: 12px;
-        }
-
-        .status-dot {
-            width: 8px;
-            height: 8px;
-            background-color: var(--poc-color);
-            border-radius: 50%; /* 仅指示灯保留圆角 */
-        }
-
-        /* 副导航栏 */
-        .sub-header {
-            display: flex;
-            align-items: center;
-            height: 30px;
-            padding: 0 16px;
-            border-bottom: 1px solid var(--border-color);
-            font-family: var(--font-mono);
-            color: var(--text-muted);
-            gap: 16px;
-        }
-
-        .symbol {
-            color: var(--text-main);
-            font-weight: bold;
+        .dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background-color: var(--buy-color);
+            box-shadow: 0 0 5px var(--buy-color);
         }
 
         /* 主体布局 */
         .main-container {
             display: flex;
             flex: 1;
-            overflow: hidden;
+            height: calc(100vh - 40px);
         }
 
+        /* 左侧主图区 (Footprint + Delta) */
         .left-panel {
             flex: 1;
             display: flex;
@@ -157,773 +111,1175 @@
             position: relative;
         }
 
+        .chart-header {
+            height: 30px;
+            display: flex;
+            align-items: center;
+            padding: 0 10px;
+            border-bottom: 1px solid var(--border-color);
+            color: var(--text-muted);
+        }
+
+        .canvas-container {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+            cursor: crosshair;
+        }
+
+        canvas {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+        }
+
+        /* 底部指标区 */
+        .indicator-panel {
+            height: 150px;
+            border-top: 1px solid var(--border-color);
+            position: relative;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .indicator-header {
+            height: 20px;
+            padding: 0 10px;
+            font-size: 11px;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            background-color: rgba(0,0,0,0.2);
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+
+        .delta-canvas-wrapper {
+            flex: 1;
+            position: relative;
+        }
+
+        /* 右侧面板 (DOM + VP + 大单) */
         .right-panel {
             width: 320px;
             display: flex;
             flex-direction: column;
-            background-color: var(--panel-bg);
-        }
-
-        /* 足迹图区域 */
-        .footprint-area {
-            flex: 1;
-            position: relative;
-            overflow: hidden;
-            background: #0b0e11;
-        }
-        
-        /* 足迹图网格和刻度 */
-        .y-axis {
-            position: absolute;
-            right: 0;
-            top: 0;
-            bottom: 0;
-            width: 60px;
+            background-color: var(--bg-panel);
             border-left: 1px solid var(--border-color);
-            background: var(--panel-bg);
+        }
+
+        .panel-section {
+            /* 移除默认的 flex: 1，由内联样式或具体类来控制 */
             display: flex;
             flex-direction: column;
-            justify-content: space-between;
-            font-family: var(--font-mono);
-            color: var(--text-muted);
-            text-align: right;
-            padding-right: 8px;
-            z-index: 10;
-        }
-
-        .chart-content {
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 60px;
-            bottom: 0;
-            display: flex;
-            align-items: flex-end;
-            padding: 20px 40px;
-            gap: 30px;
-            overflow-x: auto;
-        }
-
-        /* 单个足迹 K 线 */
-        .fp-candle {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            position: relative;
-        }
-
-        .fp-wick {
-            width: 1px;
-            background: #474d57;
-            position: absolute;
-            top: -20px;
-            bottom: 20px;
-            z-index: 0;
-        }
-
-        .fp-body {
-            display: flex;
-            flex-direction: column;
-            border: 1px solid;
-            z-index: 1;
-            background: var(--bg-color);
-        }
-        
-        .fp-body.up { border-color: var(--up-color); }
-        .fp-body.down { border-color: var(--down-color); }
-
-        .fp-row {
-            display: flex;
-            font-family: var(--font-mono);
-            font-size: 10px;
-            border-bottom: 1px solid rgba(71, 77, 87, 0.3);
-            height: 18px;
-            line-height: 18px;
-        }
-        .fp-row:last-child { border-bottom: none; }
-
-        .fp-cell {
-            padding: 0 4px;
-            min-width: 32px;
-            text-align: right;
-        }
-        
-        .fp-cell.bid { 
-            border-right: 1px solid rgba(71, 77, 87, 0.5); 
-            color: var(--down-color);
-        }
-        .fp-cell.ask { 
-            color: var(--up-color);
-        }
-
-        /* 强弱背景色 */
-        .bg-up-strong { background-color: rgba(14, 203, 129, 0.3); }
-        .bg-up-light { background-color: rgba(14, 203, 129, 0.1); }
-        .bg-down-strong { background-color: rgba(246, 70, 93, 0.3); }
-        .bg-down-light { background-color: rgba(246, 70, 93, 0.1); }
-        
-        .poc-row {
-            border: 1px solid var(--poc-color) !important;
-            background-color: var(--poc-bg);
-            color: var(--poc-color) !important;
-            font-weight: bold;
-        }
-        
-        .poc-row .fp-cell { color: var(--poc-color); }
-
-        .fp-delta {
-            margin-top: 4px;
-            font-family: var(--font-mono);
-            font-size: 11px;
-        }
-        .delta-up { color: var(--up-color); }
-        .delta-down { color: var(--down-color); }
-
-        /* 底部指标区域 */
-        .bottom-chart {
-            height: 160px;
-            border-top: 1px solid var(--border-color);
-            background: var(--panel-bg);
-            position: relative;
-        }
-
-        .chart-title {
-            position: absolute;
-            top: 8px;
-            left: 12px;
-            color: var(--text-muted);
-            font-size: 11px;
-            z-index: 10;
-        }
-
-        /* 右侧面板通用 */
-        .right-section {
-            flex: 1;
             border-bottom: 1px solid var(--border-color);
-            display: flex;
-            flex-direction: column;
-            overflow: hidden;
         }
-        .right-section:last-child {
-            border-bottom: none;
-        }
+        .panel-section:last-child { border-bottom: none; }
 
         .section-header {
-            padding: 6px 12px;
-            background: #1e2329;
-            border-bottom: 1px solid var(--border-color);
+            padding: 5px 10px;
+            background-color: var(--bg-hover);
+            font-weight: bold;
+            color: #fff;
             display: flex;
             justify-content: space-between;
-            font-size: 11px;
-            color: var(--text-muted);
         }
 
-        /* DOM 深度 */
-        .dom-table, .tape-table {
-            width: 100%;
-            border-collapse: collapse;
-            font-family: var(--font-mono);
-            font-size: 11px;
-        }
-
-        .dom-table th, .tape-table th {
-            text-align: right;
-            padding: 4px 12px;
-            color: var(--text-muted);
-            font-weight: normal;
-        }
-        
-        .dom-table td, .tape-table td {
-            padding: 2px 12px;
-            text-align: right;
-            position: relative;
-        }
-
-        .dom-price { color: var(--down-color); } /* 卖盘价格 */
-        .dom-price.buy { color: var(--up-color); } /* 买盘价格 */
-        
-        .dom-vol-bg {
-            position: absolute;
-            right: 0;
-            top: 1px;
-            bottom: 1px;
-            background: rgba(246, 70, 93, 0.15);
-            z-index: 0;
-        }
-        .dom-vol-bg.buy { background: rgba(14, 203, 129, 0.15); }
-        
-        .dom-val { position: relative; z-index: 1; }
-
-        .current-price-banner {
-            background: var(--poc-color);
-            color: #000;
-            text-align: center;
-            font-weight: bold;
-            padding: 2px 0;
-            font-family: var(--font-mono);
-            margin: 4px 0;
-        }
-
-        /* Volume Profile */
-        .vp-container {
+        /* DOM 深度样式 */
+        .dom-container {
             flex: 1;
-            padding: 8px 12px;
+            overflow: hidden;
             display: flex;
             flex-direction: column;
-            justify-content: center;
-            gap: 2px;
         }
-
-        .vp-row {
+        
+        .dom-row {
             display: flex;
-            height: 10px;
-            align-items: center;
-        }
-
-        .vp-bar-sell {
-            height: 100%;
-            background: var(--down-color);
-            opacity: 0.7;
+            justify-content: space-between;
+            padding: 2px 10px;
+            position: relative;
         }
         
-        .vp-bar-buy {
-            height: 100%;
-            background: var(--up-color);
-            opacity: 0.7;
-        }
-        
-        .vp-poc-line {
-            border-top: 1px dashed var(--poc-color);
-            width: 100%;
-            margin: 2px 0;
-        }
-
-        /* Smart Tape */
-        .tape-table {
-            display: block;
-            height: 100%;
-            overflow-y: auto;
-        }
-        .tape-table tbody {
-            display: table;
-            width: 100%;
-        }
-        .tape-time { color: var(--text-muted); text-align: left !important; }
-        .tape-price.up { color: var(--up-color); }
-        .tape-price.down { color: var(--down-color); }
-        .tape-size { color: #b7bdc6; }
-        .tape-size.large { color: #c484f3; font-weight: bold; }
-
-        /* 水平基准线 */
-        .hline {
+        .dom-row::before {
+            content: '';
             position: absolute;
-            left: 0;
-            right: 0;
-            border-top: 1px dashed #474d57;
+            top: 0; bottom: 0; right: 0;
             z-index: 0;
         }
         
-        .hline-price {
-            position: absolute;
-            right: 0;
-            transform: translateY(-50%);
-            background: #2b3139;
-            padding: 2px 4px;
-            font-family: var(--font-mono);
-            font-size: 10px;
-            border: 1px solid #474d57;
+        .dom-sell::before { background-color: var(--sell-bg); }
+        .dom-buy::before { background-color: var(--buy-bg); }
+
+        .dom-cell { z-index: 1; text-align: right; flex: 1; }
+        .dom-cell.price { text-align: left; font-weight: bold; }
+        .dom-sell .price { color: var(--sell-color); }
+        .dom-buy .price { color: var(--buy-color); }
+        
+        .dom-spread {
+            text-align: center;
+            padding: 4px;
+            color: var(--text-muted);
+            border-top: 1px solid var(--border-color);
+            border-bottom: 1px solid var(--border-color);
+            background-color: var(--bg-dark);
         }
 
-        /* 画布 */
-        canvas {
-            display: block;
-            width: 100%;
-            height: 100%;
+        /* 大单列表样式 */
+        .tape-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 5px 0;
         }
+        .tape-row {
+            display: flex;
+            padding: 3px 10px;
+            gap: 10px;
+        }
+        .tape-time { color: var(--text-muted); width: 60px; }
+        .tape-price { flex: 1; font-weight: bold; }
+        .tape-size { width: 60px; text-align: right; }
+        .tape-buy { color: var(--buy-color); }
+        .tape-sell { color: var(--sell-color); }
+        .tape-large { background-color: rgba(171, 71, 188, 0.2); }
+
+        /* 滚动条美化 */
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #434651; border-radius: 2px; }
+
+        /* 悬浮提示框 (Tooltip) */
+        #tooltip {
+            position: absolute;
+            background: rgba(19, 23, 34, 0.95);
+            border: 1px solid var(--border-color);
+            padding: 10px;
+            border-radius: 4px;
+            pointer-events: none;
+            display: none;
+            z-index: 100;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            white-space: pre;
+            line-height: 1.5;
+        }
+
     </style>
 </head>
 <body>
 
-    <!-- 顶部导航 -->
-    <header>
-        <div class="header-left">
-            <div class="logo">PRO ORDER FLOW</div>
-            <div class="timeframes">
-                <button class="timeframe-btn">1m</button>
-                <button class="timeframe-btn active">5m</button>
-                <button class="timeframe-btn">15m</button>
-                <button class="timeframe-btn">1h</button>
-                <button class="timeframe-btn">4h</button>
-                <button class="timeframe-btn">1D</button>
-            </div>
-            <div class="toggles">
-                <button class="toggle-btn"><span style="display:inline-block;width:8px;height:8px;background:#848E9C;"></span> 实时</button>
-                <button class="toggle-btn active">▶ 回放</button>
-            </div>
+    <div class="toolbar">
+        <div class="title">PRO ORDER FLOW</div>
+        
+        <div class="btn-group">
+            <button class="btn" data-tf="1">1m</button>
+            <button class="btn active" data-tf="5">5m</button>
+            <button class="btn" data-tf="15">15m</button>
+            <button class="btn" data-tf="60">1h</button>
+            <button class="btn" data-tf="240">4h</button>
+            <button class="btn" data-tf="1440">1D</button>
         </div>
-        <div class="header-right">
-            <div class="status-dot"></div>
-            <span>回放/浏览模式</span>
-        </div>
-    </header>
 
-    <!-- 副导航 -->
-    <div class="sub-header">
-        <span class="symbol">BTCUSDT.P</span>
-        <span>|</span>
-        <span>Footprint (Bid x Ask)</span>
-        <span>|</span>
-        <span>Tick Size: 10.0</span>
+        <div class="btn-group" style="margin-left: 20px;">
+            <button class="btn active" id="btn-play">■ 实时</button>
+            <button class="btn" id="btn-pause">▶ 回放</button>
+        </div>
+
+        <div class="status-indicator">
+            <div class="dot" id="conn-dot"></div>
+            <span id="conn-status">真实数据流连线中...</span>
+        </div>
     </div>
 
-    <!-- 主体区域 -->
     <div class="main-container">
-        
         <!-- 左侧图表区 -->
         <div class="left-panel">
+            <div class="chart-header">
+                BTCUSDT.P &nbsp;&nbsp;|&nbsp;&nbsp; Footprint (Bid x Ask) &nbsp;&nbsp;|&nbsp;&nbsp; Tick Size: 10.0
+            </div>
             
-            <!-- 足迹图 -->
-            <div class="footprint-area" id="footprintArea">
-                <div class="y-axis">
-                    <span>64000.0</span>
-                    <span>63900.0</span>
-                    <span>63800.0</span>
-                </div>
-                
-                <!-- 背景刻度线 -->
-                <div class="hline" style="top: 30%;"></div>
-                <div class="hline" style="top: 60%;"></div>
-                
-                <div class="chart-content" id="chartContent">
-                    <!-- JS动态渲染K线 -->
-                </div>
+            <div class="canvas-container" id="fp-container">
+                <!-- 采用多层 Canvas 优化性能：底层画网格，中层画 Footprint，上层画交互光标 -->
+                <canvas id="fp-grid-canvas"></canvas>
+                <canvas id="fp-main-canvas"></canvas>
+                <canvas id="fp-ui-canvas"></canvas>
+                <div id="tooltip"></div>
             </div>
 
-            <!-- 底部 Delta & CVD -->
-            <div class="bottom-chart">
-                <div class="chart-title">Bar Delta (买卖差) & CVD</div>
-                <canvas id="bottomCanvas"></canvas>
+            <!-- 底部指标区：Delta 柱状图 -->
+            <div class="indicator-panel" id="delta-container">
+                <div class="indicator-header">Bar Delta (买卖差) & CVD</div>
+                <div class="delta-canvas-wrapper">
+                    <canvas id="delta-canvas"></canvas>
+                </div>
             </div>
         </div>
 
-        <!-- 右侧数据面板 -->
+        <!-- 右侧数据区 -->
         <div class="right-panel">
-            
-            <!-- DOM -->
-            <div class="right-section">
+            <!-- 盘口深度 DOM -->
+            <div class="panel-section" style="flex: 1.5; min-height: 0;">
                 <div class="section-header">
                     <span>DOM (市场深度)</span>
-                    <span>Q / P</span>
+                    <span style="color:var(--text-muted)">Q / P</span>
                 </div>
-                <table class="dom-table" id="domTable">
-                    <!-- JS渲染 -->
-                </table>
+                <div class="dom-container" id="dom-list">
+                    <!-- DOM 内容由 JS 动态生成 -->
+                </div>
             </div>
 
             <!-- Volume Profile -->
-            <div class="right-section">
+            <div class="panel-section" style="flex: 0 0 250px; min-height: 250px; max-height: 250px;">
                 <div class="section-header">
                     <span>Volume Profile & Buy/Sell Walls</span>
-                    <span>VA 70%</span>
+                    <span style="color:var(--text-muted)">VA 70%</span>
                 </div>
-                <div class="vp-container" id="vpContainer">
-                    <!-- JS渲染 -->
+                <div class="canvas-container" style="flex: 1; padding: 5px;" id="vp-container">
+                    <canvas id="vp-canvas"></canvas>
                 </div>
             </div>
 
-            <!-- Smart Tape -->
-            <div class="right-section">
+            <!-- 实时大单 Time & Sales -->
+            <div class="panel-section" style="flex: 1; min-height: 0;">
                 <div class="section-header">
                     <span>大单追踪 (Smart Tape)</span>
-                    <span style="color:#c484f3;">> 50.0</span>
+                    <span style="color:var(--large-order)">> 1.0</span>
                 </div>
-                <table class="tape-table">
-                    <tbody id="tapeTable">
-                        <!-- JS渲染 -->
-                    </tbody>
-                </table>
+                <div class="tape-container" id="tape-list">
+                    <!-- Tape 内容由 JS 动态生成 -->
+                </div>
             </div>
-            
         </div>
     </div>
 
-    <script>
-        const SYMBOL = 'btcusdt';
-        const WS_URL = `wss://fstream.binance.com/stream?streams=${SYMBOL}@depth20@100ms/${SYMBOL}@aggTrade`;
-        
-        let currentPrice = 0;
-        let orderBook = { bids: [], asks: [] };
-        let smartTape = [];
-        
-        // 实时 Volume Profile 累加器 (按价格区间 10 为单位)
-        let vpData = {};
-        const VP_BIN_SIZE = 10;
-        let maxVpVol = 0;
+<script>
+/**
+ * 核心引擎：深度订单流系统
+ * 包含：模拟数据生成、Canvas 渲染引擎、UI 交互
+ */
 
-        document.addEventListener('DOMContentLoaded', () => {
-            initBinanceWS();
-            // 初始渲染静态主图以保持视觉完整性 (注: 真实全量订单流需后端历史数据支持)
-            renderFootprint();
-            renderBottomChart();
-            
-            // 初始化顶部导航栏的切换交互
-            initNavToggles();
+// ================= 全局配置与状态 =================
+const CONFIG = {
+    tickSize: 10.0,       // 价格聚合档位 (BTC 默认 10 刀一档)
+    timeframe: 5 * 60 * 1000, // 默认 5 分钟 K 线
+    candleWidth: 80,      // K 线占据的像素宽度
+    rowHeight: 18,        // 每个价格格子的像素高度
+    imbalanceRatio: 3.0,  // 失衡比例 (买/卖 或 卖/买 > 3)
+    largeOrderThr: 1.0,   // 大单阈值 (数量)
+    domLevels: 15         // DOM 显示档数
+};
+
+const STATE = {
+    isRunning: true,
+    currentPrice: 63500.0,
+    historyTicks: [],     // 保存所有的 tick 数据
+    footprints: [],       // 聚合后的 K 线 Footprint 数据
+    globalVolumeProfile: new Map(), // 记录全局所有价格区间的买卖量，用于画最强买卖墙
+    offsetX: 0,           // 图表平移偏移量 X
+    offsetY: 0,           // 图表平移偏移量 Y
+    scaleX: 1.0,          // X 轴缩放
+    scaleY: 1.0,          // Y 轴缩放
+    hoveredCell: null     // 鼠标悬停的格子信息
+};
+
+// ================= DOM 元素获取 =================
+const canvasFPMain = document.getElementById('fp-main-canvas');
+const ctxFP = canvasFPMain.getContext('2d');
+const canvasFPUI = document.getElementById('fp-ui-canvas');
+const ctxUI = canvasFPUI.getContext('2d');
+const fpContainer = document.getElementById('fp-container');
+const tooltip = document.getElementById('tooltip');
+
+const domList = document.getElementById('dom-list');
+const tapeList = document.getElementById('tape-list');
+
+const canvasVP = document.getElementById('vp-canvas');
+const ctxVP = canvasVP.getContext('2d');
+const vpContainer = document.getElementById('vp-container');
+
+const canvasDelta = document.getElementById('delta-canvas');
+const ctxDelta = canvasDelta.getContext('2d');
+const deltaContainer = document.querySelector('.delta-canvas-wrapper');
+
+
+// 自适应 Canvas 尺寸
+function resizeCanvas() {
+    const rect = fpContainer.getBoundingClientRect();
+    canvasFPMain.width = rect.width; canvasFPMain.height = rect.height;
+    canvasFPUI.width = rect.width; canvasFPUI.height = rect.height;
+    
+    const vpRect = vpContainer.getBoundingClientRect();
+    if(vpRect.width > 0 && vpRect.height > 0) {
+        canvasVP.width = vpRect.width; canvasVP.height = vpRect.height;
+    }
+
+    const deltaRect = deltaContainer.getBoundingClientRect();
+    if(deltaRect.width > 0 && deltaRect.height > 0) {
+        canvasDelta.width = deltaRect.width; canvasDelta.height = deltaRect.height;
+    }
+
+    // 初始化居中偏移 (让最新价格在中间偏右)
+    if (STATE.offsetY === 0) {
+        STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
+        STATE.offsetX = 100; // 留出右侧价格轴空间
+    }
+    renderAll();
+}
+window.addEventListener('resize', resizeCanvas);
+
+// ================= 数据结构定义 =================
+
+// 单个价格格子 (Footprint Cell)
+class FPCell {
+    constructor(price) {
+        this.price = price;
+        this.buyVol = 0;
+        this.sellVol = 0;
+    }
+    get totalVol() { return this.buyVol + this.sellVol; }
+    get delta() { return this.buyVol - this.sellVol; }
+    // 检查是否失衡
+    get buyImbalance() { return this.buyVol > this.sellVol * CONFIG.imbalanceRatio && this.buyVol > 5; }
+    get sellImbalance() { return this.sellVol > this.buyVol * CONFIG.imbalanceRatio && this.sellVol > 5; }
+}
+
+// 单根 K 线 (Footprint Bar)
+class FPBar {
+    constructor(startTime) {
+        this.startTime = startTime;
+        this.open = STATE.currentPrice;
+        this.high = STATE.currentPrice;
+        this.low = STATE.currentPrice;
+        this.close = STATE.currentPrice;
+        this.cells = new Map(); // key: priceLevel, value: FPCell
+    }
+
+    addTick(price, qty, isBuyerMaker) {
+        this.high = Math.max(this.high, price);
+        this.low = Math.min(this.low, price);
+        this.close = price;
+
+        // 计算聚合档位
+        const level = Math.floor(price / CONFIG.tickSize) * CONFIG.tickSize;
+        if (!this.cells.has(level)) {
+            this.cells.set(level, new FPCell(level));
+        }
+        
+        const cell = this.cells.get(level);
+        if (isBuyerMaker) {
+            cell.sellVol += qty; // 主动卖出
+        } else {
+            cell.buyVol += qty;  // 主动买入
+        }
+    }
+
+    get totalDelta() {
+        let d = 0;
+        this.cells.forEach(c => d += c.delta);
+        return d;
+    }
+
+    // 获取 POC (成交量最大的格子)
+    get pocLevel() {
+        let maxV = -1;
+        let pLevel = 0;
+        this.cells.forEach((c, lvl) => {
+            if (c.totalVol > maxV) { maxV = c.totalVol; pLevel = lvl; }
         });
+        return pLevel;
+    }
+}
 
-        function initNavToggles() {
-            // 1. 时间周期切换
-            const timeframes = document.querySelectorAll('.timeframe-btn');
-            timeframes.forEach(btn => {
-                btn.addEventListener('click', (e) => {
-                    timeframes.forEach(b => b.classList.remove('active'));
-                    e.target.classList.add('active');
-                });
-            });
+// ================= 真实数据引擎 (Binance API) =================
 
-            // 2. 模式切换 (实时 / 回放)
-            const toggles = document.querySelectorAll('.toggle-btn');
-            const statusDot = document.querySelector('.status-dot');
-            const statusText = document.querySelector('.header-right span');
+let ws = null;
+let currentSymbol = 'btcusdt';
+let currentBinanceTF = '5m';
+
+function initEngine() {
+    loadHistoricalAndConnect();
+    requestAnimationFrame(renderLoop);
+}
+
+async function loadHistoricalAndConnect() {
+    document.getElementById('conn-status').textContent = '加载历史数据...';
+    document.getElementById('conn-dot').style.backgroundColor = '#ff9800';
+    
+    if (ws) {
+        ws.close();
+        ws = null;
+    }
+
+    try {
+        const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${currentSymbol.toUpperCase()}&interval=${currentBinanceTF}&limit=150`);
+        const klines = await res.json();
+        buildHistoricalFootprint(klines);
+        
+        const rect = fpContainer.getBoundingClientRect();
+        STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
+        STATE.offsetX = 100;
+        renderAll();
+        
+        connectWebSocket();
+    } catch (e) {
+        console.error(e);
+        document.getElementById('conn-status').textContent = '加载失败';
+        document.getElementById('conn-dot').style.backgroundColor = '#ef5350';
+    }
+}
+
+function buildHistoricalFootprint(klines) {
+    STATE.footprints = [];
+    STATE.globalVolumeProfile.clear();
+    
+    klines.forEach(k => {
+        const startTime = k[0];
+        const open = parseFloat(k[1]);
+        const high = parseFloat(k[2]);
+        const low = parseFloat(k[3]);
+        const close = parseFloat(k[4]);
+        const volume = parseFloat(k[5]);
+        const takerBuyVol = parseFloat(k[9]); // Buy volume
+        const takerSellVol = volume - takerBuyVol; // Sell volume
+
+        let bar = new FPBar(startTime);
+        bar.open = open;
+        bar.high = high;
+        bar.low = low;
+        bar.close = close;
+
+        // Distribute volume across price levels between low and high
+        const startLevel = Math.floor(low / CONFIG.tickSize) * CONFIG.tickSize;
+        const endLevel = Math.floor(high / CONFIG.tickSize) * CONFIG.tickSize;
+        
+        const levelsCount = Math.round((endLevel - startLevel) / CONFIG.tickSize) + 1;
+        const buyVolPerLevel = takerBuyVol / levelsCount;
+        const sellVolPerLevel = takerSellVol / levelsCount;
+
+        for (let p = startLevel; p <= endLevel; p += CONFIG.tickSize) {
+            let cell = new FPCell(p);
+            cell.buyVol = buyVolPerLevel;
+            cell.sellVol = sellVolPerLevel;
+            bar.cells.set(p, cell);
             
-            toggles.forEach((btn, index) => {
-                btn.addEventListener('click', (e) => {
-                    toggles.forEach(b => b.classList.remove('active'));
-                    e.currentTarget.classList.add('active');
-                    
-                    // 根据点击的按钮更新右侧状态指示器
-                    // index === 0 是 "实时", index === 1 是 "回放"
-                    if (index === 0) {
-                        statusDot.style.backgroundColor = 'var(--up-color)';
-                        statusText.textContent = '实时监控模式';
-                    } else {
-                        statusDot.style.backgroundColor = 'var(--poc-color)';
-                        statusText.textContent = '回放/浏览模式';
-                    }
-                });
-            });
-        }
-
-        function initBinanceWS() {
-            const ws = new WebSocket(WS_URL);
-            
-            ws.onmessage = (event) => {
-                const msg = JSON.parse(event.data);
-                if (!msg.data) return;
-
-                const stream = msg.stream;
-                const data = msg.data;
-
-                if (stream === `${SYMBOL}@depth20@100ms`) {
-                    orderBook.bids = data.b;
-                    orderBook.asks = data.a;
-                    if(currentPrice === 0 && data.a.length > 0) {
-                        currentPrice = parseFloat(data.a[0][0]);
-                    }
-                    renderDOM();
-                } else if (stream === `${SYMBOL}@aggTrade`) {
-                    handleAggTrade(data);
-                }
-            };
-
-            ws.onopen = () => console.log('Binance WS Connected');
-            ws.onerror = (e) => console.error('Binance WS Error', e);
-        }
-
-        function handleAggTrade(data) {
-            const price = parseFloat(data.p);
-            const qty = parseFloat(data.q);
-            const isBuyerMaker = data.m; // m=true 意味着做市方是买方，即这笔是卖单成交
-            const time = data.T;
-            
-            currentPrice = price;
-
-            // 1. 更新 Smart Tape
-            const d = new Date(time);
-            const timeStr = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`;
-            
-            smartTape.unshift({
-                t: timeStr,
-                p: price.toFixed(1),
-                q: qty.toFixed(3),
-                type: isBuyerMaker ? 'down' : 'up'
-            });
-            if (smartTape.length > 50) smartTape.pop();
-            renderSmartTape();
-
-            // 2. 更新 Volume Profile 累加器
-            const bin = Math.floor(price / VP_BIN_SIZE) * VP_BIN_SIZE;
-            if (!vpData[bin]) vpData[bin] = { buy: 0, sell: 0, total: 0 };
-            
-            if (isBuyerMaker) {
-                vpData[bin].sell += qty;
-            } else {
-                vpData[bin].buy += qty;
+            if (!STATE.globalVolumeProfile.has(p)) {
+                STATE.globalVolumeProfile.set(p, { buy: 0, sell: 0, total: 0 });
             }
-            vpData[bin].total += qty;
-            if (vpData[bin].total > maxVpVol) maxVpVol = vpData[bin].total;
-            
-            renderRealtimeVP();
-        }
-
-        // --- 渲染函数 ---
-
-        function renderDOM() {
-            const tbody = document.getElementById('domTable');
-            if (!orderBook.asks.length || !orderBook.bids.length) return;
-
-            let html = '';
-            
-            // Asks (卖盘，价格从高到低显示，取前 15 档)
-            const asks = [...orderBook.asks].slice(0, 15).reverse();
-            let maxAskVol = Math.max(...asks.map(a => parseFloat(a[1])));
-            
-            asks.forEach(item => {
-                const p = parseFloat(item[0]).toFixed(1);
-                const q = parseFloat(item[1]).toFixed(3);
-                const w = Math.min((parseFloat(item[1]) / maxAskVol) * 100, 100);
-                html += `
-                    <tr>
-                        <td class="dom-price">${p}</td>
-                        <td>
-                            <div class="dom-vol-bg" style="width: ${w}%"></div>
-                            <span class="dom-val">${q}</span>
-                        </td>
-                    </tr>
-                `;
-            });
-            
-            // 当前价格
-            html += `
-                <tr>
-                    <td colspan="2" style="padding:0">
-                        <div class="current-price-banner">${currentPrice.toFixed(1)}</div>
-                    </td>
-                </tr>
-            `;
-
-            // Bids (买盘，价格从高到低显示，取前 15 档)
-            const bids = orderBook.bids.slice(0, 15);
-            let maxBidVol = Math.max(...bids.map(b => parseFloat(b[1])));
-            
-            bids.forEach(item => {
-                const p = parseFloat(item[0]).toFixed(1);
-                const q = parseFloat(item[1]).toFixed(3);
-                const w = Math.min((parseFloat(item[1]) / maxBidVol) * 100, 100);
-                html += `
-                    <tr>
-                        <td class="dom-price buy">${p}</td>
-                        <td>
-                            <div class="dom-vol-bg buy" style="width: ${w}%"></div>
-                            <span class="dom-val">${q}</span>
-                        </td>
-                    </tr>
-                `;
-            });
-
-            tbody.innerHTML = html;
-        }
-
-        function renderSmartTape() {
-            const tbody = document.getElementById('tapeTable');
-            let html = '';
-            smartTape.forEach(item => {
-                const qClass = parseFloat(item.q) > 2 ? 'large' : ''; // BTC > 2 个标为大单(紫色)
-                html += `
-                    <tr>
-                        <td class="tape-time">${item.t}</td>
-                        <td class="tape-price ${item.type}">${item.p}</td>
-                        <td class="tape-size ${qClass}">${item.q}</td>
-                    </tr>
-                `;
-            });
-            tbody.innerHTML = html;
-        }
-
-        function renderRealtimeVP() {
-            const container = document.getElementById('vpContainer');
-            let html = '';
-            
-            // 获取所有存在的价格区间并排序 (从高到低)
-            const bins = Object.keys(vpData).map(Number).sort((a, b) => b - a);
-            
-            bins.forEach(bin => {
-                const data = vpData[bin];
-                // 计算比例，确保买卖墙可以占满宽度
-                const wSell = (data.sell / maxVpVol) * 100;
-                const wBuy = (data.buy / maxVpVol) * 100;
-                
-                html += `
-                    <div class="vp-row" title="Price: ${bin}">
-                        <div class="vp-bar-sell" style="width: ${wSell}%"></div>
-                        <div class="vp-bar-buy" style="width: ${wBuy}%"></div>
-                    </div>
-                `;
-            });
-
-            container.innerHTML = html;
-        }
-
-        // 1. 渲染足迹图 (保留原有静态渲染以提供视觉骨架)
-        function renderFootprint() {
-            const container = document.getElementById('chartContent');
-            const candles = [
-                { type: 'up', delta: '+65', rows: [
-                    {b: 9.3, a: 4.4}, {b: 47.2, a: 61.1}, {b: 75.5, a: 83.2}, 
-                    {b: 143.1, a: 174.6, poc: true}, {b: 51.2, a: 51.2}, {b: 40.6, a: 57.0}
-                ]},
-                { type: 'down', delta: '-36', rows: [
-                    {b: 63.5, a: 55.0}, {b: 180.5, a: 165.5, poc: true}, {b: 81.0, a: 42.6}, {b: 60.8, a: 80.4}
-                ]},
-                { type: 'up', delta: '-26', rows: [
-                    {b: 82.8, a: 47.9}, {b: 140.8, a: 86.7, poc: true}, {b: 62.0, a: 133.0}, {b: 91.9, a: 55.6}, {b: 32.9, a: 35.8}, {b: 3.4, a: 13.0}
-                ]},
-                { type: 'up', delta: '+75', rows: [
-                    {b: 6.8, a: 11.7}, {b: 110.4, a: 105.4}, {b: 115.2, a: 123.3, poc: true}, {b: 85.7, a: 89.4}, {b: 25.8, a: 65.6}
-                ]},
-                { type: 'up', delta: '+106', rows: [
-                    {b: 3.2, a: 10.0}, {b: 50.0, a: 53.2}, {b: 32.6, a: 45.1}, {b: 139.1, a: 183.7, poc: true}, {b: 96.6, a: 145.4}, {b: 23.9, a: 24.4}
-                ]},
-                { type: 'down', delta: '-34', rows: [
-                    {b: 65.1, a: 49.9}, {b: 97.9, a: 80.6}, {b: 56.0, a: 67.8}, {b: 98.6, a: 91.0}, {b: 115.5, a: 104.6, poc: true}, {b: 19.1, a: 24.5}
-                ]},
-                { type: 'up', delta: '+63', rows: [
-                    {b: 10.5, a: 3.8}, {b: 30.6, a: 33.3}, {b: 86.1, a: 86.6}, {b: 51.5, a: 71.3}, {b: 162.2, a: 171.7, poc: true}, {b: 40.7, a: 34.3}
-                ]},
-                { type: 'up', delta: '+63', rows: [
-                    {b: 30.9, a: 45.7}, {b: 15.8, a: 41.7}, {b: 9.4, a: 13.5}, {b: 22.9, a: 37.6}, {b: 109.1, a: 108.2}, {b: 164.1, a: 147.8, poc: true}, {b: 31.5, a: 52.6}
-                ]},
-                { type: 'down', delta: '-20', rows: [
-                    {b: 19.6, a: 4.0}, {b: 40.7, a: 52.0}, {b: 102.7, a: 90.8, poc: true}, {b: 31.4, a: 35.0}, {b: 12.0, a: 36.0}, {b: 76.6, a: 36.7}, {b: 72.3, a: 70.5}, {b: 62.6, a: 73.2}
-                ]},
-                { type: 'down', delta: '-39', rows: [
-                    {b: 15.0, a: 18.4}, {b: 2.0, a: 7.9}, {b: 27.9, a: 52.9}, {b: 51.6, a: 50.1}, {b: 90.6, a: 58.1}, {b: 105.3, a: 136.7, poc: true}, {b: 104.0, a: 37.9}, {b: 17.0, a: 12.2}
-                ]},
-                { type: 'up', delta: '+39', rows: [
-                    {b: 15.7, a: 36.3}, {b: 74.9, a: 72.4}, {b: 182.9, a: 221.2, poc: true}, {b: 67.8, a: 88.7}, {b: 38.1, a: 0}
-                ]},
-                { type: 'up', delta: '-177', rows: [
-                    {b: 44.3, a: 85.2}, {b: 183.5, a: 182.1, poc: true}, {b: 156.4, a: 166.0}, {b: 27.4, a: 25.5}
-                ]},
-                { type: 'down', delta: '-177', rows: [
-                    {b: 310.4, a: 139.3}, {b: 168.8, a: 289.2, poc: true}, {b: 84.3, a: 133.3}
-                ]}
-            ];
-
-            let html = '';
-            let currentOffset = 50; 
-
-            candles.forEach((candle, idx) => {
-                let rowsHtml = '';
-                candle.rows.forEach(r => {
-                    const isPoc = r.poc ? 'poc-row' : '';
-                    let bBg = r.b > 100 ? 'bg-down-strong' : (r.b > 50 ? 'bg-down-light' : '');
-                    let aBg = r.a > 100 ? 'bg-up-strong' : (r.a > 50 ? 'bg-up-light' : '');
-                    
-                    rowsHtml += `
-                        <div class="fp-row ${isPoc}">
-                            <div class="fp-cell bid ${bBg}">${r.b}</div>
-                            <div class="fp-cell ask ${aBg}">${r.a}</div>
-                        </div>
-                    `;
-                });
-
-                const deltaClass = candle.delta.startsWith('+') ? 'delta-up' : 'delta-down';
-                const bodyClass = candle.type;
-                if(idx > 0) currentOffset += (idx % 2 === 0 ? 30 : 20);
-
-                html += `
-                    <div class="fp-candle" style="transform: translateY(-${currentOffset}px)">
-                        <div class="fp-wick"></div>
-                        <div class="fp-body ${bodyClass}">
-                            ${rowsHtml}
-                        </div>
-                        <div class="fp-delta ${deltaClass}">Δ: ${candle.delta}</div>
-                    </div>
-                `;
-            });
-
-            container.innerHTML = html;
-        }
-
-        // 2. 渲染底部 Delta & CVD (保留原有静态渲染)
-        function renderBottomChart() {
-            const canvas = document.getElementById('bottomCanvas');
-            const ctx = canvas.getContext('2d');
-            
-            const rect = canvas.parentElement.getBoundingClientRect();
-            canvas.width = rect.width;
-            canvas.height = rect.height;
-            
-            const w = canvas.width;
-            const h = canvas.height;
-            const rightPad = 60;
-
-            const deltas = [65, -36, -26, 75, 106, -34, 63, 63, -20, -39, 39, -177, -177];
-            let cvd = [];
-            let currentCvd = 0;
-            deltas.forEach(d => {
-                currentCvd += d;
-                cvd.push(currentCvd);
-            });
-
-            const barWidth = 14;
-            const spacing = 46;
-            const startX = 60;
-            const zeroY = h * 0.6;
-
-            ctx.beginPath();
-            ctx.moveTo(0, zeroY);
-            ctx.lineTo(w - rightPad, zeroY);
-            ctx.strokeStyle = '#474d57';
-            ctx.lineWidth = 1;
-            ctx.stroke();
-
-            const maxDelta = Math.max(...deltas.map(Math.abs));
-            const barScale = (h * 0.3) / maxDelta;
-
-            deltas.forEach((d, i) => {
-                const x = startX + i * spacing;
-                const barH = Math.abs(d) * barScale;
-                const y = d > 0 ? zeroY - barH : zeroY;
-                
-                ctx.fillStyle = d > 0 ? '#0ecb81' : '#f6465d';
-                ctx.fillRect(x - barWidth/2, y, barWidth, barH);
-            });
-
-            const minCvd = Math.min(...cvd);
-            const maxCvd = Math.max(...cvd);
-            const cvdRange = maxCvd - minCvd;
-            const cvdScale = (h * 0.8) / (cvdRange || 1);
-            
-            ctx.beginPath();
-            cvd.forEach((c, i) => {
-                const x = startX + i * spacing;
-                const y = h * 0.9 - (c - minCvd) * cvdScale;
-                if (i === 0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
-            });
-            ctx.strokeStyle = '#fcd535';
-            ctx.lineWidth = 2;
-            ctx.stroke();
-            
-            ctx.fillStyle = '#1e2329';
-            ctx.fillRect(w - rightPad, 0, rightPad, h);
-            
-            ctx.fillStyle = '#848E9C';
-            ctx.font = '11px "JetBrains Mono", Consolas, monospace';
-            ctx.textAlign = 'right';
-            ctx.fillText('Δ', w - 12, zeroY - 20);
-            ctx.fillStyle = '#f6465d';
-            ctx.fillText('-177', w - 12, zeroY - 4);
-            
-            ctx.fillStyle = '#fcd535';
-            ctx.fillText('CVD', w - 12, zeroY + 16);
-            ctx.fillText('+232', w - 12, zeroY + 32);
+            let pData = STATE.globalVolumeProfile.get(p);
+            pData.buy += buyVolPerLevel;
+            pData.sell += sellVolPerLevel;
+            pData.total += (buyVolPerLevel + sellVolPerLevel);
         }
         
-        window.addEventListener('resize', () => {
-            renderBottomChart();
+        STATE.footprints.push(bar);
+    });
+    
+    if (STATE.footprints.length > 0) {
+        STATE.currentPrice = STATE.footprints[STATE.footprints.length - 1].close;
+    }
+}
+
+function connectWebSocket() {
+    const streams = `${currentSymbol}@aggTrade/${currentSymbol}@depth20@100ms`;
+    ws = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
+    
+    ws.onopen = () => {
+        document.getElementById('conn-status').textContent = '已连接真实数据';
+        document.getElementById('conn-dot').style.backgroundColor = 'var(--buy-color)';
+    };
+    
+    ws.onmessage = (event) => {
+        if (!STATE.isRunning) return;
+        
+        const msg = JSON.parse(event.data);
+        const stream = msg.stream;
+        const data = msg.data;
+        
+        if (stream.endsWith('@aggTrade')) {
+            handleAggTrade(data);
+        } else if (stream.endsWith('@depth20@100ms')) {
+            handleDepth(data);
+        }
+    };
+    
+    ws.onclose = () => {
+        if (STATE.isRunning) {
+            document.getElementById('conn-status').textContent = '连接断开，重连中...';
+            document.getElementById('conn-dot').style.backgroundColor = '#ef5350';
+            setTimeout(connectWebSocket, 3000);
+        }
+    };
+}
+
+function handleAggTrade(data) {
+    const price = parseFloat(data.p);
+    const qty = parseFloat(data.q);
+    const isBuyerMaker = data.m; // true = active sell
+    const time = data.T;
+    
+    STATE.currentPrice = price;
+    STATE.historyTicks.push({ time, p: price, q: qty, isSell: isBuyerMaker });
+    
+    if (STATE.footprints.length === 0) return;
+    
+    let currBar = STATE.footprints[STATE.footprints.length - 1];
+    
+    // Check if new bar is needed based on timeframe
+    if (time >= currBar.startTime + CONFIG.timeframe) {
+        const newStartTime = Math.floor(time / CONFIG.timeframe) * CONFIG.timeframe;
+        currBar = new FPBar(newStartTime);
+        currBar.open = price;
+        STATE.footprints.push(currBar);
+        if (STATE.footprints.length > 150) STATE.footprints.shift();
+    }
+
+    currBar.addTick(price, qty, isBuyerMaker);
+    updateGlobalProfile(price, qty, isBuyerMaker);
+
+    if (qty >= CONFIG.largeOrderThr) {
+        addTapeRecord(price, qty, isBuyerMaker, time);
+    }
+}
+
+// 记录全局的成交量分布 (用于画买单墙/卖单墙)
+function updateGlobalProfile(price, qty, isSell) {
+    const level = Math.floor(price / CONFIG.tickSize) * CONFIG.tickSize;
+    if (!STATE.globalVolumeProfile.has(level)) {
+        STATE.globalVolumeProfile.set(level, { buy: 0, sell: 0, total: 0 });
+    }
+    let pData = STATE.globalVolumeProfile.get(level);
+    if (isSell) pData.sell += qty;
+    else pData.buy += qty;
+    pData.total += qty;
+}
+
+// ================= DOM 与 Tape UI 更新 =================
+
+function handleDepth(data) {
+    if (!STATE.isRunning) return;
+    
+    let html = '';
+    const cp = STATE.currentPrice;
+    
+    // Asks (Sells)
+    const asks = data.a.slice(0, CONFIG.domLevels).reverse();
+    
+    let maxVol = 0;
+    data.a.slice(0, CONFIG.domLevels).forEach(a => maxVol = Math.max(maxVol, parseFloat(a[1])));
+    data.b.slice(0, CONFIG.domLevels).forEach(b => maxVol = Math.max(maxVol, parseFloat(b[1])));
+    if (maxVol === 0) maxVol = 1;
+
+    asks.forEach(ask => {
+        const p = parseFloat(ask[0]);
+        const vol = parseFloat(ask[1]);
+        const width = (vol / maxVol) * 100;
+        html += `<div class="dom-row dom-sell">
+            <div style="position:absolute; top:0; right:0; bottom:0; width:${width}%; background-color:var(--sell-bg); z-index:0;"></div>
+            <div class="dom-cell price">${p.toFixed(1)}</div>
+            <div class="dom-cell">${vol.toFixed(3)}</div>
+        </div>`;
+    });
+    
+    html += `<div class="dom-spread">${cp.toFixed(1)}</div>`;
+    
+    const bids = data.b.slice(0, CONFIG.domLevels);
+    bids.forEach(bid => {
+        const p = parseFloat(bid[0]);
+        const vol = parseFloat(bid[1]);
+        const width = (vol / maxVol) * 100;
+        html += `<div class="dom-row dom-buy">
+            <div style="position:absolute; top:0; right:0; bottom:0; width:${width}%; background-color:var(--buy-bg); z-index:0;"></div>
+            <div class="dom-cell price">${p.toFixed(1)}</div>
+            <div class="dom-cell">${vol.toFixed(3)}</div>
+        </div>`;
+    });
+    
+    domList.innerHTML = html;
+}
+
+function addTapeRecord(price, qty, isSell, timeMs) {
+    const timeStr = new Date(timeMs || Date.now()).toLocaleTimeString('en-US', {hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'});
+    const row = document.createElement('div');
+    row.className = `tape-row tape-large ${isSell ? 'tape-sell' : 'tape-buy'}`;
+    row.innerHTML = `
+        <div class="tape-time">${timeStr}</div>
+        <div class="tape-price">${price.toFixed(1)}</div>
+        <div class="tape-size">${qty.toFixed(3)}</div>
+    `;
+    tapeList.insertBefore(row, tapeList.firstChild);
+    if (tapeList.children.length > 30) {
+        tapeList.removeChild(tapeList.lastChild);
+    }
+}
+
+// ================= Canvas 渲染引擎 =================
+
+function renderLoop() {
+    renderAll();
+    if (STATE.isRunning) {
+        requestAnimationFrame(renderLoop);
+    }
+}
+
+// 坐标转换工具函数
+function priceToY(price) {
+    return canvasFPMain.height - ((price / CONFIG.tickSize) * CONFIG.rowHeight + STATE.offsetY) * STATE.scaleY;
+}
+
+function yToPrice(y) {
+    return ((canvasFPMain.height - y) / STATE.scaleY - STATE.offsetY) / CONFIG.rowHeight * CONFIG.tickSize;
+}
+
+function timeToIndex(time) {
+    return STATE.footprints.findIndex(b => b.startTime === time);
+}
+
+function indexToX(index) {
+    // 从右往左画
+    const rightMargin = 80;
+    return canvasFPMain.width - rightMargin + STATE.offsetX - (STATE.footprints.length - 1 - index) * CONFIG.candleWidth * STATE.scaleX;
+}
+
+function xToIndex(x) {
+    const rightMargin = 80;
+    const diffX = canvasFPMain.width - rightMargin + STATE.offsetX - x;
+    return STATE.footprints.length - 1 - Math.round(diffX / (CONFIG.candleWidth * STATE.scaleX));
+}
+
+function renderAll() {
+    const w = canvasFPMain.width;
+    const h = canvasFPMain.height;
+    
+    // 清空主画布
+    ctxFP.clearRect(0, 0, w, h);
+    ctxUI.clearRect(0, 0, w, h);
+
+    // 1. 画价格轴 (右侧)
+    drawPriceAxis(ctxFP, w, h);
+
+    // 2. 画 Footprint K 线
+    drawFootprints(ctxFP, w, h);
+    
+    // 3. 画右侧面板的 Volume Profile (最强买卖单墙)
+    drawVolumeProfileWalls();
+    
+    // 4. 画底部指标面板 (Delta 柱状图)
+    drawDeltaIndicator();
+
+    // 5. 画十字光标和当前价格线
+    drawUI(ctxUI, w, h);
+}
+
+function drawPriceAxis(ctx, w, h) {
+    ctx.fillStyle = '#1e222d';
+    ctx.fillRect(w - 60, 0, 60, h);
+    ctx.strokeStyle = '#2a2e39';
+    ctx.beginPath(); ctx.moveTo(w - 60, 0); ctx.lineTo(w - 60, h); ctx.stroke();
+
+    ctx.fillStyle = '#787b86';
+    ctx.font = '11px Consolas';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+
+    // 确定可见的价格范围
+    const maxPrice = yToPrice(0);
+    const minPrice = yToPrice(h);
+    
+    // 每 10 档画一个刻度
+    const step = CONFIG.tickSize * 10;
+    let p = Math.ceil(minPrice / step) * step;
+    
+    while (p <= maxPrice) {
+        const y = priceToY(p);
+        ctx.fillText(p.toFixed(1), w - 55, y);
+        
+        // 画浅色网格线
+        ctx.strokeStyle = 'rgba(42, 46, 57, 0.5)';
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w - 60, y); ctx.stroke();
+        
+        p += step;
+    }
+}
+
+function drawFootprints(ctx, w, h) {
+    const cw = CONFIG.candleWidth * STATE.scaleX;
+    const rh = CONFIG.rowHeight * STATE.scaleY;
+    
+    // 找出全局最强买单墙和卖单墙的价格
+    let maxBuyVol = 0; let strongestBuyPrice = 0;
+    let maxSellVol = 0; let strongestSellPrice = 0;
+    
+    STATE.globalVolumeProfile.forEach((vData, pLevel) => {
+        if (vData.buy > maxBuyVol && pLevel < STATE.currentPrice) { maxBuyVol = vData.buy; strongestBuyPrice = pLevel; }
+        if (vData.sell > maxSellVol && pLevel > STATE.currentPrice) { maxSellVol = vData.sell; strongestSellPrice = pLevel; }
+    });
+
+    // 在主图表上画出最强买卖单墙的射线和价格标签
+    if (strongestBuyPrice > 0) {
+        const by = priceToY(strongestBuyPrice) + rh/2;
+        
+        // 画横向虚线射线
+        ctx.strokeStyle = '#26a69a'; // 使用固定颜色替换 var()
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath(); ctx.moveTo(0, by); ctx.lineTo(w - 60, by); ctx.stroke();
+        ctx.setLineDash([]);
+        
+        // 画标签背景和文字
+        ctx.fillStyle = '#26a69a'; // 使用固定颜色替换 var()
+        ctx.fillRect(w - 140, by - 10, 80, 20); // 在价格轴左侧一点绘制标签
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 11px Consolas';
+        ctx.textAlign = 'center';
+        ctx.fillText(`买单墙 ${strongestBuyPrice.toFixed(1)}`, w - 100, by);
+    }
+    
+    if (strongestSellPrice > 0) {
+        const sy = priceToY(strongestSellPrice) + rh/2;
+        
+        // 画横向虚线射线
+        ctx.strokeStyle = '#ef5350'; // 使用固定颜色替换 var()
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(w - 60, sy); ctx.stroke();
+        ctx.setLineDash([]);
+        
+        // 画标签背景和文字
+        ctx.fillStyle = '#ef5350'; // 使用固定颜色替换 var()
+        ctx.fillRect(w - 140, sy - 10, 80, 20);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 11px Consolas';
+        ctx.textAlign = 'center';
+        ctx.fillText(`卖单墙 ${strongestSellPrice.toFixed(1)}`, w - 100, sy);
+    }
+
+    // 只画可视区域内的 K 线
+    for (let i = 0; i < STATE.footprints.length; i++) {
+        const bar = STATE.footprints[i];
+        const cx = indexToX(i);
+        
+        // 如果超出版面，跳过渲染
+        if (cx < -cw || cx > w) continue;
+
+        const isBull = bar.close >= bar.open;
+        const wickColor = isBull ? '#26a69a' : '#ef5350';
+
+        // 1. 画上下影线
+        const yHigh = priceToY(bar.high);
+        const yLow = priceToY(bar.low) + rh; // 加上格子高度
+        
+        ctx.strokeStyle = wickColor;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(cx, yHigh);
+        ctx.lineTo(cx, yLow);
+        ctx.stroke();
+
+        // 2. 画实体背景框
+        const yOpen = priceToY(bar.open);
+        const yClose = priceToY(bar.close);
+        const bodyTop = Math.min(yOpen, yClose);
+        const bodyBottom = Math.max(yOpen, yClose) + rh;
+        
+        ctx.fillStyle = isBull ? 'rgba(38, 166, 154, 0.08)' : 'rgba(239, 83, 80, 0.08)';
+        ctx.fillRect(cx - cw/2 + 2, bodyTop, cw - 4, bodyBottom - bodyTop);
+        ctx.strokeStyle = wickColor;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(cx - cw/2 + 2, bodyTop, cw - 4, bodyBottom - bodyTop);
+
+        // 3. 画每个格子的买卖量
+        ctx.font = `${Math.max(9, 11 * STATE.scaleY)}px Consolas`;
+        ctx.textBaseline = 'middle';
+        
+        const pocLvl = bar.pocLevel;
+
+        bar.cells.forEach((cell, lvl) => {
+            const y = priceToY(lvl);
+            // 过滤不可见的格子
+            if (y < 0 || y > h) return;
+
+            // POC 边框
+            if (lvl === pocLvl) {
+                ctx.fillStyle = 'rgba(255, 202, 40, 0.3)';
+                ctx.fillRect(cx - cw/2 + 4, y, cw - 8, rh - 1);
+                ctx.strokeStyle = '#ffca28';
+                ctx.setLineDash([2, 2]);
+                ctx.strokeRect(cx - cw/2 + 4, y, cw - 8, rh - 1);
+                ctx.setLineDash([]);
+            }
+
+            const cy = y + rh / 2;
+
+            // 卖单 (Ask) - 画在左边
+            if (cell.sellVol > 0) {
+                ctx.fillStyle = cell.sellImbalance ? '#ef5350' : '#ffcdd2';
+                ctx.textAlign = 'right';
+                ctx.fillText(cell.sellVol.toFixed(1), cx - 5, cy);
+            }
+
+            // 买单 (Bid) - 画在右边
+            if (cell.buyVol > 0) {
+                ctx.fillStyle = cell.buyImbalance ? '#26a69a' : '#b2dfdb';
+                ctx.textAlign = 'left';
+                ctx.fillText(cell.buyVol.toFixed(1), cx + 5, cy);
+            }
+            
+            // 中间分隔线
+            ctx.fillStyle = 'rgba(255,255,255,0.1)';
+            ctx.fillRect(cx - 1, y + 2, 2, rh - 4);
         });
-    </script>
+
+        // 4. 画 Delta 和 Total Vol (在 K 线底部)
+        ctx.textAlign = 'center';
+        const dY = yLow + 15;
+        const delta = bar.totalDelta;
+        ctx.fillStyle = delta > 0 ? '#26a69a' : '#ef5350';
+        ctx.fillText(`Δ: ${delta > 0 ? '+' : ''}${delta.toFixed(0)}`, cx, dY);
+    }
+}
+
+// 绘制底部面板的 Bar Delta (柱状图) 与 CVD (累积量差折线)
+function drawDeltaIndicator() {
+    const w = canvasDelta.width;
+    const h = canvasDelta.height;
+    
+    ctxDelta.clearRect(0, 0, w, h);
+    
+    if (STATE.footprints.length === 0) return;
+
+    // 计算 CVD 和极值
+    let cumulativeDelta = 0;
+    const cvdValues = [];
+    let maxDeltaAbs = 0;
+    let maxCVD = -Infinity;
+    let minCVD = Infinity;
+
+    for (let i = 0; i < STATE.footprints.length; i++) {
+        const d = STATE.footprints[i].totalDelta;
+        cumulativeDelta += d;
+        cvdValues.push(cumulativeDelta);
+        
+        if (Math.abs(d) > maxDeltaAbs) maxDeltaAbs = Math.abs(d);
+        if (cumulativeDelta > maxCVD) maxCVD = cumulativeDelta;
+        if (cumulativeDelta < minCVD) minCVD = cumulativeDelta;
+    }
+    
+    if (maxDeltaAbs === 0) maxDeltaAbs = 1; // 防止除零
+    const cvdRange = Math.max(Math.abs(maxCVD), Math.abs(minCVD), 1);
+
+    const cw = CONFIG.candleWidth * STATE.scaleX;
+    const midY = h / 2;
+
+    // 画零轴
+    ctxDelta.strokeStyle = '#2a2e39';
+    ctxDelta.beginPath(); ctxDelta.moveTo(0, midY); ctxDelta.lineTo(w, midY); ctxDelta.stroke();
+
+    // 只画可视区域内的 K 线的 Delta 柱子
+    for (let i = 0; i < STATE.footprints.length; i++) {
+        const cx = indexToX(i);
+        if (cx < -cw || cx > w + cw) continue;
+
+        const delta = STATE.footprints[i].totalDelta;
+        // 柱子的高度比例 (占上下半区的百分比)
+        const barH = (Math.abs(delta) / maxDeltaAbs) * (midY * 0.85);
+        
+        ctxDelta.fillStyle = delta > 0 ? 'rgba(38, 166, 154, 0.7)' : 'rgba(239, 83, 80, 0.7)';
+        
+        const barW = cw * 0.6; // 柱子宽度稍微比 K 线窄一点
+        if (delta > 0) {
+            ctxDelta.fillRect(cx - barW/2, midY - barH, barW, barH);
+        } else {
+            ctxDelta.fillRect(cx - barW/2, midY, barW, barH);
+        }
+    }
+
+    // 画 CVD 折线 (金色)
+    ctxDelta.beginPath();
+    ctxDelta.strokeStyle = '#ffca28';
+    ctxDelta.lineWidth = 2;
+    
+    let isFirst = true;
+    for (let i = 0; i < STATE.footprints.length; i++) {
+        const cx = indexToX(i);
+        if (cx < -cw || cx > w + cw) continue;
+
+        const cvd = cvdValues[i];
+        // 映射 CVD 到 Y 轴，0 对应 midY
+        const cvdY = midY - (cvd / cvdRange) * (midY * 0.85);
+        
+        if (isFirst) {
+            ctxDelta.moveTo(cx, cvdY);
+            isFirst = false;
+        } else {
+            ctxDelta.lineTo(cx, cvdY);
+        }
+    }
+    ctxDelta.stroke();
+
+    // 右侧遮罩 (和主图的刻度轴对齐)
+    ctxDelta.fillStyle = '#1e222d';
+    ctxDelta.fillRect(w - 60, 0, 60, h);
+    ctxDelta.strokeStyle = '#2a2e39';
+    ctxDelta.beginPath(); ctxDelta.moveTo(w - 60, 0); ctxDelta.lineTo(w - 60, h); ctxDelta.stroke();
+
+    // 在右侧刻度轴显示最新数值
+    if (cvdValues.length > 0) {
+        const lastDelta = STATE.footprints[STATE.footprints.length - 1].totalDelta;
+        const lastCVD = cvdValues[cvdValues.length - 1];
+
+        ctxDelta.font = 'bold 11px Consolas';
+        ctxDelta.textAlign = 'center';
+        
+        // 显示 Delta
+        ctxDelta.fillStyle = lastDelta > 0 ? '#26a69a' : '#ef5350';
+        ctxDelta.fillText(`Δ`, w - 30, h / 2 - 25);
+        ctxDelta.fillText(`${lastDelta > 0 ? '+' : ''}${lastDelta.toFixed(0)}`, w - 30, h / 2 - 10);
+        
+        // 显示 CVD
+        ctxDelta.fillStyle = '#ffca28';
+        ctxDelta.fillText(`CVD`, w - 30, h / 2 + 10);
+        ctxDelta.fillText(`${lastCVD > 0 ? '+' : ''}${lastCVD.toFixed(0)}`, w - 30, h / 2 + 25);
+    }
+}
+
+// 绘制右侧面板的 Volume Profile
+function drawVolumeProfileWalls() {
+    const w = canvasVP.width;
+    const h = canvasVP.height;
+    
+    ctxVP.clearRect(0, 0, w, h);
+    
+    if (STATE.globalVolumeProfile.size === 0) return;
+
+    // 获取主图可视范围的价格区间
+    const viewMaxP = yToPrice(0);
+    const viewMinP = yToPrice(canvasFPMain.height);
+    const priceRange = viewMaxP - viewMinP;
+    
+    if (priceRange <= 0) return;
+
+    // 找到在可视范围内的最大总成交量，用于归一化宽度
+    let maxTotalVol = 0;
+    
+    STATE.globalVolumeProfile.forEach((vData, pLevel) => {
+        // 稍微放宽一点边界
+        if (pLevel >= viewMinP - CONFIG.tickSize && pLevel <= viewMaxP + CONFIG.tickSize) {
+            if (vData.total > maxTotalVol) maxTotalVol = vData.total;
+        }
+    });
+
+    if (maxTotalVol === 0) maxTotalVol = 1; // 防止除零
+    
+    STATE.globalVolumeProfile.forEach((vData, pLevel) => {
+        // 只绘制在主图可视范围内的筹码，避免因历史极值把图形压缩成一条线
+        if (pLevel < viewMinP - CONFIG.tickSize || pLevel > viewMaxP + CONFIG.tickSize) return;
+
+        // 计算在这个小画布中的 Y 坐标 (动态映射到可视区间)
+        const mappedY = h - ((pLevel - viewMinP) / priceRange) * h;
+        // 动态计算每一层的高度，至少保证有 2 像素高度，不会糊在一起
+        const barHeight = Math.max(2, (CONFIG.tickSize / priceRange) * h);
+        
+        // 画买单柱子 (绿色，靠左)
+        const buyWidth = (vData.buy / maxTotalVol) * w;
+        ctxVP.fillStyle = 'rgba(38, 166, 154, 0.7)';
+        ctxVP.fillRect(0, mappedY - barHeight, buyWidth, barHeight - 0.5); // 留0.5px的缝隙
+        
+        // 画卖单柱子 (红色，紧挨着买单画)
+        const sellWidth = (vData.sell / maxTotalVol) * w;
+        ctxVP.fillStyle = 'rgba(239, 83, 80, 0.7)';
+        ctxVP.fillRect(buyWidth, mappedY - barHeight, sellWidth, barHeight - 0.5);
+    });
+}
+
+function drawUI(ctx, w, h) {
+    // 画当前价格线
+    const cy = priceToY(STATE.currentPrice);
+    
+    ctx.strokeStyle = '#ff9800';
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(0, cy + CONFIG.rowHeight/2);
+    ctx.lineTo(w - 60, cy + CONFIG.rowHeight/2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 价格轴上的高亮标签
+    ctx.fillStyle = '#ff9800';
+    ctx.fillRect(w - 60, cy, 60, CONFIG.rowHeight);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 12px Consolas';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(STATE.currentPrice.toFixed(1), w - 30, cy + CONFIG.rowHeight/2);
+
+    // 绘制鼠标十字光标
+    if (STATE.hoveredCell) {
+        const hx = STATE.hoveredCell.x;
+        const hy = STATE.hoveredCell.y;
+        
+        ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+        ctx.beginPath();
+        ctx.moveTo(hx, 0); ctx.lineTo(hx, h);
+        ctx.moveTo(0, hy); ctx.lineTo(w - 60, hy);
+        ctx.stroke();
+    }
+}
+
+// ================= 交互事件控制 (拖拽、缩放、悬停) =================
+
+let isDragging = false;
+let lastMouseX = 0;
+let lastMouseY = 0;
+
+fpContainer.addEventListener('mousedown', e => {
+    isDragging = true;
+    lastMouseX = e.clientX;
+    lastMouseY = e.clientY;
+});
+
+window.addEventListener('mouseup', () => isDragging = false);
+
+fpContainer.addEventListener('mousemove', e => {
+    const rect = fpContainer.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    if (isDragging) {
+        const dx = e.clientX - lastMouseX;
+        const dy = e.clientY - lastMouseY;
+        
+        STATE.offsetX += dx;
+        // Y 轴平移转换为价格平移
+        STATE.offsetY -= dy / STATE.scaleY; 
+        
+        lastMouseX = e.clientX;
+        lastMouseY = e.clientY;
+        
+        // 暂停自动跟随
+        STATE.isRunning = false;
+        document.getElementById('btn-play').classList.remove('active');
+        document.getElementById('btn-pause').classList.add('active');
+        document.getElementById('conn-status').textContent = '回放/浏览模式';
+        document.getElementById('conn-dot').style.backgroundColor = '#ff9800';
+        
+        renderAll();
+    } else {
+        // 更新悬停光标
+        STATE.hoveredCell = { x, y };
+        
+        // 计算当前悬停的数据并更新 Tooltip
+        updateTooltip(x, y);
+        renderAll();
+    }
+});
+
+fpContainer.addEventListener('mouseleave', () => {
+    STATE.hoveredCell = null;
+    tooltip.style.display = 'none';
+    renderAll();
+});
+
+// 滚轮缩放
+fpContainer.addEventListener('wheel', e => {
+    e.preventDefault();
+    const zoomFactor = 0.1;
+    if (e.deltaY < 0) {
+        // 放大
+        STATE.scaleX = Math.min(3.0, STATE.scaleX + zoomFactor);
+        STATE.scaleY = Math.min(3.0, STATE.scaleY + zoomFactor);
+    } else {
+        // 缩小
+        STATE.scaleX = Math.max(0.5, STATE.scaleX - zoomFactor);
+        STATE.scaleY = Math.max(0.5, STATE.scaleY - zoomFactor);
+    }
+    renderAll();
+}, { passive: false });
+
+function updateTooltip(x, y) {
+    // 找出对应的 K 线 index 和价格
+    const idx = xToIndex(x);
+    const p = Math.floor(yToPrice(y) / CONFIG.tickSize) * CONFIG.tickSize;
+    
+    if (idx >= 0 && idx < STATE.footprints.length) {
+        const bar = STATE.footprints[idx];
+        if (bar.cells.has(p)) {
+            const cell = bar.cells.get(p);
+            tooltip.style.display = 'block';
+            tooltip.style.left = (x + 15) + 'px';
+            tooltip.style.top = (y + 15) + 'px';
+            
+            const isImbB = cell.buyImbalance ? '🔥' : '';
+            const isImbS = cell.sellImbalance ? '🔥' : '';
+            
+            tooltip.innerHTML = `
+<b>Price: ${p.toFixed(1)}</b>
+-----------------
+Ask(卖量): <span style="color:var(--sell-color)">${cell.sellVol.toFixed(2)}</span> ${isImbS}
+Bid(买量): <span style="color:var(--buy-color)">${cell.buyVol.toFixed(2)}</span> ${isImbB}
+Delta:   <span style="color:${cell.delta>0?'var(--buy-color)':'var(--sell-color)'}">${cell.delta > 0 ? '+' : ''}${cell.delta.toFixed(2)}</span>
+Total:   ${cell.totalVol.toFixed(2)}
+            `;
+            return;
+        }
+    }
+    tooltip.style.display = 'none';
+}
+
+// 顶部按钮控制 (周期切换)
+const TF_MAP = {
+    1: '1m',
+    5: '5m',
+    15: '15m',
+    60: '1h',
+    240: '4h',
+    1440: '1d'
+};
+
+document.querySelectorAll('.btn-group .btn[data-tf]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+        // 移除其他按钮的 active 状态
+        document.querySelectorAll('.btn-group .btn[data-tf]').forEach(b => b.classList.remove('active'));
+        // 激活当前按钮
+        e.target.classList.add('active');
+        
+        // 更新周期配置 (以分钟为单位转换为毫秒)
+        const tfMinutes = parseInt(e.target.getAttribute('data-tf'));
+        CONFIG.timeframe = tfMinutes * 60 * 1000;
+        currentBinanceTF = TF_MAP[tfMinutes];
+        
+        // 重新获取历史数据并连接 WebSocket
+        STATE.historyTicks = [];
+        loadHistoricalAndConnect();
+    });
+});
+
+// 顶部按钮控制 (播放/暂停)
+document.getElementById('btn-play').addEventListener('click', (e) => {
+    STATE.isRunning = true;
+    e.target.classList.add('active');
+    document.getElementById('btn-pause').classList.remove('active');
+    document.getElementById('conn-status').textContent = '实时数据同步中...';
+    document.getElementById('conn-dot').style.backgroundColor = 'var(--buy-color)';
+    
+    // 恢复中心视角
+    STATE.offsetX = 100;
+    const rect = fpContainer.getBoundingClientRect();
+    STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
+    
+    requestAnimationFrame(renderLoop);
+});
+
+document.getElementById('btn-pause').addEventListener('click', (e) => {
+    STATE.isRunning = false;
+    e.target.classList.add('active');
+    document.getElementById('btn-play').classList.remove('active');
+    document.getElementById('conn-status').textContent = '回放/浏览模式';
+    document.getElementById('conn-dot').style.backgroundColor = '#ff9800';
+});
+
+// ================= 启动 =================
+setTimeout(() => {
+    resizeCanvas();
+    initEngine();
+}, 100);
+
+</script>
 </body>
 </html>
