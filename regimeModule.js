@@ -1105,21 +1105,23 @@ function buildComboLines(isBull, ctx) {
   ];
 }
 
-// ---------------------- MTF 短周期(5分钟/1分钟) 强多/强空 自动开仓 ----------------------
+// ---------------------- MTF 组合条件自动开仓（1分钟边缘触发 + 三重过滤） ----------------------
 //
-// 用户在 regime 页面「手动开仓」栏拨开关武装后（5分钟与1分钟各一套, 互不影响）：
-//   - ⭐ 周期独立 + 多/空开关独立：每个周期各有「强多自动开多」(enabledLong)
-//     与「强空自动开空」(enabledShort), 分开武装、分开触发、分开自动关闭
-//   - 每 30s 检查 mtfModule 对应周期的评分状态（只评估新快照, 按 updatedAt 去重）
-//   - 状态需连续 MTF5_AUTO_OPEN_CONFIRM 个新快照一致才确认（默认 2, 与 MTF 推送同款防抖）
-//   - 确认「转为」强多 且多开关开 → 自动挂多单；「转为」强空 且空开关开 → 自动挂空单
-//     （从全关到武装时只记基线不追溯, 避免对着已存在的陈旧强多/强空立刻下单）
+// 用户在 regime 页面「手动开仓」栏拨「组合开多/组合开空」开关武装后：
+//   触发边缘：MTF 1分钟评分连续 MTF5_AUTO_OPEN_CONFIRM 个新快照确认「转为」强多/强空
+//   触发时刻再验三个过滤条件（全过才下单，任一不满足则跳过并保持武装）：
+//     ① 大周期方向：MTF 240分钟 或 60分钟 状态为「强多/偏多」（开空为「强空/偏空」）
+//     ② 15分钟 RSI：最近 COMBO.lookback15m 根收盘内出现过超卖（开空为超买过）
+//     ③ 1分钟 Delta：最近一根已收盘 1m K 线主动买盘 > 卖盘（绿柱; 开空为红柱）
+//   其余机制与旧版一致：
+//   - 多/空开关独立武装、独立触发、独立自动关闭
+//   - 每 30s 检查（只评估新快照, 按 updatedAt 去重）
+//   - 从全关到武装时只记基线不追溯, 避免对着已存在的陈旧强多/强空立刻下单
 //   - ⭐ 市价单：下单复用 trading/router.manualFollowImpl（与 UI「一键追单」同一实现：
 //     立即市价成交, entry=当前 WS 市价, TP/SL 按 ATR 动态派生, 置信度小仓位）
-//   - ⭐ 单次武装：成功开仓后只自动关闭该周期该方向的开关（被拒时保持武装）
-//   - 触发后冷却 MTF5_AUTO_OPEN_COOLDOWN_MS（默认 10 分钟, 兜底, 每周期独立计）
+//   - ⭐ 单次武装：成功开仓后只自动关闭该方向的开关（被拒/过滤不过时保持武装）
+//   - 触发后冷却 MTF5_AUTO_OPEN_COOLDOWN_MS（默认 10 分钟, 兜底）
 //   - ⭐ 1分钟确认转为强多/强空时, 无论开关是否武装都推飞书
-//     （5分钟状态变化 mtfModule 已按 MTF_NOTIFY_TFS 推送, 这里不重复）
 //   - 开关与触发记录持久化到磁盘, 进程重启后保持
 const MTF5_AUTO_FILE = process.env.MTF5_AUTO_OPEN_STATE_PATH
   || path.join(__dirname, 'data', 'mtf5_auto_open.json');
@@ -1128,9 +1130,8 @@ const MTF5_AUTO = {
   cooldownMs: Math.max(0, parseInt(process.env.MTF5_AUTO_OPEN_COOLDOWN_MS, 10) || 10 * 60 * 1000),
   checkMs: 30 * 1000,
 };
-// 每周期行为配置：pushStrong = 确认转为强多/强空时是否由本模块推飞书
+// 周期行为配置：组合逻辑只保留 1分钟作为边缘触发周期（pushStrong = 确认转强多/强空时推飞书）
 const MTF_AUTO_TF_CFG = {
-  '5': { label: '5分钟', pushStrong: false },
   '1': { label: '1分钟', pushStrong: true },
 };
 function newMtfAutoSlot() {
@@ -1147,8 +1148,8 @@ function newMtfAutoSlot() {
     _firing: false,
   };
 }
-const mtfAuto = { '5': newMtfAutoSlot(), '1': newMtfAutoSlot() };
-const mtf5Auto = mtfAuto['5'];   // 兼容别名（测试/旧引用）
+const mtfAuto = { '1': newMtfAutoSlot() };
+const mtf5Auto = mtfAuto['1'];   // 兼容别名（测试/旧引用; 组合逻辑后仅剩 1分钟槽）
 function mtfAutoArmed(slot) { return slot.enabledLong || slot.enabledShort; }
 
 function applyMtfAutoSlot(slot, obj) {
@@ -1162,16 +1163,10 @@ function loadMtf5AutoState() {
   try {
     const obj = JSON.parse(fs.readFileSync(MTF5_AUTO_FILE, 'utf8'));
     if (obj && obj.tfs && typeof obj.tfs === 'object') {
-      // 新格式：{ tfs: { '5': {...}, '1': {...} } }
+      // tfs 格式：只恢复仍存在的槽（组合逻辑后仅 '1'; 旧文件里的 '5' 槽忽略）
       for (const key of Object.keys(mtfAuto)) applyMtfAutoSlot(mtfAuto[key], obj.tfs[key]);
-    } else if (obj) {
-      // 旧格式迁移（均只影响 5 分钟槽）：v1 { enabled } / v2 { enabledLong, enabledShort }
-      if (typeof obj.enabled === 'boolean') {
-        mtfAuto['5'].enabledLong = obj.enabled;
-        mtfAuto['5'].enabledShort = obj.enabled;
-      }
-      applyMtfAutoSlot(mtfAuto['5'], obj);
     }
+    // 更早的 v1/v2 单对象格式（旧 5分钟语义）不迁移：触发逻辑已改成组合条件, 静默作废
     for (const key of Object.keys(mtfAuto)) {
       if (mtfAutoArmed(mtfAuto[key])) {
         console.log(`[regime] MTF${key} 自动开仓状态已恢复: long=${mtfAuto[key].enabledLong} short=${mtfAuto[key].enabledShort}`);
@@ -1198,7 +1193,65 @@ function saveMtf5AutoState() {
 }
 loadMtf5AutoState();
 
-/** 单个周期的状态机：基线 → 变化确认 → (可选)强多强空飞书 → (武装时)自动开仓 */
+// ---- 组合过滤条件 ① 大周期 ② 15m RSI ③ 1m Delta ----
+
+// 最近一根已收盘 1m K 线的主动买卖差 (taker buy − taker sell), 按 K 线开盘时间缓存
+let _delta1mCache = { fetchedAt: 0, data: null };
+async function fetch1mDelta() {
+  const now = Date.now();
+  if (_delta1mCache.data && now - _delta1mCache.fetchedAt < 20 * 1000) return _delta1mCache.data;
+  const url = `${BINANCE_FAPI}/fapi/v1/klines`;
+  const { data } = await axios.get(url, {
+    params: { symbol: SYMBOL, interval: '1m', limit: 2 },
+    timeout: TIMEOUT,
+    httpAgent, httpsAgent,
+  });
+  if (!Array.isArray(data) || data.length < 2) return null;
+  const k = data[data.length - 2];              // 最后一根尚未收盘, 取倒数第二根（已收盘）
+  const volume = +k[5];
+  const takerBuy = +k[9];                        // 主动买量 (taker buy base volume)
+  const takerSell = volume - takerBuy;
+  const out = {
+    time: k[0], close: +k[4], volume,
+    takerBuy, takerSell,
+    delta: takerBuy - takerSell,                 // >0 = 买盘占优（绿柱） / <0 = 卖盘占优（红柱）
+  };
+  _delta1mCache = { fetchedAt: now, data: out };
+  return out;
+}
+
+/**
+ * 组合过滤条件评估（1分钟确认转强多/强空后、下单前调用）:
+ *   开多: (240m 或 60m ∈ 强多/偏多) + 15m RSI 最近超卖过 + 1m Delta 买盘
+ *   开空: (240m 或 60m ∈ 强空/偏空) + 15m RSI 最近超买过 + 1m Delta 卖盘
+ * @returns {{pass, htfOk, rsiOk, deltaOk, detail: string[]}}
+ */
+function evalMtfComboFilters(direction, delta1m) {
+  const isLong = direction === 'long';
+  const wantStates = isLong ? ['强多', '偏多'] : ['强空', '偏空'];
+  const r240 = getMtfRow('240');
+  const r60 = getMtfRow('60');
+  const htfOk = wantStates.includes(r240?.state) || wantStates.includes(r60?.state);
+
+  const rsiArr = cache?.m15?.rsi;
+  const zone = isLong ? 'OVERSOLD' : 'OVERBOUGHT';
+  const rsiOk = Array.isArray(rsiArr) && rsiArr.length > 0
+    && rsiTouchedWithin(rsiArr, zone, COMBO.lookback15m);
+  const rsiNow = Array.isArray(rsiArr) && rsiArr.length ? rsiArr[rsiArr.length - 1] : null;
+
+  const deltaOk = delta1m != null && Number.isFinite(delta1m.delta)
+    && (isLong ? delta1m.delta > 0 : delta1m.delta < 0);
+
+  const mk = (ok) => (ok ? '✅' : '❌');
+  const detail = [
+    `${mk(htfOk)} ① 240m「${r240?.state || '--'}」/ 60m「${r60?.state || '--'}」需含${isLong ? '强多/偏多' : '强空/偏空'}`,
+    `${mk(rsiOk)} ② 15m RSI 最近 ${COMBO.lookback15m} 根内${isLong ? '超卖过' : '超买过'} (当前 ${rsiNow != null ? rsiNow.toFixed(1) : '--'})`,
+    `${mk(deltaOk)} ③ 1m Delta ${delta1m ? (delta1m.delta >= 0 ? '+' : '') + delta1m.delta.toFixed(3) : '--'} 需为${isLong ? '买盘(绿柱)' : '卖盘(红柱)'}`,
+  ];
+  return { pass: htfOk && rsiOk && deltaOk, htfOk, rsiOk, deltaOk, detail };
+}
+
+/** 单个周期的状态机：基线 → 变化确认 → (可选)强多强空飞书 → (武装时)组合过滤 → 自动开仓 */
 async function mtfAutoTickTf(tfKey, mtf) {
   const slot = mtfAuto[tfKey];
   const cfg = MTF_AUTO_TF_CFG[tfKey];
@@ -1240,15 +1293,35 @@ async function mtfAutoTickTf(tfKey, mtf) {
   // 强多/强空确认成立：按配置推飞书（与开关是否武装无关）
   if (cfg.pushStrong) pushMtfStrongFeishu(tfKey, cfg.label, from, tfRow);
 
-  // 方向开关独立：只在对应周期对应方向武装时触发交易
+  // 方向开关独立：只在对应方向武装时评估组合过滤条件并触发交易
   const direction = cur === '强多' ? 'long' : 'short';
   const armed = direction === 'long' ? slot.enabledLong : slot.enabledShort;
   if (!armed) {
     console.log(`[regime] ⏭ MTF${tfKey} 状态确认 ${from} → ${cur}, 但${direction === 'long' ? '多' : '空'}方向开关未武装, 跳过下单`);
     return;
   }
-  console.log(`[regime] 🤖 MTF${tfKey} 自动开仓触发条件成立: ${from} → ${cur}`);
-  await fireMtfAutoOpen(tfKey, direction, tfRow);
+
+  // ⭐ 组合过滤：① 240m/60m 大周期方向 ② 15m RSI 最近超卖/超买过 ③ 1m Delta 买/卖盘
+  let delta1m = null;
+  try { delta1m = await fetch1mDelta(); }
+  catch (e) { console.error('[regime] 1m Delta 拉取失败:', e?.message || e); }
+  const filters = evalMtfComboFilters(direction, delta1m);
+  if (!filters.pass) {
+    console.log(`[regime] ⏭ MTF${tfKey} 确认转「${cur}」但组合过滤未通过, 保持武装:\n  ${filters.detail.join('\n  ')}`);
+    webhook.sendRich(
+      `⏭ 组合自动开${direction === 'long' ? '多' : '空'}条件未满足（保持武装）`,
+      [
+        [{ text: `📊 MTF 1分钟已确认转「${cur}」, 但组合过滤未全部通过:` }],
+        ...filters.detail.map((t) => [{ text: t }]),
+        [{ text: '开关保持武装, 下次 1分钟再次确认转强时会重新评估', italic: true }],
+        [{ text: `⏰ ${new Date().toLocaleString()}` }],
+      ],
+      { eventKey: `mtfComboSkip_${direction}` }
+    );
+    return;
+  }
+  console.log(`[regime] 🤖 MTF${tfKey} 组合自动开仓条件全部成立: ${from} → ${cur}\n  ${filters.detail.join('\n  ')}`);
+  await fireMtfAutoOpen(tfKey, direction, tfRow, filters);
 }
 
 async function mtfAutoTick() {
@@ -1278,7 +1351,7 @@ function pushMtfStrongFeishu(tfKey, label, from, tfRow) {
   );
 }
 
-async function fireMtfAutoOpen(tfKey, direction, tfRow) {
+async function fireMtfAutoOpen(tfKey, direction, tfRow, filters = null) {
   const slot = mtfAuto[tfKey];
   const label = MTF_AUTO_TF_CFG[tfKey].label;
   const now = Date.now();
@@ -1318,17 +1391,18 @@ async function fireMtfAutoOpen(tfKey, direction, tfRow) {
 
     webhook.sendRich(
       ok
-        ? `🤖 MTF${tfKey} 自动开仓：${label}转「${tfRow.state}」→ 已市价开${dirLabel}`
-        : `🤖 MTF${tfKey} 自动开仓被拒：${label}转「${tfRow.state}」`,
+        ? `🤖 组合自动开仓：${label}转「${tfRow.state}」+ 组合过滤通过 → 已市价开${dirLabel}`
+        : `🤖 组合自动开仓被拒：${label}转「${tfRow.state}」`,
       [
         [{ text: '⏰ 时间：', bold: true }, { text: new Date().toLocaleString() }],
         [{ text: `📊 ${label} MTF：`, bold: true }, { text: `${tfRow.state}（评分 ${scoreStr} · ${tfRow.action || '--'}）` }],
+        ...(filters ? filters.detail.map((t) => [{ text: t }]) : []),
         [{ text: '🎬 动作：', bold: true }, { text: ok ? `市价开${dirLabel}（立即成交）` : `开${dirLabel}失败` }],
         [{ text: '📋 结果：', bold: true }, { text: note }],
         ok
-          ? [{ text: `🔒 ${label}${direction === 'long' ? '多' : '空'}方向开关已自动关闭（单次触发防重复开仓），其余开关不受影响；如需再次自动开仓请到页面重新开启`, italic: true }]
+          ? [{ text: `🔒 组合开${direction === 'long' ? '多' : '空'}开关已自动关闭（单次触发防重复开仓），另一方向开关不受影响；如需再次自动开仓请到页面重新开启`, italic: true }]
           : [{ text: '⚠️ 本次未成交，开关保持武装，等待下一次状态转变', italic: true }],
-        [{ text: `来源：MTF${tfKey} 自动开仓（与「一键追单」同通道：市价成交, TP/SL 按 ATR 派生）`, italic: true }],
+        [{ text: '来源：MTF 组合条件自动开仓（与「一键追单」同通道：市价成交, TP/SL 按 ATR 派生）', italic: true }],
       ],
       { eventKey: `mtf${tfKey}AutoOpen`, force: true }
     );
@@ -1638,7 +1712,7 @@ function buildMacdRsiChartSlice(klines, ind, tail = CHART_TAIL) {
   };
 }
 
-// ---------------------- MTF 自动开仓（5分钟/1分钟）：状态查询 + 开关 ----------------------
+// ---------------------- MTF 组合条件自动开仓：状态查询 + 开关 ----------------------
 // GET 只读无需鉴权（与 /status 同级）；POST 会武装真实下单触发器, 走 trading 管理鉴权
 router.get('/mtf-auto-open', (req, res) => {
   let getTf = null;
@@ -1659,24 +1733,32 @@ router.get('/mtf-auto-open', (req, res) => {
       mtf: row ? { state: row.state, score: row.score, action: row.action } : null,
     };
   }
+  // 组合过滤条件当前快照（不拉 Delta, 避免 GET 轮询打 REST; Delta 只在触发时评估）
+  const filters = {
+    long: evalMtfComboFilters('long', null),
+    short: evalMtfComboFilters('short', null),
+  };
   res.json({
     ok: true,
     tfs,
+    filters: {
+      long: { htfOk: filters.long.htfOk, rsiOk: filters.long.rsiOk, detail: filters.long.detail },
+      short: { htfOk: filters.short.htfOk, rsiOk: filters.short.rsiOk, detail: filters.short.detail },
+    },
     confirm: MTF5_AUTO.confirm,
     cooldownMs: MTF5_AUTO.cooldownMs,
-    // 兼容旧字段（= 5分钟槽）
-    enabledLong: mtfAuto['5'].enabledLong,
-    enabledShort: mtfAuto['5'].enabledShort,
-    enabled: mtfAutoArmed(mtfAuto['5']),
-    lastFired: mtfAuto['5'].lastFired,
-    mtf5: tfs['5'].mtf,
+    // 兼容旧字段（= 1分钟槽; 组合逻辑后 5分钟槽已移除）
+    enabledLong: mtfAuto['1'].enabledLong,
+    enabledShort: mtfAuto['1'].enabledShort,
+    enabled: mtfAutoArmed(mtfAuto['1']),
+    lastFired: mtfAuto['1'].lastFired,
   });
 });
 
-// body: { tf?: '5'|'1'(默认'5'), enabledLong?: boolean, enabledShort?: boolean, enabled?: boolean(旧, 同时设双方向) }
+// body: { tf?: '1'(默认'1'), enabledLong?: boolean, enabledShort?: boolean, enabled?: boolean(旧, 同时设双方向) }
 router.post('/mtf-auto-open', mtf5AdminGuard, (req, res) => {
   const b = req.body || {};
-  const tfKey = b.tf != null ? String(b.tf) : '5';
+  const tfKey = b.tf != null ? String(b.tf) : '1';
   const slot = mtfAuto[tfKey];
   if (!slot) {
     return res.status(400).json({ ok: false, error: `tf 必须是 ${Object.keys(mtfAuto).join(' / ')}` });
@@ -1790,11 +1872,15 @@ module.exports = {
     buildM15ChartSlice,
     dispatch15mSignals,
     notifyState,
-    // MTF 自动开仓（供测试复用；mtf5Auto 为 mtfAuto['5'] 的兼容别名）
+    // MTF 组合条件自动开仓（供测试复用；mtf5Auto 为 mtfAuto['1'] 的兼容别名）
     mtfAutoTick,
     mtfAuto,
     mtf5Auto,
     MTF5_AUTO,
+    evalMtfComboFilters,
+    fetch1mDelta,
+    __setCacheM15ForTest: (m15) => { cache.m15 = m15; },
+    __resetDelta1mCacheForTest: () => { _delta1mCache = { fetchedAt: 0, data: null }; },
     // 同时暴露 enhanceRegime 给回测使用 (已经从 ./regime/enhancedJudge require)
     enhanceRegime,
     // 暴露常量
