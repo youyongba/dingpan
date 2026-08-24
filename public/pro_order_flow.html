@@ -1898,15 +1898,13 @@ function updateTooltip(e, x, y, inDelta) {
     if (idx >= 0 && idx < STATE.footprints.length) {
         const bar = STATE.footprints[idx];
         
+        let hasContent = false;
+        
         if (inDelta) {
             let cumulativeDelta = 0;
             for (let i = 0; i <= idx; i++) {
                 cumulativeDelta += STATE.footprints[i].totalDelta;
             }
-            
-            tooltip.style.display = 'block';
-            tooltip.style.left = (e.clientX + 15) + 'px';
-            tooltip.style.top = (e.clientY + 15) + 'px';
             
             tooltip.innerHTML = `
 <b>Bar Delta & CVD</b>
@@ -1914,15 +1912,11 @@ function updateTooltip(e, x, y, inDelta) {
 Delta: <span style="color:${bar.totalDelta>0?'var(--buy-color)':'var(--sell-color)'}">${bar.totalDelta > 0 ? '+' : ''}${bar.totalDelta.toFixed(2)}</span>
 CVD:   <span style="color:var(--poc-color)">${cumulativeDelta > 0 ? '+' : ''}${cumulativeDelta.toFixed(2)}</span>
             `;
-            return;
+            hasContent = true;
         } else {
             const p = Math.floor(yToPrice(y) / CONFIG.tickSize) * CONFIG.tickSize;
             if (bar.cells.has(p)) {
                 const cell = bar.cells.get(p);
-                tooltip.style.display = 'block';
-                tooltip.style.left = (e.clientX + 15) + 'px';
-                tooltip.style.top = (e.clientY + 15) + 'px';
-                
                 const isImbB = cell.buyImbalance ? '🔥' : '';
                 const isImbS = cell.sellImbalance ? '🔥' : '';
                 
@@ -1934,8 +1928,31 @@ Bid(买量): <span style="color:var(--buy-color)">${cell.buyVol.toFixed(2)}</spa
 Delta:   <span style="color:${cell.delta>0?'var(--buy-color)':'var(--sell-color)'}">${cell.delta > 0 ? '+' : ''}${cell.delta.toFixed(2)}</span>
 Total:   ${cell.totalVol.toFixed(2)}
                 `;
-                return;
+                hasContent = true;
             }
+        }
+
+        if (hasContent) {
+            tooltip.style.display = 'block';
+            
+            // 获取 tooltip 的实际宽高，用于动态计算位置，避免遮挡和溢出
+            const rect = tooltip.getBoundingClientRect();
+            let tLeft = e.clientX + 15;
+            let tTop = e.clientY + 15;
+            
+            // 如果右侧空间不够，让 tooltip 显示在鼠标左侧
+            if (tLeft + rect.width > window.innerWidth - 10) {
+                tLeft = e.clientX - rect.width - 15;
+            }
+            
+            // 如果底部空间不够，让 tooltip 显示在鼠标上方
+            if (tTop + rect.height > window.innerHeight - 10) {
+                tTop = e.clientY - rect.height - 15;
+            }
+            
+            tooltip.style.left = tLeft + 'px';
+            tooltip.style.top = tTop + 'px';
+            return;
         }
     }
     tooltip.style.display = 'none';
