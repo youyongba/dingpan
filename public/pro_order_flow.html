@@ -1270,10 +1270,76 @@ function drawVolumeProfileWalls() {
     
     if (priceRange <= 0) return;
 
-    // 找到在可视范围内的最大总成交量，用于归一化宽度
-    let maxTotalVol = 0;
+    // 1. 提取所有价格档位并计算 vPOC, VAH, VAL
+    let totalVol = 0;
+    let vpocLevel = null;
+    let maxVolOverall = -1;
+    const allLevels = [];
     
-    STATE.globalVolumeProfile.forEach((vData, pLevel) => {
+    STATE.globalVolumeProfile.forEach((vData, pLevelStr) => {
+        const pLevel = parseFloat(pLevelStr);
+        totalVol += vData.total;
+        allLevels.push({ price: pLevel, vol: vData.total });
+        if (vData.total > maxVolOverall) {
+            maxVolOverall = vData.total;
+            vpocLevel = pLevel;
+        }
+    });
+
+    let vah = vpocLevel;
+    let val = vpocLevel;
+
+    if (allLevels.length > 0 && vpocLevel !== null) {
+        allLevels.sort((a, b) => a.price - b.price);
+        const targetVol = totalVol * 0.70;
+        let currentVol = maxVolOverall;
+        
+        let vpocIdx = allLevels.findIndex(l => l.price === vpocLevel);
+        let upperIdx = vpocIdx;
+        let lowerIdx = vpocIdx;
+        
+        while (currentVol < targetVol) {
+            let upperVol = 0;
+            let lowerVol = 0;
+            
+            let u1 = upperIdx + 1 < allLevels.length ? allLevels[upperIdx + 1].vol : 0;
+            let u2 = upperIdx + 2 < allLevels.length ? allLevels[upperIdx + 2].vol : 0;
+            upperVol = u1 + u2;
+            
+            let l1 = lowerIdx - 1 >= 0 ? allLevels[lowerIdx - 1].vol : 0;
+            let l2 = lowerIdx - 2 >= 0 ? allLevels[lowerIdx - 2].vol : 0;
+            lowerVol = l1 + l2;
+            
+            if (upperVol === 0 && lowerVol === 0) break;
+            
+            if (upperVol >= lowerVol) {
+                if (upperIdx + 1 < allLevels.length) {
+                    currentVol += allLevels[upperIdx + 1].vol;
+                    upperIdx++;
+                }
+                if (upperIdx + 1 < allLevels.length && currentVol < targetVol) {
+                    currentVol += allLevels[upperIdx + 1].vol;
+                    upperIdx++;
+                }
+            } else {
+                if (lowerIdx - 1 >= 0) {
+                    currentVol += allLevels[lowerIdx - 1].vol;
+                    lowerIdx--;
+                }
+                if (lowerIdx - 1 >= 0 && currentVol < targetVol) {
+                    currentVol += allLevels[lowerIdx - 1].vol;
+                    lowerIdx--;
+                }
+            }
+        }
+        vah = allLevels[upperIdx].price;
+        val = allLevels[lowerIdx].price;
+    }
+
+    // 2. 找到在可视范围内的最大总成交量，用于归一化宽度
+    let maxTotalVol = 0;
+    STATE.globalVolumeProfile.forEach((vData, pLevelStr) => {
+        const pLevel = parseFloat(pLevelStr);
         // 稍微放宽一点边界
         if (pLevel >= viewMinP - CONFIG.tickSize && pLevel <= viewMaxP + CONFIG.tickSize) {
             if (vData.total > maxTotalVol) maxTotalVol = vData.total;
@@ -1282,9 +1348,15 @@ function drawVolumeProfileWalls() {
 
     if (maxTotalVol === 0) maxTotalVol = 1; // 防止除零
     
-    STATE.globalVolumeProfile.forEach((vData, pLevel) => {
+    // 3. 绘制柱状图
+    STATE.globalVolumeProfile.forEach((vData, pLevelStr) => {
+        const pLevel = parseFloat(pLevelStr);
         // 只绘制在主图可视范围内的筹码，避免因历史极值把图形压缩成一条线
         if (pLevel < viewMinP - CONFIG.tickSize || pLevel > viewMaxP + CONFIG.tickSize) return;
+
+        // 判断是否在 Value Area 内
+        const inVA = pLevel >= val && pLevel <= vah;
+        const alpha = inVA ? 0.8 : 0.3; // VA内的柱子更亮，外面的变暗
 
         // 计算在这个小画布中的 Y 坐标 (动态映射到可视区间)
         const mappedY = h - ((pLevel - viewMinP) / priceRange) * h;
@@ -1293,14 +1365,46 @@ function drawVolumeProfileWalls() {
         
         // 画买单柱子 (绿色，靠左)
         const buyWidth = (vData.buy / maxTotalVol) * w;
-        ctxVP.fillStyle = 'rgba(38, 166, 154, 0.7)';
+        ctxVP.fillStyle = `rgba(38, 166, 154, ${alpha})`;
         ctxVP.fillRect(0, mappedY - barHeight, buyWidth, barHeight - 0.5); // 留0.5px的缝隙
         
         // 画卖单柱子 (红色，紧挨着买单画)
         const sellWidth = (vData.sell / maxTotalVol) * w;
-        ctxVP.fillStyle = 'rgba(239, 83, 80, 0.7)';
+        ctxVP.fillStyle = `rgba(239, 83, 80, ${alpha})`;
         ctxVP.fillRect(buyWidth, mappedY - barHeight, sellWidth, barHeight - 0.5);
     });
+
+    // 4. 绘制 vPOC, VAH, VAL 线和标签
+    ctxVP.font = '10px Arial';
+    ctxVP.textAlign = 'right';
+    ctxVP.textBaseline = 'middle';
+
+    const drawLevelLine = (price, color, label) => {
+        if (price < viewMinP || price > viewMaxP) return; // 不在可视范围内则不画
+        const y = h - ((price - viewMinP) / priceRange) * h - ((CONFIG.tickSize / priceRange) * h) / 2;
+        
+        ctxVP.strokeStyle = color;
+        ctxVP.lineWidth = 1;
+        ctxVP.setLineDash([2, 2]);
+        ctxVP.beginPath();
+        ctxVP.moveTo(0, y);
+        ctxVP.lineTo(w, y);
+        ctxVP.stroke();
+        ctxVP.setLineDash([]);
+        
+        // 背景框
+        const textWidth = ctxVP.measureText(label).width;
+        ctxVP.fillStyle = 'rgba(19, 23, 34, 0.8)';
+        ctxVP.fillRect(w - textWidth - 6, y - 8, textWidth + 6, 16);
+        
+        // 文本
+        ctxVP.fillStyle = color;
+        ctxVP.fillText(label, w - 2, y);
+    };
+
+    if (vah !== null) drawLevelLine(vah, '#2962ff', 'VAH'); // 蓝色 VAH
+    if (val !== null) drawLevelLine(val, '#2962ff', 'VAL'); // 蓝色 VAL
+    if (vpocLevel !== null) drawLevelLine(vpocLevel, '#ffca28', 'vPOC'); // 黄色 vPOC
 }
 
 function drawRuler(ctx, w, h) {
