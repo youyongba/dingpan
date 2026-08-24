@@ -794,12 +794,13 @@ function timeToIndex(time) {
 function indexToX(index) {
     // 从右往左画
     const rightMargin = 220; // 再次加大右侧边距，彻底避免与价格轴和单墙标签重叠
-    return canvasFPMain.width - rightMargin + STATE.offsetX - (STATE.footprints.length - 1 - index) * CONFIG.candleWidth * STATE.scaleX;
+    // 强制最新一根 K 线 (index = footprints.length - 1) 的 X 坐标始终加上 200 的硬偏移
+    return canvasFPMain.width - rightMargin + 200 + STATE.offsetX - (STATE.footprints.length - 1 - index) * CONFIG.candleWidth * STATE.scaleX;
 }
 
 function xToIndex(x) {
     const rightMargin = 220; // 必须和 indexToX 保持一致
-    const diffX = canvasFPMain.width - rightMargin + STATE.offsetX - x;
+    const diffX = canvasFPMain.width - rightMargin + 200 + STATE.offsetX - x;
     return STATE.footprints.length - 1 - Math.round(diffX / (CONFIG.candleWidth * STATE.scaleX));
 }
 
@@ -849,9 +850,9 @@ function renderAll() {
 
 function drawPriceAxis(ctx, w, h) {
     ctx.fillStyle = '#1e222d';
-    ctx.fillRect(w - 60, 0, 60, h);
+    ctx.fillRect(w - 75, 0, 75, h);
     ctx.strokeStyle = '#2a2e39';
-    ctx.beginPath(); ctx.moveTo(w - 60, 0); ctx.lineTo(w - 60, h); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(w - 75, 0); ctx.lineTo(w - 75, h); ctx.stroke();
 
     ctx.fillStyle = '#787b86';
     ctx.font = '11px Consolas';
@@ -868,11 +869,11 @@ function drawPriceAxis(ctx, w, h) {
     
     while (p <= maxPrice) {
         const y = priceToY(p);
-        ctx.fillText(p.toFixed(1), w - 55, y);
+        ctx.fillText(p.toFixed(1), w - 65, y); // 往左移动
         
         // 画浅色网格线
         ctx.strokeStyle = 'rgba(42, 46, 57, 0.5)';
-        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w - 60, y); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w - 75, y); ctx.stroke();
         
         p += step;
     }
@@ -917,7 +918,7 @@ function drawFootprints(ctx, w, h) {
             ctx.strokeStyle = '#26a69a';
             ctx.lineWidth = 1.5;
             ctx.setLineDash([4, 4]);
-            ctx.beginPath(); ctx.moveTo(0, by); ctx.lineTo(w - 60, by); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(0, by); ctx.lineTo(w - 75, by); ctx.stroke();
             ctx.setLineDash([]);
         }
         
@@ -927,7 +928,7 @@ function drawFootprints(ctx, w, h) {
         
         // 画标签背景和文字
         ctx.fillStyle = '#26a69a';
-        ctx.fillRect(w - 200, labelY - 12, 140, 24); // 进一步加宽标签，防止文字重叠
+        ctx.fillRect(w - 280, labelY - 12, 140, 24); // 进一步往左移，防止和 K 线、最新价格重叠
         ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 11px Consolas';
         ctx.textAlign = 'center';
@@ -935,14 +936,14 @@ function drawFootprints(ctx, w, h) {
         
         // 显示周期和价格
         const tfLabel = document.querySelector('.btn-group .btn.active[data-tf]').innerText;
-        ctx.fillText(`${tfLabel}买单墙 ${strongestBuyPrice.toFixed(1)}`, w - 130, labelY);
+        ctx.fillText(`${tfLabel}买单墙 ${strongestBuyPrice.toFixed(1)}`, w - 210, labelY);
         
         // 如果墙在视野外，画个小箭头指示方向，并调整箭头位置
-        if (by < 0) ctx.fillText('▲', w - 190, labelY);
-        if (by > h) ctx.fillText('▼', w - 190, labelY);
+        if (by < 0) ctx.fillText('▲', w - 270, labelY);
+        if (by > h) ctx.fillText('▼', w - 270, labelY);
         
         STATE.wallLabels.push({
-            x: w - 200, y: labelY - 12, width: 140, height: 24,
+            x: w - 280, y: labelY - 12, width: 140, height: 24,
             targetPrice: strongestBuyPrice
         });
     }
@@ -954,7 +955,7 @@ function drawFootprints(ctx, w, h) {
             ctx.strokeStyle = '#ef5350';
             ctx.lineWidth = 1.5;
             ctx.setLineDash([4, 4]);
-            ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(w - 60, sy); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(w - 75, sy); ctx.stroke();
             ctx.setLineDash([]);
         }
         
@@ -969,21 +970,21 @@ function drawFootprints(ctx, w, h) {
         
         // 画标签背景和文字
         ctx.fillStyle = '#ef5350';
-        ctx.fillRect(w - 200, labelY - 12, 140, 24);
+        ctx.fillRect(w - 280, labelY - 12, 140, 24); // 往左移动
         ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 11px Consolas';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         
         const tfLabel = document.querySelector('.btn-group .btn.active[data-tf]').innerText;
-        ctx.fillText(`${tfLabel}卖单墙 ${strongestSellPrice.toFixed(1)}`, w - 130, labelY);
+        ctx.fillText(`${tfLabel}卖单墙 ${strongestSellPrice.toFixed(1)}`, w - 210, labelY);
         
         // 如果墙在视野外，画个小箭头指示方向，并调整箭头位置
-        if (sy < 0) ctx.fillText('▲', w - 190, labelY);
-        if (sy > h) ctx.fillText('▼', w - 190, labelY);
+        if (sy < 0) ctx.fillText('▲', w - 270, labelY);
+        if (sy > h) ctx.fillText('▼', w - 270, labelY);
         
         STATE.wallLabels.push({
-            x: w - 200, y: labelY - 12, width: 140, height: 24,
+            x: w - 280, y: labelY - 12, width: 140, height: 24,
             targetPrice: strongestSellPrice
         });
     }
@@ -1024,7 +1025,7 @@ function drawFootprints(ctx, w, h) {
                 if (by > 0 && by < h) {
                     ctx.strokeStyle = 'rgba(38, 166, 154, 0.3)';
                     ctx.setLineDash([2, 2]);
-                    ctx.beginPath(); ctx.moveTo(0, by); ctx.lineTo(w - 60, by); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(0, by); ctx.lineTo(w - 75, by); ctx.stroke();
                     ctx.setLineDash([]);
                     
                     ctx.fillStyle = 'rgba(38, 166, 154, 0.7)';
@@ -1040,7 +1041,7 @@ function drawFootprints(ctx, w, h) {
                 if (sy > 0 && sy < h) {
                     ctx.strokeStyle = 'rgba(239, 83, 80, 0.3)';
                     ctx.setLineDash([2, 2]);
-                    ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(w - 60, sy); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(w - 75, sy); ctx.stroke();
                     ctx.setLineDash([]);
                     
                     ctx.fillStyle = 'rgba(239, 83, 80, 0.7)';
@@ -1217,9 +1218,9 @@ function drawDeltaIndicator() {
 
     // 右侧遮罩 (和主图的刻度轴对齐)
     ctxDelta.fillStyle = '#1e222d';
-    ctxDelta.fillRect(w - 60, 0, 60, h);
+    ctxDelta.fillRect(w - 75, 0, 75, h);
     ctxDelta.strokeStyle = '#2a2e39';
-    ctxDelta.beginPath(); ctxDelta.moveTo(w - 60, 0); ctxDelta.lineTo(w - 60, h); ctxDelta.stroke();
+    ctxDelta.beginPath(); ctxDelta.moveTo(w - 75, 0); ctxDelta.lineTo(w - 75, h); ctxDelta.stroke();
 
     // 在右侧刻度轴显示最新数值
     if (cvdValues.length > 0) {
@@ -1357,20 +1358,20 @@ function drawUI(ctx, w, h) {
     ctx.setLineDash([4, 4]);
     ctx.beginPath();
     ctx.moveTo(0, cy + CONFIG.rowHeight/2);
-    ctx.lineTo(w - 60, cy + CONFIG.rowHeight/2);
+    ctx.lineTo(w - 75, cy + CONFIG.rowHeight/2);
     ctx.stroke();
     ctx.setLineDash([]);
 
     // 价格轴上的高亮标签
     ctx.fillStyle = '#ff9800';
-    ctx.fillRect(w - 60, cy, 60, CONFIG.rowHeight);
+    ctx.fillRect(w - 75, cy, 75, CONFIG.rowHeight); // 略微加宽右侧标签，并往左移一点，避免被边缘吞掉
     ctx.fillStyle = '#fff';
     ctx.font = 'bold 12px Consolas';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(STATE.currentPrice.toFixed(1), w - 30, cy + CONFIG.rowHeight/2);
+    ctx.fillText(STATE.currentPrice.toFixed(1), w - 37, cy + CONFIG.rowHeight/2);
 
-    // 绘制鼠标十字光标
+        // 绘制鼠标十字光标
     if (STATE.hoveredCell) {
         const hx = STATE.hoveredCell.x;
         const hy = STATE.hoveredCell.y;
@@ -1378,7 +1379,7 @@ function drawUI(ctx, w, h) {
         ctx.strokeStyle = 'rgba(255,255,255,0.2)';
         ctx.beginPath();
         ctx.moveTo(hx, 0); ctx.lineTo(hx, h);
-        ctx.moveTo(0, hy); ctx.lineTo(w - 60, hy);
+        ctx.moveTo(0, hy); ctx.lineTo(w - 75, hy);
         ctx.stroke();
     }
 }
@@ -1593,7 +1594,7 @@ fpContainer.addEventListener('wheel', e => {
     STATE.offsetY = STATE.offsetY + (h - mouseY) / STATE.scaleY - (h - mouseY) / oldScaleY;
     
     // 调整 X 轴平移，保持鼠标下方的时间位置不变
-    STATE.offsetX = mouseX - (w - 220) + (w - 220 + STATE.offsetX - mouseX) * (STATE.scaleX / oldScaleX);
+    STATE.offsetX = mouseX - (w - 220 + 200) + (w - 220 + 200 + STATE.offsetX - mouseX) * (STATE.scaleX / oldScaleX);
     
     renderAll();
 }, { passive: false });
