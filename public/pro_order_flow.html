@@ -265,7 +265,7 @@
 
         /* 悬浮提示框 (Tooltip) */
         #tooltip {
-            position: absolute;
+            position: fixed;
             background: rgba(19, 23, 34, 0.95);
             border: 1px solid var(--border-color);
             padding: 10px;
@@ -323,7 +323,6 @@
                 <canvas id="fp-grid-canvas"></canvas>
                 <canvas id="fp-main-canvas"></canvas>
                 <canvas id="fp-ui-canvas"></canvas>
-                <div id="tooltip"></div>
             </div>
 
             <!-- 底部指标区：Delta 柱状图 -->
@@ -372,6 +371,7 @@
         </div>
     </div>
 
+    <div id="tooltip"></div>
 <script>
 /**
  * 核心引擎：深度订单流系统
@@ -399,7 +399,7 @@ const STATE = {
     offsetY: 0,           // 图表平移偏移量 Y
     scaleX: 1.0,          // X 轴缩放
     scaleY: 1.0,          // Y 轴缩放
-    hoveredCell: null,    // 鼠标悬停的格子信息
+    hovered: null,        // 鼠标悬停的光标信息 {x, y, inDelta}
     rulerMode: false,     // 是否处于测量模式
     rulerStart: null,     // 测量起点 {x, y, price, index}
     rulerCurrent: null    // 测量当前点 {x, y, price, index}
@@ -830,8 +830,8 @@ function renderAll() {
     drawVolumeProfileWalls();
     
     // 如果鼠标在主图上悬停，同步在 VP 上画出对应价格的提示框
-    if (STATE.hoveredCell) {
-        const hoverPriceRaw = yToPrice(STATE.hoveredCell.y);
+    if (STATE.hovered && !STATE.hovered.inDelta) {
+        const hoverPriceRaw = yToPrice(STATE.hovered.y);
         drawVPHoverByPrice(hoverPriceRaw);
     }
     
@@ -1237,6 +1237,21 @@ function drawDeltaIndicator() {
         ctxDelta.fillText(`CVD`, w - 30, h / 2 + 10);
         ctxDelta.fillText(`${lastCVD > 0 ? '+' : ''}${lastCVD.toFixed(0)}`, w - 30, h / 2 + 25);
     }
+
+    // 绘制鼠标十字光标
+    if (STATE.hovered) {
+        const hx = STATE.hovered.x;
+        
+        ctxDelta.strokeStyle = 'rgba(255,255,255,0.2)';
+        ctxDelta.beginPath();
+        ctxDelta.moveTo(hx, 0); ctxDelta.lineTo(hx, h);
+        
+        if (STATE.hovered.inDelta) {
+            const hy = STATE.hovered.y;
+            ctxDelta.moveTo(0, hy); ctxDelta.lineTo(w - 75, hy);
+        }
+        ctxDelta.stroke();
+    }
 }
 
 // 绘制右侧面板的 Volume Profile
@@ -1368,15 +1383,18 @@ function drawUI(ctx, w, h) {
     ctx.textBaseline = 'middle';
     ctx.fillText(STATE.currentPrice.toFixed(1), w - 37, cy + CONFIG.rowHeight/2);
 
-        // 绘制鼠标十字光标
-    if (STATE.hoveredCell) {
-        const hx = STATE.hoveredCell.x;
-        const hy = STATE.hoveredCell.y;
+    // 绘制鼠标十字光标
+    if (STATE.hovered) {
+        const hx = STATE.hovered.x;
         
         ctx.strokeStyle = 'rgba(255,255,255,0.2)';
         ctx.beginPath();
         ctx.moveTo(hx, 0); ctx.lineTo(hx, h);
-        ctx.moveTo(0, hy); ctx.lineTo(w - 75, hy);
+        
+        if (!STATE.hovered.inDelta) {
+            const hy = STATE.hovered.y;
+            ctx.moveTo(0, hy); ctx.lineTo(w - 75, hy);
+        }
         ctx.stroke();
     }
 }
@@ -1443,46 +1461,6 @@ let isDragging = false;
 let lastMouseX = 0;
 let lastMouseY = 0;
 
-fpContainer.addEventListener('mousedown', e => {
-    const rect = fpContainer.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-
-    // 检查是否点击了单墙标签
-    if (STATE.wallLabels && STATE.wallLabels.length > 0) {
-        for (let label of STATE.wallLabels) {
-            if (x >= label.x && x <= label.x + label.width &&
-                y >= label.y && y <= label.y + label.height) {
-                // 点击了标签，自动滚动到该价格居中
-                const rectHeight = fpContainer.getBoundingClientRect().height;
-                STATE.offsetY = (rectHeight / 2) - (label.targetPrice / CONFIG.tickSize) * CONFIG.rowHeight;
-                
-                // 暂停自动跟随
-                STATE.isRunning = false;
-                document.getElementById('btn-play').classList.remove('active');
-                document.getElementById('btn-pause').classList.add('active');
-                document.getElementById('conn-status').textContent = '回放/浏览模式';
-                document.getElementById('conn-dot').style.backgroundColor = '#ff9800';
-                
-                renderAll();
-                return; // 结束事件，不触发拖拽
-            }
-        }
-    }
-
-    // 测量工具模式
-    if (STATE.rulerMode) {
-        STATE.rulerStart = { x, y, price: yToPrice(y), index: xToIndex(x) };
-        STATE.rulerCurrent = { x, y, price: yToPrice(y), index: xToIndex(x) };
-        renderAll();
-        return;
-    }
-
-    isDragging = true;
-    lastMouseX = e.clientX;
-    lastMouseY = e.clientY;
-});
-
 window.addEventListener('mouseup', () => isDragging = false);
 
 window.addEventListener('keydown', (e) => {
@@ -1496,123 +1474,154 @@ window.addEventListener('keydown', (e) => {
     }
 });
 
-fpContainer.addEventListener('mousemove', e => {
-    const rect = fpContainer.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+function bindChartEvents(container, isDelta) {
+    container.addEventListener('mousedown', e => {
+        const rect = container.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
 
-    if (STATE.rulerMode && STATE.rulerStart && (e.buttons === 1)) {
-        STATE.rulerCurrent = { x, y, price: yToPrice(y), index: xToIndex(x) };
-        renderAll();
-        return;
-    }
+        if (!isDelta && STATE.wallLabels && STATE.wallLabels.length > 0) {
+            for (let label of STATE.wallLabels) {
+                if (x >= label.x && x <= label.x + label.width &&
+                    y >= label.y && y <= label.y + label.height) {
+                    const rectHeight = fpContainer.getBoundingClientRect().height;
+                    STATE.offsetY = (rectHeight / 2) - (label.targetPrice / CONFIG.tickSize) * CONFIG.rowHeight;
+                    
+                    STATE.isRunning = false;
+                    document.getElementById('btn-play').classList.remove('active');
+                    document.getElementById('btn-pause').classList.add('active');
+                    document.getElementById('conn-status').textContent = '回放/浏览模式';
+                    document.getElementById('conn-dot').style.backgroundColor = '#ff9800';
+                    
+                    renderAll();
+                    return;
+                }
+            }
+        }
 
-    if (isDragging && !STATE.rulerMode) {
-        const dx = e.clientX - lastMouseX;
-        const dy = e.clientY - lastMouseY;
-        
-        STATE.offsetX += dx;
-        // Y 轴平移转换为价格平移
-        STATE.offsetY -= dy / STATE.scaleY; 
-        
+        if (!isDelta && STATE.rulerMode) {
+            STATE.rulerStart = { x, y, price: yToPrice(y), index: xToIndex(x) };
+            STATE.rulerCurrent = { x, y, price: yToPrice(y), index: xToIndex(x) };
+            renderAll();
+            return;
+        }
+
+        isDragging = true;
         lastMouseX = e.clientX;
         lastMouseY = e.clientY;
-        
-        // 暂停自动跟随
-        STATE.isRunning = false;
-        document.getElementById('btn-play').classList.remove('active');
-        document.getElementById('btn-pause').classList.add('active');
-        document.getElementById('conn-status').textContent = '回放/浏览模式';
-        document.getElementById('conn-dot').style.backgroundColor = '#ff9800';
-        
-        renderAll();
-    } else {
-        // 更新悬停光标
-        STATE.hoveredCell = { x, y };
-        
-        // 计算当前悬停的数据并更新 Tooltip
-        updateTooltip(x, y);
-        renderAll();
-    }
-});
-
-fpContainer.addEventListener('mouseleave', () => {
-    STATE.hoveredCell = null;
-    tooltip.style.display = 'none';
-    renderAll();
-});
-
-// 双击重置视角和缩放
-fpContainer.addEventListener('dblclick', () => {
-    STATE.scaleX = 1.0;
-    STATE.scaleY = 1.0;
-    const rect = fpContainer.getBoundingClientRect();
-    STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
-    STATE.offsetX = 0;
-    
-    // 恢复实时跟随模式
-    STATE.isRunning = true;
-    document.getElementById('btn-play').classList.add('active');
-    document.getElementById('btn-pause').classList.remove('active');
-    document.getElementById('conn-status').textContent = '实时数据同步中...';
-    document.getElementById('conn-dot').style.backgroundColor = 'var(--buy-color)';
-    
-    renderAll();
-});
-
-// 滚轮缩放
-fpContainer.addEventListener('wheel', e => {
-    e.preventDefault();
-    
-    const rect = fpContainer.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-    
-    const oldScaleX = STATE.scaleX;
-    const oldScaleY = STATE.scaleY;
-    
-    const zoomFactor = 0.1;
-    if (e.deltaY < 0) {
-        // 放大
-        STATE.scaleX = Math.min(3.0, STATE.scaleX + zoomFactor);
-        STATE.scaleY = Math.min(3.0, STATE.scaleY + zoomFactor);
-    } else {
-        // 缩小
-        STATE.scaleX = Math.max(0.5, STATE.scaleX - zoomFactor);
-        STATE.scaleY = Math.max(0.5, STATE.scaleY - zoomFactor);
-    }
-    
-    // 基于鼠标当前位置进行居中缩放计算
-    const h = canvasFPMain.height;
-    const w = canvasFPMain.width;
-    const rightMargin = 220;
-    
-    // 调整 Y 轴平移，保持鼠标下方的价格不变
-    STATE.offsetY = STATE.offsetY + (h - mouseY) / STATE.scaleY - (h - mouseY) / oldScaleY;
-    
-    // 调整 X 轴平移，保持鼠标下方的时间位置不变
-    STATE.offsetX = mouseX - (w - 300) + (w - 300 + STATE.offsetX - mouseX) * (STATE.scaleX / oldScaleX);
-    
-    renderAll();
-}, { passive: false });
-
-// 右键复制价格
-fpContainer.addEventListener('contextmenu', e => {
-    e.preventDefault();
-    
-    const rect = fpContainer.getBoundingClientRect();
-    const y = e.clientY - rect.top;
-    const price = yToPrice(y);
-    
-    // 按照 tickSize 对齐价格
-    const roundedPrice = Math.floor(price / CONFIG.tickSize) * CONFIG.tickSize;
-    
-    navigator.clipboard.writeText(roundedPrice.toFixed(1)).then(() => {
-        showToast(`已复制价格: ${roundedPrice.toFixed(1)}`);
-    }).catch(err => {
-        console.error('Failed to copy text: ', err);
     });
-});
+
+    container.addEventListener('mousemove', e => {
+        const rect = container.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+
+        if (!isDelta && STATE.rulerMode && STATE.rulerStart && (e.buttons === 1)) {
+            STATE.rulerCurrent = { x, y, price: yToPrice(y), index: xToIndex(x) };
+            renderAll();
+            return;
+        }
+
+        if (isDragging && !STATE.rulerMode) {
+            const dx = e.clientX - lastMouseX;
+            const dy = e.clientY - lastMouseY;
+            
+            STATE.offsetX += dx;
+            if (!isDelta) {
+                STATE.offsetY -= dy / STATE.scaleY; 
+            }
+            
+            lastMouseX = e.clientX;
+            lastMouseY = e.clientY;
+            
+            STATE.isRunning = false;
+            document.getElementById('btn-play').classList.remove('active');
+            document.getElementById('btn-pause').classList.add('active');
+            document.getElementById('conn-status').textContent = '回放/浏览模式';
+            document.getElementById('conn-dot').style.backgroundColor = '#ff9800';
+            
+            renderAll();
+        } else {
+            STATE.hovered = { x, y, inDelta: isDelta };
+            updateTooltip(e, x, y, isDelta);
+            renderAll();
+        }
+    });
+
+    container.addEventListener('mouseleave', () => {
+        STATE.hovered = null;
+        tooltip.style.display = 'none';
+        renderAll();
+    });
+
+    container.addEventListener('dblclick', () => {
+        STATE.scaleX = 1.0;
+        STATE.scaleY = 1.0;
+        const rect = fpContainer.getBoundingClientRect();
+        STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
+        STATE.offsetX = 0;
+        
+        STATE.isRunning = true;
+        document.getElementById('btn-play').classList.add('active');
+        document.getElementById('btn-pause').classList.remove('active');
+        document.getElementById('conn-status').textContent = '实时数据同步中...';
+        document.getElementById('conn-dot').style.backgroundColor = 'var(--buy-color)';
+        
+        renderAll();
+    });
+
+    container.addEventListener('wheel', e => {
+        e.preventDefault();
+        
+        const rect = container.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+        
+        const oldScaleX = STATE.scaleX;
+        const oldScaleY = STATE.scaleY;
+        
+        const zoomFactor = 0.1;
+        if (e.deltaY < 0) {
+            STATE.scaleX = Math.min(3.0, STATE.scaleX + zoomFactor);
+            STATE.scaleY = Math.min(3.0, STATE.scaleY + zoomFactor);
+        } else {
+            STATE.scaleX = Math.max(0.5, STATE.scaleX - zoomFactor);
+            STATE.scaleY = Math.max(0.5, STATE.scaleY - zoomFactor);
+        }
+        
+        const h = canvasFPMain.height;
+        const w = canvasFPMain.width;
+        
+        if (!isDelta) {
+            STATE.offsetY = STATE.offsetY + (h - mouseY) / STATE.scaleY - (h - mouseY) / oldScaleY;
+        }
+        
+        STATE.offsetX = mouseX - (w - 300) + (w - 300 + STATE.offsetX - mouseX) * (STATE.scaleX / oldScaleX);
+        
+        renderAll();
+    }, { passive: false });
+
+    if (!isDelta) {
+        container.addEventListener('contextmenu', e => {
+            e.preventDefault();
+            
+            const rect = container.getBoundingClientRect();
+            const y = e.clientY - rect.top;
+            const price = yToPrice(y);
+            
+            const roundedPrice = Math.floor(price / CONFIG.tickSize) * CONFIG.tickSize;
+            
+            navigator.clipboard.writeText(roundedPrice.toFixed(1)).then(() => {
+                showToast(`已复制价格: ${roundedPrice.toFixed(1)}`);
+            }).catch(err => {
+                console.error('Failed to copy text: ', err);
+            });
+        });
+    }
+}
+
+bindChartEvents(fpContainer, false);
+bindChartEvents(deltaContainer, true);
 
 // Toast 提示
 function showToast(msg) {
@@ -1664,31 +1673,50 @@ vpContainer.addEventListener('mouseleave', () => {
     drawVolumeProfileWalls();
 });
 
-function updateTooltip(x, y) {
-    // 找出对应的 K 线 index 和价格
+function updateTooltip(e, x, y, inDelta) {
     const idx = xToIndex(x);
-    const p = Math.floor(yToPrice(y) / CONFIG.tickSize) * CONFIG.tickSize;
     
     if (idx >= 0 && idx < STATE.footprints.length) {
         const bar = STATE.footprints[idx];
-        if (bar.cells.has(p)) {
-            const cell = bar.cells.get(p);
-            tooltip.style.display = 'block';
-            tooltip.style.left = (x + 15) + 'px';
-            tooltip.style.top = (y + 15) + 'px';
+        
+        if (inDelta) {
+            let cumulativeDelta = 0;
+            for (let i = 0; i <= idx; i++) {
+                cumulativeDelta += STATE.footprints[i].totalDelta;
+            }
             
-            const isImbB = cell.buyImbalance ? '🔥' : '';
-            const isImbS = cell.sellImbalance ? '🔥' : '';
+            tooltip.style.display = 'block';
+            tooltip.style.left = (e.clientX + 15) + 'px';
+            tooltip.style.top = (e.clientY + 15) + 'px';
             
             tooltip.innerHTML = `
+<b>Bar Delta & CVD</b>
+-----------------
+Delta: <span style="color:${bar.totalDelta>0?'var(--buy-color)':'var(--sell-color)'}">${bar.totalDelta > 0 ? '+' : ''}${bar.totalDelta.toFixed(2)}</span>
+CVD:   <span style="color:var(--poc-color)">${cumulativeDelta > 0 ? '+' : ''}${cumulativeDelta.toFixed(2)}</span>
+            `;
+            return;
+        } else {
+            const p = Math.floor(yToPrice(y) / CONFIG.tickSize) * CONFIG.tickSize;
+            if (bar.cells.has(p)) {
+                const cell = bar.cells.get(p);
+                tooltip.style.display = 'block';
+                tooltip.style.left = (e.clientX + 15) + 'px';
+                tooltip.style.top = (e.clientY + 15) + 'px';
+                
+                const isImbB = cell.buyImbalance ? '🔥' : '';
+                const isImbS = cell.sellImbalance ? '🔥' : '';
+                
+                tooltip.innerHTML = `
 <b>Price: ${p.toFixed(1)}</b>
 -----------------
 Ask(卖量): <span style="color:var(--sell-color)">${cell.sellVol.toFixed(2)}</span> ${isImbS}
 Bid(买量): <span style="color:var(--buy-color)">${cell.buyVol.toFixed(2)}</span> ${isImbB}
 Delta:   <span style="color:${cell.delta>0?'var(--buy-color)':'var(--sell-color)'}">${cell.delta > 0 ? '+' : ''}${cell.delta.toFixed(2)}</span>
 Total:   ${cell.totalVol.toFixed(2)}
-            `;
-            return;
+                `;
+                return;
+            }
         }
     }
     tooltip.style.display = 'none';
