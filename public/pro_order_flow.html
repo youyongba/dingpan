@@ -540,7 +540,7 @@ async function loadHistoricalAndConnect() {
         
         const rect = fpContainer.getBoundingClientRect();
         STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
-        STATE.offsetX = 200;
+        STATE.offsetX = 300;
         renderAll();
         
         connectWebSocket();
@@ -765,7 +765,7 @@ function resizeCanvas() {
     // 初始化居中偏移 (让最新价格在中间偏右)
     if (STATE.offsetY === 0) {
         STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
-        STATE.offsetX = 200; // 初次加载留出更多右侧价格轴空间
+        STATE.offsetX = 300; // 初次加载留出更多右侧价格轴空间
     }
     renderAll();
 }
@@ -793,12 +793,12 @@ function timeToIndex(time) {
 
 function indexToX(index) {
     // 从右往左画
-    const rightMargin = 120; // 加大右侧边距，避免最新价格被遮挡
+    const rightMargin = 220; // 再次加大右侧边距，彻底避免与价格轴和单墙标签重叠
     return canvasFPMain.width - rightMargin + STATE.offsetX - (STATE.footprints.length - 1 - index) * CONFIG.candleWidth * STATE.scaleX;
 }
 
 function xToIndex(x) {
-    const rightMargin = 120; // 必须和 indexToX 保持一致
+    const rightMargin = 220; // 必须和 indexToX 保持一致
     const diffX = canvasFPMain.width - rightMargin + STATE.offsetX - x;
     return STATE.footprints.length - 1 - Math.round(diffX / (CONFIG.candleWidth * STATE.scaleX));
 }
@@ -1550,7 +1550,7 @@ fpContainer.addEventListener('dblclick', () => {
     STATE.scaleY = 1.0;
     const rect = fpContainer.getBoundingClientRect();
     STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
-    STATE.offsetX = 200;
+    STATE.offsetX = 300;
     
     // 恢复实时跟随模式
     STATE.isRunning = true;
@@ -1587,13 +1587,13 @@ fpContainer.addEventListener('wheel', e => {
     // 基于鼠标当前位置进行居中缩放计算
     const h = canvasFPMain.height;
     const w = canvasFPMain.width;
-    const rightMargin = 120;
+    const rightMargin = 220;
     
     // 调整 Y 轴平移，保持鼠标下方的价格不变
     STATE.offsetY = STATE.offsetY + (h - mouseY) / STATE.scaleY - (h - mouseY) / oldScaleY;
     
     // 调整 X 轴平移，保持鼠标下方的时间位置不变
-    STATE.offsetX = mouseX - (w - rightMargin) + (w - rightMargin + STATE.offsetX - mouseX) * (STATE.scaleX / oldScaleX);
+    STATE.offsetX = mouseX - (w - 220) + (w - 220 + STATE.offsetX - mouseX) * (STATE.scaleX / oldScaleX);
     
     renderAll();
 }, { passive: false });
@@ -1733,7 +1733,7 @@ document.getElementById('btn-play').addEventListener('click', (e) => {
     document.getElementById('conn-dot').style.backgroundColor = 'var(--buy-color)';
     
     // 恢复中心视角
-    STATE.offsetX = 200;
+    STATE.offsetX = 300;
     const rect = fpContainer.getBoundingClientRect();
     STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
     
