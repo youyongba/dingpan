@@ -287,8 +287,8 @@
         <div class="title">PRO ORDER FLOW</div>
         
         <div class="btn-group">
-            <button class="btn" data-tf="1">1m</button>
-            <button class="btn active" data-tf="5">5m</button>
+            <button class="btn active" data-tf="1">1m</button>
+            <button class="btn" data-tf="5">5m</button>
             <button class="btn" data-tf="15">15m</button>
             <button class="btn" data-tf="60">1h</button>
             <button class="btn" data-tf="240">4h</button>
@@ -381,7 +381,7 @@
 // ================= 全局配置与状态 =================
 const CONFIG = {
     tickSize: 10.0,       // 价格聚合档位 (BTC 默认 10 刀一档)
-    timeframe: 5 * 60 * 1000, // 默认 5 分钟 K 线
+    timeframe: 1 * 60 * 1000, // 默认 1 分钟 K 线
     candleWidth: 80,      // K 线占据的像素宽度
     rowHeight: 18,        // 每个价格格子的像素高度
     imbalanceRatio: 3.0,  // 失衡比例 (买/卖 或 卖/买 > 3)
@@ -444,7 +444,7 @@ function resizeCanvas() {
     // 初始化居中偏移 (让最新价格在中间偏右)
     if (STATE.offsetY === 0 || STATE.isRunning) {
         STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
-        if (STATE.offsetY === 0) STATE.offsetX = 100; // 初次加载留出右侧价格轴空间
+        if (STATE.offsetY === 0) STATE.offsetX = 0; // 初次加载，offsetX 为 0 即可保证最新 K 线在 width - 300 的位置
     }
     renderAll();
 }
@@ -540,7 +540,7 @@ async function loadHistoricalAndConnect() {
         
         const rect = fpContainer.getBoundingClientRect();
         STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
-        STATE.offsetX = 300;
+        STATE.offsetX = 0;
         renderAll();
         
         connectWebSocket();
@@ -765,7 +765,7 @@ function resizeCanvas() {
     // 初始化居中偏移 (让最新价格在中间偏右)
     if (STATE.offsetY === 0) {
         STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
-        STATE.offsetX = 300; // 初次加载留出更多右侧价格轴空间
+        STATE.offsetX = 0; // 初始化时 offsetX 为 0
     }
     renderAll();
 }
@@ -792,15 +792,12 @@ function timeToIndex(time) {
 }
 
 function indexToX(index) {
-    // 从右往左画
-    const rightMargin = 220; // 再次加大右侧边距，彻底避免与价格轴和单墙标签重叠
-    // 强制最新一根 K 线 (index = footprints.length - 1) 的 X 坐标始终加上 200 的硬偏移
-    return canvasFPMain.width - rightMargin + 200 + STATE.offsetX - (STATE.footprints.length - 1 - index) * CONFIG.candleWidth * STATE.scaleX;
+    // 从右往左画。300px 的右侧边距（完美避开 75px的价格轴和 140px的单墙标签）
+    return canvasFPMain.width - 300 + STATE.offsetX - (STATE.footprints.length - 1 - index) * CONFIG.candleWidth * STATE.scaleX;
 }
 
 function xToIndex(x) {
-    const rightMargin = 220; // 必须和 indexToX 保持一致
-    const diffX = canvasFPMain.width - rightMargin + 200 + STATE.offsetX - x;
+    const diffX = canvasFPMain.width - 300 + STATE.offsetX - x;
     return STATE.footprints.length - 1 - Math.round(diffX / (CONFIG.candleWidth * STATE.scaleX));
 }
 
@@ -1551,7 +1548,7 @@ fpContainer.addEventListener('dblclick', () => {
     STATE.scaleY = 1.0;
     const rect = fpContainer.getBoundingClientRect();
     STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
-    STATE.offsetX = 300;
+    STATE.offsetX = 0;
     
     // 恢复实时跟随模式
     STATE.isRunning = true;
@@ -1594,7 +1591,7 @@ fpContainer.addEventListener('wheel', e => {
     STATE.offsetY = STATE.offsetY + (h - mouseY) / STATE.scaleY - (h - mouseY) / oldScaleY;
     
     // 调整 X 轴平移，保持鼠标下方的时间位置不变
-    STATE.offsetX = mouseX - (w - 220 + 200) + (w - 220 + 200 + STATE.offsetX - mouseX) * (STATE.scaleX / oldScaleX);
+    STATE.offsetX = mouseX - (w - 300) + (w - 300 + STATE.offsetX - mouseX) * (STATE.scaleX / oldScaleX);
     
     renderAll();
 }, { passive: false });
@@ -1734,7 +1731,7 @@ document.getElementById('btn-play').addEventListener('click', (e) => {
     document.getElementById('conn-dot').style.backgroundColor = 'var(--buy-color)';
     
     // 恢复中心视角
-    STATE.offsetX = 300;
+    STATE.offsetX = 0;
     const rect = fpContainer.getBoundingClientRect();
     STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
     
