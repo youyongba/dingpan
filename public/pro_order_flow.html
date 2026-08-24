@@ -301,6 +301,15 @@
         </div>
 
         <div class="btn-group" style="margin-left: 20px;">
+            <select id="fp-mode-select" class="btn" style="background-color: transparent; border-color: var(--border-color); color: var(--text-main); outline: none;">
+                <option value="volume">Volume</option>
+                <option value="bidask" selected>BidAsk</option>
+                <option value="delta">Delta Profile</option>
+                <option value="volumedelta">Volume&Delta</option>
+            </select>
+        </div>
+
+        <div class="btn-group" style="margin-left: 20px;">
             <button class="btn" id="btn-ruler">📏 测量</button>
             <button class="btn" id="btn-screenshot">📸 截图</button>
         </div>
@@ -402,7 +411,8 @@ const STATE = {
     hovered: null,        // 鼠标悬停的光标信息 {x, y, inDelta}
     rulerMode: false,     // 是否处于测量模式
     rulerStart: null,     // 测量起点 {x, y, price, index}
-    rulerCurrent: null    // 测量当前点 {x, y, price, index}
+    rulerCurrent: null,   // 测量当前点 {x, y, price, index}
+    fpMode: 'bidask'      // K 线图渲染模式
 };
 
 // ================= DOM 元素获取 =================
@@ -1107,23 +1117,66 @@ function drawFootprints(ctx, w, h) {
 
             const cy = y + rh / 2;
 
-            // 卖单 (Ask) - 画在左边
-            if (cell.sellVol > 0) {
-                ctx.fillStyle = cell.sellImbalance ? '#ef5350' : '#ffcdd2';
-                ctx.textAlign = 'right';
-                ctx.fillText(cell.sellVol.toFixed(1), cx - 5, cy);
-            }
+            const mode = STATE.fpMode || 'bidask';
 
-            // 买单 (Bid) - 画在右边
-            if (cell.buyVol > 0) {
-                ctx.fillStyle = cell.buyImbalance ? '#26a69a' : '#b2dfdb';
-                ctx.textAlign = 'left';
-                ctx.fillText(cell.buyVol.toFixed(1), cx + 5, cy);
+            if (mode === 'bidask') {
+                // 卖单 (Ask) - 画在左边
+                if (cell.sellVol > 0) {
+                    ctx.fillStyle = cell.sellImbalance ? '#ef5350' : '#ffcdd2';
+                    ctx.textAlign = 'right';
+                    ctx.fillText(cell.sellVol.toFixed(1), cx - 5, cy);
+                }
+
+                // 买单 (Bid) - 画在右边
+                if (cell.buyVol > 0) {
+                    ctx.fillStyle = cell.buyImbalance ? '#26a69a' : '#b2dfdb';
+                    ctx.textAlign = 'left';
+                    ctx.fillText(cell.buyVol.toFixed(1), cx + 5, cy);
+                }
+                
+                // 中间分隔线
+                ctx.fillStyle = 'rgba(255,255,255,0.1)';
+                ctx.fillRect(cx - 1, y + 2, 2, rh - 4);
+            } else if (mode === 'volume') {
+                const total = cell.buyVol + cell.sellVol;
+                if (total > 0) {
+                    // Color based on dominant side
+                    if (cell.buyVol > cell.sellVol * 1.5) ctx.fillStyle = '#26a69a';
+                    else if (cell.sellVol > cell.buyVol * 1.5) ctx.fillStyle = '#ef5350';
+                    else ctx.fillStyle = '#d1d4dc';
+                    
+                    ctx.textAlign = 'center';
+                    ctx.fillText(total.toFixed(1), cx, cy);
+                }
+            } else if (mode === 'delta') {
+                const delta = cell.buyVol - cell.sellVol;
+                if (delta !== 0) {
+                    ctx.fillStyle = delta > 0 ? '#26a69a' : '#ef5350';
+                    ctx.textAlign = 'center';
+                    ctx.fillText((delta > 0 ? '+' : '') + delta.toFixed(1), cx, cy);
+                }
+            } else if (mode === 'volumedelta') {
+                const total = cell.buyVol + cell.sellVol;
+                const delta = cell.buyVol - cell.sellVol;
+                
+                // Volume - 画在左边
+                if (total > 0) {
+                    ctx.fillStyle = '#d1d4dc';
+                    ctx.textAlign = 'right';
+                    ctx.fillText(total.toFixed(1), cx - 5, cy);
+                }
+
+                // Delta - 画在右边
+                if (delta !== 0) {
+                    ctx.fillStyle = delta > 0 ? '#26a69a' : '#ef5350';
+                    ctx.textAlign = 'left';
+                    ctx.fillText((delta > 0 ? '+' : '') + delta.toFixed(1), cx + 5, cy);
+                }
+                
+                // 中间分隔线
+                ctx.fillStyle = 'rgba(255,255,255,0.1)';
+                ctx.fillRect(cx - 1, y + 2, 2, rh - 4);
             }
-            
-            // 中间分隔线
-            ctx.fillStyle = 'rgba(255,255,255,0.1)';
-            ctx.fillRect(cx - 1, y + 2, 2, rh - 4);
         });
 
         // 4. 画 Delta 和 Total Vol (在 K 线底部)
@@ -1876,6 +1929,12 @@ document.getElementById('btn-pause').addEventListener('click', (e) => {
     document.getElementById('btn-play').classList.remove('active');
     document.getElementById('conn-status').textContent = '回放/浏览模式';
     document.getElementById('conn-dot').style.backgroundColor = '#ff9800';
+});
+
+// K 线图渲染模式切换
+document.getElementById('fp-mode-select').addEventListener('change', (e) => {
+    STATE.fpMode = e.target.value;
+    renderAll();
 });
 
 // 测量工具
