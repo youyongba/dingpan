@@ -1112,7 +1112,8 @@ function buildComboLines(isBull, ctx) {
 //   触发时刻再验三个过滤条件（全过才下单，任一不满足则跳过并保持武装）：
 //     ① 大周期方向：MTF 240分钟 或 60分钟 状态为「强多/偏多」（开空为「强空/偏空」）
 //     ② 15分钟 RSI：最近 COMBO.lookback15m 根收盘内出现过超卖（开空为超买过）
-//     ③ 1分钟 Delta：最近一根已收盘 1m K 线主动买盘 > 卖盘（绿柱; 开空为红柱）
+//     ③ 1分钟 Delta：转强确认窗口内（最近 MTF_COMBO_DELTA_BARS 根已收盘 1m K 线, 默认 3）
+//        累计主动买盘 > 卖盘（开空为卖盘 > 买盘）, 不看单独一根避免偶然性
 //   其余机制与旧版一致：
 //   - 多/空开关独立武装、独立触发、独立自动关闭
 //   - 每 30s 检查（只评估新快照, 按 updatedAt 去重）
@@ -1193,28 +1194,42 @@ function saveMtf5AutoState() {
 }
 loadMtf5AutoState();
 
-// ---- 组合过滤条件 ① 大周期 ② 15m RSI ③ 1m Delta ----
+// ---- 组合过滤条件 ① 大周期 ② 15m RSI ③ 1m Delta (确认窗口累计) ----
 
-// 最近一根已收盘 1m K 线的主动买卖差 (taker buy − taker sell), 按 K 线开盘时间缓存
+// Delta 统计窗口: 最近 N 根已收盘 1m K 线 (默认 3 ≈ 1分钟转强的 2 个 MTF 快照确认时长),
+// 累计主动买盘要多于卖盘才算买盘占优 — 不看单独一根, 避免单根绿柱的偶然性
+const MTF_COMBO_DELTA_BARS = Math.max(1, parseInt(process.env.MTF_COMBO_DELTA_BARS, 10) || 3);
+
 let _delta1mCache = { fetchedAt: 0, data: null };
 async function fetch1mDelta() {
   const now = Date.now();
   if (_delta1mCache.data && now - _delta1mCache.fetchedAt < 20 * 1000) return _delta1mCache.data;
   const url = `${BINANCE_FAPI}/fapi/v1/klines`;
   const { data } = await axios.get(url, {
-    params: { symbol: SYMBOL, interval: '1m', limit: 2 },
+    params: { symbol: SYMBOL, interval: '1m', limit: MTF_COMBO_DELTA_BARS + 1 },
     timeout: TIMEOUT,
     httpAgent, httpsAgent,
   });
   if (!Array.isArray(data) || data.length < 2) return null;
-  const k = data[data.length - 2];              // 最后一根尚未收盘, 取倒数第二根（已收盘）
-  const volume = +k[5];
-  const takerBuy = +k[9];                        // 主动买量 (taker buy base volume)
-  const takerSell = volume - takerBuy;
+  const closed = data.slice(0, -1);              // 最后一根尚未收盘, 只统计已收盘的
+  let buySum = 0;
+  let sellSum = 0;
+  const perBar = [];
+  for (const k of closed) {
+    const volume = +k[5];
+    const takerBuy = +k[9];                      // 主动买量 (taker buy base volume)
+    buySum += takerBuy;
+    sellSum += volume - takerBuy;
+    perBar.push(+(2 * takerBuy - volume).toFixed(3));   // 单根 delta（诊断用）
+  }
   const out = {
-    time: k[0], close: +k[4], volume,
-    takerBuy, takerSell,
-    delta: takerBuy - takerSell,                 // >0 = 买盘占优（绿柱） / <0 = 卖盘占优（红柱）
+    bars: closed.length,
+    time: closed[closed.length - 1][0],
+    close: +closed[closed.length - 1][4],
+    buySum: +buySum.toFixed(3),
+    sellSum: +sellSum.toFixed(3),
+    perBar,
+    delta: +(buySum - sellSum).toFixed(3),       // >0 = 窗口内买盘占优 / <0 = 卖盘占优
   };
   _delta1mCache = { fetchedAt: now, data: out };
   return out;
@@ -1222,8 +1237,8 @@ async function fetch1mDelta() {
 
 /**
  * 组合过滤条件评估（1分钟确认转强多/强空后、下单前调用）:
- *   开多: (240m 或 60m ∈ 强多/偏多) + 15m RSI 最近超卖过 + 1m Delta 买盘
- *   开空: (240m 或 60m ∈ 强空/偏空) + 15m RSI 最近超买过 + 1m Delta 卖盘
+ *   开多: (240m 或 60m ∈ 强多/偏多) + 15m RSI 最近超卖过 + 1m 确认窗口累计 Delta 买盘>卖盘
+ *   开空: (240m 或 60m ∈ 强空/偏空) + 15m RSI 最近超买过 + 1m 确认窗口累计 Delta 卖盘>买盘
  * @returns {{pass, htfOk, rsiOk, deltaOk, detail: string[]}}
  */
 function evalMtfComboFilters(direction, delta1m) {
@@ -1243,10 +1258,13 @@ function evalMtfComboFilters(direction, delta1m) {
     && (isLong ? delta1m.delta > 0 : delta1m.delta < 0);
 
   const mk = (ok) => (ok ? '✅' : '❌');
+  const deltaStr = delta1m
+    ? `近${delta1m.bars}根累计 买${delta1m.buySum} vs 卖${delta1m.sellSum} (净${delta1m.delta >= 0 ? '+' : ''}${delta1m.delta})`
+    : '--';
   const detail = [
     `${mk(htfOk)} ① 240m「${r240?.state || '--'}」/ 60m「${r60?.state || '--'}」需含${isLong ? '强多/偏多' : '强空/偏空'}`,
     `${mk(rsiOk)} ② 15m RSI 最近 ${COMBO.lookback15m} 根内${isLong ? '超卖过' : '超买过'} (当前 ${rsiNow != null ? rsiNow.toFixed(1) : '--'})`,
-    `${mk(deltaOk)} ③ 1m Delta ${delta1m ? (delta1m.delta >= 0 ? '+' : '') + delta1m.delta.toFixed(3) : '--'} 需为${isLong ? '买盘(绿柱)' : '卖盘(红柱)'}`,
+    `${mk(deltaOk)} ③ 1m Delta ${deltaStr} 需${isLong ? '买盘>卖盘' : '卖盘>买盘'}`,
   ];
   return { pass: htfOk && rsiOk && deltaOk, htfOk, rsiOk, deltaOk, detail };
 }

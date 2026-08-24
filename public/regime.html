@@ -1132,12 +1132,12 @@
   <button id="manualOpenShortBtn" class="manual-btn short" disabled>📉 挂空单</button>
   <span style="font-size:12px;color:#8b949e;white-space:nowrap;">🤖 组合:</span>
   <label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:#c9d1d9;cursor:pointer;white-space:nowrap;"
-         title="组合条件自动开多 (四条全满足才市价开多): ① MTF 240分钟或60分钟为「强多/偏多」 ② 15分钟 RSI 最近8根收盘内出现过超卖 ③ MTF 1分钟连续确认转为「强多」(边缘触发) ④ 最近一根已收盘1分钟K线 Delta 为买盘(绿柱)。条件不满足时跳过并保持武装。单次武装: 成功开仓后本开关自动关闭。与「一键追单」同通道 (市价成交, TP/SL 按 ATR 派生, 小仓位)。后端运行, 关闭浏览器仍生效">
+         title="组合条件自动开多 (四条全满足才市价开多): ① MTF 240分钟或60分钟为「强多/偏多」 ② 15分钟 RSI 最近8根收盘内出现过超卖 ③ MTF 1分钟连续确认转为「强多」(边缘触发) ④ 转强确认窗口内 (最近3根已收盘1分钟K线) 累计 Delta 主动买盘>卖盘。条件不满足时跳过并保持武装。单次武装: 成功开仓后本开关自动关闭。与「一键追单」同通道 (市价成交, TP/SL 按 ATR 派生, 小仓位)。后端运行, 关闭浏览器仍生效">
     <input type="checkbox" id="mtf1AutoLongChk" style="accent-color:#2ea043;cursor:pointer;" />
     🟢组合开多
   </label>
   <label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:#c9d1d9;cursor:pointer;white-space:nowrap;"
-         title="组合条件自动开空 (四条全满足才市价开空): ① MTF 240分钟或60分钟为「强空/偏空」 ② 15分钟 RSI 最近8根收盘内出现过超买 ③ MTF 1分钟连续确认转为「强空」(边缘触发) ④ 最近一根已收盘1分钟K线 Delta 为卖盘(红柱)。条件不满足时跳过并保持武装。单次武装: 成功开仓后本开关自动关闭。与「一键追单」同通道 (市价成交, TP/SL 按 ATR 派生, 小仓位)。后端运行, 关闭浏览器仍生效">
+         title="组合条件自动开空 (四条全满足才市价开空): ① MTF 240分钟或60分钟为「强空/偏空」 ② 15分钟 RSI 最近8根收盘内出现过超买 ③ MTF 1分钟连续确认转为「强空」(边缘触发) ④ 转强确认窗口内 (最近3根已收盘1分钟K线) 累计 Delta 主动卖盘>买盘。条件不满足时跳过并保持武装。单次武装: 成功开仓后本开关自动关闭。与「一键追单」同通道 (市价成交, TP/SL 按 ATR 派生, 小仓位)。后端运行, 关闭浏览器仍生效">
     <input type="checkbox" id="mtf1AutoShortChk" style="accent-color:#f85149;cursor:pointer;" />
     🔴组合开空
   </label>
@@ -3215,7 +3215,7 @@
       `· ① MTF 240分钟 或 60分钟 为「${isLong ? '强多/偏多' : '强空/偏空'}」\n` +
       `· ② 15分钟 RSI 最近 8 根收盘内出现过${isLong ? '超卖' : '超买'}\n` +
       `· ③ MTF 1分钟连续确认「转为」${isLong ? '强多' : '强空'} (边缘触发, 开启时不追溯已有状态)\n` +
-      `· ④ 最近一根已收盘 1分钟K线 Delta 为${isLong ? '买盘 (绿柱)' : '卖盘 (红柱)'}\n` +
+      `· ④ 转强确认窗口内 (最近 3 根已收盘 1分钟K线) 累计 Delta 主动${isLong ? '买盘 > 卖盘' : '卖盘 > 买盘'}\n` +
       '其他:\n' +
       '· 条件不满足时跳过下单并保持武装 (推飞书说明哪条没过)\n' +
       '· ⭐ 单次武装: 成功开仓后本开关自动关闭; 需再次手动开启\n' +
