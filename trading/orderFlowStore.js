@@ -1,0 +1,82 @@
+/**
+ * ============================================================
+ *  trading/orderFlowStore.js
+ *  后台真实 Order Flow 订单流收集器
+ *  - 订阅 priceFeed 的逐笔 tick (无阻塞，O(1) 复杂度)
+ *  - 将 tick 聚合为多周期的真实买卖盘分布 (Footprint)
+ *  - 提供 API 给前端，用真实数据覆盖历史 K 线的模拟数据
+ * ============================================================
+ */
+'use strict';
+
+const EventEmitter = require('events');
+const priceFeed = require('./priceFeed');
+
+const TICK_SIZE = 10.0;
+
+class OrderFlowStore extends EventEmitter {
+    constructor() {
+        super();
+        this.history = {
+            '1m': new Map(), // timestamp -> bar data
+            '5m': new Map(),
+            '15m': new Map(),
+            '1h': new Map()
+        };
+        // 保存足够长的历史以满足前端 150 根 K 线的需求
+        this.maxBars = 150;
+
+        // 无阻塞监听 tick，O(1) 操作，不影响风控引擎
+        priceFeed.on('tick', (data) => this._onTick(data));
+    }
+
+    _onTick(data) {
+        const { ts, raw } = data;
+        if (!raw || !raw.q || !raw.p) return;
+        const price = parseFloat(raw.p);
+        const qty = parseFloat(raw.q);
+        const isSell = raw.m; // true = active sell (maker is buyer)
+
+        const level = Math.floor(price / TICK_SIZE) * TICK_SIZE;
+
+        this._updateBar('1m', 60 * 1000, ts, price, qty, isSell, level);
+        this._updateBar('5m', 5 * 60 * 1000, ts, price, qty, isSell, level);
+        this._updateBar('15m', 15 * 60 * 1000, ts, price, qty, isSell, level);
+        this._updateBar('1h', 60 * 60 * 1000, ts, price, qty, isSell, level);
+    }
+
+    _updateBar(tfKey, tfMs, ts, price, qty, isSell, level) {
+        const startTime = Math.floor(ts / tfMs) * tfMs;
+        let map = this.history[tfKey];
+
+        if (!map.has(startTime)) {
+            // 清理旧数据，防止内存泄漏 (Ring Buffer 机制)
+            if (map.size >= this.maxBars) {
+                const oldest = Math.min(...Array.from(map.keys()));
+                map.delete(oldest);
+            }
+            map.set(startTime, {
+                startTime,
+                cells: {} // level -> { buyVol, sellVol }
+            });
+        }
+
+        let bar = map.get(startTime);
+        if (!bar.cells[level]) {
+            bar.cells[level] = { buyVol: 0, sellVol: 0 };
+        }
+        if (isSell) {
+            bar.cells[level].sellVol += qty;
+        } else {
+            bar.cells[level].buyVol += qty;
+        }
+    }
+
+    getHistory(tfKey) {
+        const map = this.history[tfKey];
+        if (!map) return [];
+        return Array.from(map.values()).sort((a, b) => a.startTime - b.startTime);
+    }
+}
+
+module.exports = new OrderFlowStore();

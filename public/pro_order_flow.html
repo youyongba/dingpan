@@ -544,9 +544,17 @@ async function loadHistoricalAndConnect() {
     }
 
     try {
-        const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${currentSymbol.toUpperCase()}&interval=${currentBinanceTF}&limit=150`);
-        const klines = await res.json();
-        buildHistoricalFootprint(klines);
+        // 并行拉取 Binance K 线和我们后端的真实 tick 聚合数据
+        const [binanceRes, historyRes] = await Promise.all([
+            fetch(`https://api.binance.com/api/v3/klines?symbol=${currentSymbol.toUpperCase()}&interval=${currentBinanceTF}&limit=150`),
+            fetch(`/api/auto-trade/orderflow/history?tf=${currentBinanceTF}`).catch(() => ({ json: () => ({ ok: false }) }))
+        ]);
+        
+        const klines = await binanceRes.json();
+        const historyData = await historyRes.json();
+        const realOrderFlow = historyData.ok ? historyData.data : [];
+        
+        buildHistoricalFootprint(klines, realOrderFlow);
         
         const rect = fpContainer.getBoundingClientRect();
         STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
@@ -561,9 +569,13 @@ async function loadHistoricalAndConnect() {
     }
 }
 
-function buildHistoricalFootprint(klines) {
+function buildHistoricalFootprint(klines, realOrderFlow = []) {
     STATE.footprints = [];
     STATE.globalVolumeProfile.clear();
+    
+    // 将后端传来的真实 tick 数据转为 map 方便 O(1) 查找
+    const realDataMap = new Map();
+    realOrderFlow.forEach(bar => realDataMap.set(bar.startTime, bar.cells));
     
     klines.forEach(k => {
         const startTime = k[0];
@@ -581,27 +593,77 @@ function buildHistoricalFootprint(klines) {
         bar.low = low;
         bar.close = close;
 
-        // Distribute volume across price levels between low and high
-        const startLevel = Math.floor(low / CONFIG.tickSize) * CONFIG.tickSize;
-        const endLevel = Math.floor(high / CONFIG.tickSize) * CONFIG.tickSize;
-        
-        const levelsCount = Math.round((endLevel - startLevel) / CONFIG.tickSize) + 1;
-        const buyVolPerLevel = takerBuyVol / levelsCount;
-        const sellVolPerLevel = takerSellVol / levelsCount;
-
-        for (let p = startLevel; p <= endLevel; p += CONFIG.tickSize) {
-            let cell = new FPCell(p);
-            cell.buyVol = buyVolPerLevel;
-            cell.sellVol = sellVolPerLevel;
-            bar.cells.set(p, cell);
+        // 如果后端有这一分钟的真实 tick 数据，直接使用
+        if (realDataMap.has(startTime)) {
+            const cells = realDataMap.get(startTime);
+            Object.keys(cells).forEach(pStr => {
+                const p = parseFloat(pStr);
+                const cellData = cells[pStr];
+                
+                let cell = new FPCell(p);
+                cell.buyVol = cellData.buyVol;
+                cell.sellVol = cellData.sellVol;
+                bar.cells.set(p, cell);
+                
+                if (!STATE.globalVolumeProfile.has(p)) {
+                    STATE.globalVolumeProfile.set(p, { buy: 0, sell: 0, total: 0 });
+                }
+                let pData = STATE.globalVolumeProfile.get(p);
+                pData.buy += cell.buyVol;
+                pData.sell += cell.sellVol;
+                pData.total += (cell.buyVol + cell.sellVol);
+            });
+        } else {
+            // 如果后端没有（比如重启前的数据），退化为钟形曲线模拟分配
+            const startLevel = Math.floor(low / CONFIG.tickSize) * CONFIG.tickSize;
+            const endLevel = Math.floor(high / CONFIG.tickSize) * CONFIG.tickSize;
             
-            if (!STATE.globalVolumeProfile.has(p)) {
-                STATE.globalVolumeProfile.set(p, { buy: 0, sell: 0, total: 0 });
+            // 找出实体部分的上下边界
+            const bodyTop = Math.max(open, close);
+            const bodyBottom = Math.min(open, close);
+            
+            let totalWeight = 0;
+            const weights = new Map();
+            
+            // 第一遍：计算每个价格档位的权重
+            for (let p = startLevel; p <= endLevel; p += CONFIG.tickSize) {
+                let weight = 1.0; // 基础权重 (影线部分)
+                
+                // 如果价格在实体内部，赋予更高权重 (例如 5 倍)
+                if (p >= bodyBottom && p <= bodyTop) {
+                    weight = 5.0;
+                }
+                
+                // 如果价格在开盘价或收盘价附近，赋予更高权重 (POC 往往在这里)
+                if (Math.abs(p - open) <= CONFIG.tickSize || Math.abs(p - close) <= CONFIG.tickSize) {
+                    weight = 8.0;
+                }
+                
+                // 添加一点随机性，让每个格子的数值看起来更自然 (0.8 ~ 1.2)
+                weight *= (0.8 + Math.random() * 0.4);
+                
+                weights.set(p, weight);
+                totalWeight += weight;
             }
-            let pData = STATE.globalVolumeProfile.get(p);
-            pData.buy += buyVolPerLevel;
-            pData.sell += sellVolPerLevel;
-            pData.total += (buyVolPerLevel + sellVolPerLevel);
+
+            // 第二遍：根据权重分配买卖量
+            for (let p = startLevel; p <= endLevel; p += CONFIG.tickSize) {
+                let cell = new FPCell(p);
+                const weight = weights.get(p) / totalWeight;
+                
+                cell.buyVol = takerBuyVol * weight;
+                cell.sellVol = takerSellVol * weight;
+                
+                bar.cells.set(p, cell);
+                
+                if (!STATE.globalVolumeProfile.has(p)) {
+                    STATE.globalVolumeProfile.set(p, { buy: 0, sell: 0, total: 0 });
+                }
+                let pData = STATE.globalVolumeProfile.get(p);
+                pData.buy += cell.buyVol;
+                pData.sell += cell.sellVol;
+                pData.total += (cell.buyVol + cell.sellVol);
+            }
         }
         
         STATE.footprints.push(bar);

@@ -15,6 +15,7 @@ const router = require('./router');
 const priceFeed = require('./priceFeed');
 const riskEngine = require('./riskEngine');
 const config = require('./config');
+const orderFlowStore = require('./orderFlowStore');
 
 let started = false;
 

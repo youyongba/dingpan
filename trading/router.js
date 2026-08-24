@@ -56,6 +56,7 @@ const state = require('./state');
 const priceFeed = require('./priceFeed');
 const exec = require('./executor');
 const riskEngine = require('./riskEngine');
+const orderFlowStore = require('./orderFlowStore');
 // TG 渠道用于实际开仓成交通知 (与 regime 喊单 sendTradeSignal 互不冲突)
 const tg = require('../notifier/telegram');
 const { cnTime } = require('../lib/timeFmt');
@@ -959,6 +960,16 @@ router.post('/reset', requireAdmin, (req, res) => {
     ],
   });
   res.json({ ok: true, prev });
+});
+
+// ============ GET /orderflow/history ============
+router.get('/orderflow/history', (req, res) => {
+  const tf = req.query.tf || '1m';
+  const tfMap = {
+    '1m': '1m', '5m': '5m', '15m': '15m', '60m': '1h', '1h': '1h'
+  };
+  const key = tfMap[tf] || '1m';
+  res.json({ ok: true, data: orderFlowStore.getHistory(key) });
 });
 
 // ============ GET /status ============
