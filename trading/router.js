@@ -2372,7 +2372,7 @@ async function dynamicLevelsTickDirection(direction) {
   });
 }
 
-// ============ POST /recalc-levels: 手动一键更新持仓 TP/SL (ATR+HV+ROC) ============
+// ============ POST /recalc-levels: 手动一键更新持仓 TP/SL ============
 //
 // body: { direction: 'long'|'short', resetManual?: boolean }
 //
@@ -2381,7 +2381,8 @@ async function dynamicLevelsTickDirection(direction) {
 //   「♻️ 恢复自动TP/SL」(resetManual=true):     先清掉该方向全部手动锁定标记再重算 —
 //                        编没编辑过都更新, 且之后恢复可被动态/按钮更新
 // 共同规则:
-//   - 强制用 ATR+HV+ROC 全量公式 (无论全局 hvRocLevels 开关是否开启)
+//   - 公式跟随「🧮 HV/ROC增强」开关 (cfg.hvRocLevels): 勾选=ATR+HV+ROC, 未勾选=纯 ATR
+//     (与动态止盈止损定时器同一口径, 不会互相覆盖)
 //   - 已触发的 TP 跳过; TP1 触发/保本后 SL 不动 (归风控套件管) — resetManual 也不例外
 //   - minChangePct=0: 只要重算结果与现值不同就更新 (无防抖阈值)
 //   - hardSlCap / 全量校验与动态止盈止损同一套
@@ -2391,6 +2392,8 @@ router.post('/recalc-levels', requireAdmin, (req, res) => {
     return res.status(400).json({ ok: false, error: 'direction must be long|short' });
   }
   const resetManual = !!req.body?.resetManual;
+  const hvRocOn = !!config.get().hvRocLevels;
+  const formulaLabel = hvRocOn ? 'ATR+HV+ROC' : 'ATR';
   let clearedLocks = null;
   if (resetManual) {
     const c = state.clearManualLevelFlags(direction);
@@ -2402,14 +2405,15 @@ router.post('/recalc-levels', requireAdmin, (req, res) => {
     }
     // c 失败 (无持仓) 时不提前返回, 交给下方 computeDynamicLevelChanges 统一报 409
   }
-  const out = computeDynamicLevelChanges(direction, { hvRoc: true, minChangePct: 0 });
+  // 公式跟随全局 hvRocLevels 开关 (hvRoc 不显式传值 = computeManualFallbackLevels 内部读 cfg)
+  const out = computeDynamicLevelChanges(direction, { minChangePct: 0 });
   if (!out.ok) {
     const status = out.reason === 'no_active_position' ? 409 : out.reason === 'no_atr_data' ? 503 : 400;
     return res.status(status).json({ ok: false, error: out.reason, hint: out.hint });
   }
   if (!out.changed) {
     return res.json({
-      ok: true, changed: false, reason: out.reason, resetManual,
+      ok: true, changed: false, reason: out.reason, resetManual, formula: formulaLabel,
       clearedLocks: clearedLocks || [],
       hint: out.reason === 'all_locked_or_hit'
         ? '全部价位已手动锁定或已触发, 无可更新项'
@@ -2418,34 +2422,28 @@ router.post('/recalc-levels', requireAdmin, (req, res) => {
     });
   }
   console.log(
-    `[trade.recalc] ${resetManual ? '♻️' : '🔄'} ${direction} ${resetManual ? '恢复自动更新' : '手动更新'} TP/SL (ATR+HV+ROC): `
+    `[trade.recalc] ${resetManual ? '♻️' : '🔄'} ${direction} ${resetManual ? '恢复自动更新' : '手动更新'} TP/SL (${formulaLabel}): `
     + Object.keys(out.changes).map((k) => `${k}=${out.changes[k]}`).join(' ')
   );
   notifyLevelsRecalc(direction, out, resetManual ? {
-    title: `♻️ ${direction.toUpperCase()} 持仓 TP/SL 已恢复自动更新 (ATR+HV+ROC)`,
+    title: `♻️ ${direction.toUpperCase()} 持仓 TP/SL 已恢复自动更新 (${formulaLabel})`,
     sourceComment: '恢复自动更新止盈止损 · reset_button',
     extraLine: clearedLocks && clearedLocks.length
       ? `来源: 持仓卡片「恢复自动TP/SL」按钮 (已解除手动锁定: ${clearedLocks.map((k) => k.toUpperCase()).join(' / ')})`
       : '来源: 持仓卡片「恢复自动TP/SL」按钮 (原本无手动锁定)',
   } : {
-    title: `🔄 ${direction.toUpperCase()} 持仓 TP/SL 已手动更新 (ATR+HV+ROC)`,
+    title: `🔄 ${direction.toUpperCase()} 持仓 TP/SL 已手动更新 (${formulaLabel})`,
     sourceComment: '手动更新止盈止损 · recalc_button',
     extraLine: '来源: 持仓卡片「更新TP/SL」按钮 (单次重算, 不持续跟随)',
   });
-  // ⚠️ 冲突提醒: 动态定时器开着且全局 HV/ROC 关着时, 按钮更新的 HV/ROC 价位
-  //    会在下一轮 tick 被纯 ATR 公式覆盖 — 按钮模式建议 AUTO_TRADE_DYNAMIC_LEVELS=0
-  const warning = DYNAMIC_LEVELS.enabled && !config.get().hvRocLevels
-    ? '动态止盈止损定时器仍在运行且未开启 HV/ROC 全局开关, 本次更新稍后可能被自动调整覆盖; 按钮模式建议设 AUTO_TRADE_DYNAMIC_LEVELS=0'
-    : null;
   res.json({
-    ok: true, changed: true, entry: out.entry, resetManual,
+    ok: true, changed: true, entry: out.entry, resetManual, formula: formulaLabel,
     clearedLocks: clearedLocks || [],
     prev: { tp1: out.r.prev.tp1, tp2: out.r.prev.tp2, tp3: out.r.prev.tp3, sl: out.r.prev.currentStopLoss },
     next: { tp1: out.r.next.tp1, tp2: out.r.next.tp2, tp3: out.r.next.tp3, sl: out.r.next.currentStopLoss },
     changes: Object.keys(out.changes),
     hvRoc: out.hvRoc,
     skippedLocked: out.skippedLocked || ['tp1', 'tp2', 'tp3', 'sl'].filter((k) => out.flags[k]),
-    warning,
   });
 });
 

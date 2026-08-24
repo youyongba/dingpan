@@ -279,6 +279,7 @@
         }
 
     </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 </head>
 <body>
 
@@ -297,6 +298,11 @@
         <div class="btn-group" style="margin-left: 20px;">
             <button class="btn active" id="btn-play">■ 实时</button>
             <button class="btn" id="btn-pause">▶ 回放</button>
+        </div>
+
+        <div class="btn-group" style="margin-left: 20px;">
+            <button class="btn" id="btn-ruler">📏 测量</button>
+            <button class="btn" id="btn-screenshot">📸 截图</button>
         </div>
 
         <div class="status-indicator">
@@ -393,7 +399,10 @@ const STATE = {
     offsetY: 0,           // 图表平移偏移量 Y
     scaleX: 1.0,          // X 轴缩放
     scaleY: 1.0,          // Y 轴缩放
-    hoveredCell: null     // 鼠标悬停的格子信息
+    hoveredCell: null,    // 鼠标悬停的格子信息
+    rulerMode: false,     // 是否处于测量模式
+    rulerStart: null,     // 测量起点 {x, y, price, index}
+    rulerCurrent: null    // 测量当前点 {x, y, price, index}
 };
 
 // ================= DOM 元素获取 =================
@@ -531,7 +540,7 @@ async function loadHistoricalAndConnect() {
         
         const rect = fpContainer.getBoundingClientRect();
         STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
-        STATE.offsetX = 100;
+        STATE.offsetX = 200;
         renderAll();
         
         connectWebSocket();
@@ -756,7 +765,7 @@ function resizeCanvas() {
     // 初始化居中偏移 (让最新价格在中间偏右)
     if (STATE.offsetY === 0) {
         STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
-        STATE.offsetX = 100; // 留出右侧价格轴空间
+        STATE.offsetX = 200; // 初次加载留出更多右侧价格轴空间
     }
     renderAll();
 }
@@ -784,12 +793,12 @@ function timeToIndex(time) {
 
 function indexToX(index) {
     // 从右往左画
-    const rightMargin = 80;
+    const rightMargin = 120; // 加大右侧边距，避免最新价格被遮挡
     return canvasFPMain.width - rightMargin + STATE.offsetX - (STATE.footprints.length - 1 - index) * CONFIG.candleWidth * STATE.scaleX;
 }
 
 function xToIndex(x) {
-    const rightMargin = 80;
+    const rightMargin = 120; // 必须和 indexToX 保持一致
     const diffX = canvasFPMain.width - rightMargin + STATE.offsetX - x;
     return STATE.footprints.length - 1 - Math.round(diffX / (CONFIG.candleWidth * STATE.scaleX));
 }
@@ -833,6 +842,9 @@ function renderAll() {
 
     // 5. 画十字光标和当前价格线
     drawUI(ctxUI, w, h);
+
+    // 6. 画测量标尺
+    drawRuler(ctxUI, w, h);
 }
 
 function drawPriceAxis(ctx, w, h) {
@@ -1278,6 +1290,65 @@ function drawVolumeProfileWalls() {
     });
 }
 
+function drawRuler(ctx, w, h) {
+    if (!STATE.rulerMode || !STATE.rulerStart || !STATE.rulerCurrent) return;
+
+    const startX = indexToX(STATE.rulerStart.index);
+    const startY = priceToY(STATE.rulerStart.price);
+    const currX = indexToX(STATE.rulerCurrent.index);
+    const currY = priceToY(STATE.rulerCurrent.price);
+
+    // 绘制半透明背景区域
+    ctx.fillStyle = 'rgba(41, 98, 255, 0.2)';
+    ctx.fillRect(startX, startY, currX - startX, currY - startY);
+
+    // 绘制边框
+    ctx.strokeStyle = '#2962ff';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(startX, startY, currX - startX, currY - startY);
+
+    // 绘制起点到终点的虚线
+    ctx.beginPath();
+    ctx.setLineDash([5, 5]);
+    ctx.moveTo(startX, startY);
+    ctx.lineTo(currX, currY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 计算差值
+    const priceDiff = STATE.rulerCurrent.price - STATE.rulerStart.price;
+    const percentDiff = (priceDiff / STATE.rulerStart.price) * 100;
+    const ticks = Math.round(priceDiff / CONFIG.tickSize);
+    
+    // index 差值
+    const barsDiff = Math.abs(STATE.rulerCurrent.index - STATE.rulerStart.index);
+    
+    // 信息框
+    const text1 = `${priceDiff > 0 ? '+' : ''}${priceDiff.toFixed(1)} (${percentDiff > 0 ? '+' : ''}${percentDiff.toFixed(2)}%)`;
+    const text2 = `${barsDiff} 根 K 线, ${Math.abs(ticks)} Ticks`;
+
+    ctx.font = '12px Arial';
+    const textWidth = Math.max(ctx.measureText(text1).width, ctx.measureText(text2).width) + 20;
+    const boxHeight = 44;
+    
+    // 决定信息框位置 (放在终点附近)
+    let boxX = currX + 10;
+    let boxY = currY + 10;
+    if (boxX + textWidth > w) boxX = currX - textWidth - 10;
+    if (boxY + boxHeight > h) boxY = currY - boxHeight - 10;
+
+    // 画信息框背景
+    ctx.fillStyle = 'rgba(41, 98, 255, 0.9)';
+    ctx.fillRect(boxX, boxY, textWidth, boxHeight);
+    
+    // 画文字
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text1, boxX + textWidth / 2, boxY + 14);
+    ctx.fillText(text2, boxX + textWidth / 2, boxY + 30);
+}
+
 function drawUI(ctx, w, h) {
     // 画当前价格线
     const cy = priceToY(STATE.currentPrice);
@@ -1401,6 +1472,14 @@ fpContainer.addEventListener('mousedown', e => {
         }
     }
 
+    // 测量工具模式
+    if (STATE.rulerMode) {
+        STATE.rulerStart = { x, y, price: yToPrice(y), index: xToIndex(x) };
+        STATE.rulerCurrent = { x, y, price: yToPrice(y), index: xToIndex(x) };
+        renderAll();
+        return;
+    }
+
     isDragging = true;
     lastMouseX = e.clientX;
     lastMouseY = e.clientY;
@@ -1408,12 +1487,29 @@ fpContainer.addEventListener('mousedown', e => {
 
 window.addEventListener('mouseup', () => isDragging = false);
 
+window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && STATE.rulerMode) {
+        STATE.rulerMode = false;
+        document.getElementById('btn-ruler').classList.remove('active');
+        STATE.rulerStart = null;
+        STATE.rulerCurrent = null;
+        fpContainer.style.cursor = 'default';
+        renderAll();
+    }
+});
+
 fpContainer.addEventListener('mousemove', e => {
     const rect = fpContainer.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
-    if (isDragging) {
+    if (STATE.rulerMode && STATE.rulerStart && (e.buttons === 1)) {
+        STATE.rulerCurrent = { x, y, price: yToPrice(y), index: xToIndex(x) };
+        renderAll();
+        return;
+    }
+
+    if (isDragging && !STATE.rulerMode) {
         const dx = e.clientX - lastMouseX;
         const dy = e.clientY - lastMouseY;
         
@@ -1454,7 +1550,7 @@ fpContainer.addEventListener('dblclick', () => {
     STATE.scaleY = 1.0;
     const rect = fpContainer.getBoundingClientRect();
     STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
-    STATE.offsetX = 100;
+    STATE.offsetX = 200;
     
     // 恢复实时跟随模式
     STATE.isRunning = true;
@@ -1491,7 +1587,7 @@ fpContainer.addEventListener('wheel', e => {
     // 基于鼠标当前位置进行居中缩放计算
     const h = canvasFPMain.height;
     const w = canvasFPMain.width;
-    const rightMargin = 80;
+    const rightMargin = 120;
     
     // 调整 Y 轴平移，保持鼠标下方的价格不变
     STATE.offsetY = STATE.offsetY + (h - mouseY) / STATE.scaleY - (h - mouseY) / oldScaleY;
@@ -1637,7 +1733,7 @@ document.getElementById('btn-play').addEventListener('click', (e) => {
     document.getElementById('conn-dot').style.backgroundColor = 'var(--buy-color)';
     
     // 恢复中心视角
-    STATE.offsetX = 100;
+    STATE.offsetX = 200;
     const rect = fpContainer.getBoundingClientRect();
     STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
     
@@ -1650,6 +1746,43 @@ document.getElementById('btn-pause').addEventListener('click', (e) => {
     document.getElementById('btn-play').classList.remove('active');
     document.getElementById('conn-status').textContent = '回放/浏览模式';
     document.getElementById('conn-dot').style.backgroundColor = '#ff9800';
+});
+
+// 测量工具
+document.getElementById('btn-ruler').addEventListener('click', (e) => {
+    STATE.rulerMode = !STATE.rulerMode;
+    if (STATE.rulerMode) {
+        e.target.classList.add('active');
+        STATE.rulerStart = null;
+        STATE.rulerCurrent = null;
+        fpContainer.style.cursor = 'crosshair';
+        showToast('已开启测量标尺，在主图表中按住鼠标拖拽测量');
+    } else {
+        e.target.classList.remove('active');
+        STATE.rulerStart = null;
+        STATE.rulerCurrent = null;
+        fpContainer.style.cursor = 'default';
+        renderAll();
+    }
+});
+
+// 截图功能
+document.getElementById('btn-screenshot').addEventListener('click', () => {
+    showToast('正在生成截图，请稍候...');
+    html2canvas(document.body, {
+        backgroundColor: '#131722',
+        useCORS: true,
+        logging: false
+    }).then(canvas => {
+        const link = document.createElement('a');
+        link.download = `pro_order_flow_${new Date().getTime()}.png`;
+        link.href = canvas.toDataURL();
+        link.click();
+        showToast('截图已保存');
+    }).catch(err => {
+        console.error('Screenshot failed:', err);
+        showToast('截图失败，请查看控制台');
+    });
 });
 
 // ================= 启动 =================
