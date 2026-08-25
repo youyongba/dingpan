@@ -1520,6 +1520,43 @@ function drawVolumeProfileWalls() {
     if (vah !== null) drawLevelLine(vah, '#2962ff', 'VAH'); // 蓝色 VAH
     if (val !== null) drawLevelLine(val, '#2962ff', 'VAL'); // 蓝色 VAL
     if (vpocLevel !== null) drawLevelLine(vpocLevel, '#ffca28', 'vPOC'); // 黄色 vPOC
+    
+    // --- 新增：检测 VAH/VAL/vPOC 变化并推送到飞书 ---
+    if (vah !== null && val !== null && vpocLevel !== null) {
+        if (!window.lastProfileAlert) window.lastProfileAlert = {};
+        
+        // 我们以 (周期 + vpoc + vah + val) 为唯一标识，只要组合改变就触发推送
+        const tf = document.querySelector('.btn-group .btn.active[data-tf]').innerText;
+        const currentProfileKey = `${tf}_${vpocLevel}_${vah}_${val}`;
+        
+        // 防抖：同一个周期的数据，只有真正发生位移时才推送
+        if (window.lastProfileAlert[tf] !== currentProfileKey) {
+            window.lastProfileAlert[tf] = currentProfileKey;
+            
+            // 为了防止首次加载时疯狂推送，加一个小延迟和防抖标记
+            if (!window._initialProfileLoaded) {
+                window._initialProfileLoaded = {};
+            }
+            
+            if (window._initialProfileLoaded[tf]) {
+                // 向后端发送推送请求
+                fetch('/api/auto-trade/notify-profile', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        tf: tf,
+                        vpoc: vpocLevel,
+                        vah: vah,
+                        val: val,
+                        symbol: currentSymbol
+                    })
+                }).catch(e => console.warn("Failed to send profile alert:", e));
+            } else {
+                // 标记该周期已完成首次加载，后续变化才推送
+                window._initialProfileLoaded[tf] = true;
+            }
+        }
+    }
 }
 
 function drawRuler(ctx, w, h) {

@@ -5,7 +5,7 @@
  *
  *  对外接口：
  *    POST /api/auto-trade/signal          接收外部 webhook 入仓/平仓信号 (body.token 校验)
- *    POST /api/auto-trade/tv-alert        📺 TradingView 策略警报 → 执行止盈1 (多空双向, body.token 校验)
+ *    POST /api/auto-trade/tv-alert        📺 TradingView 策略警报 → 止盈1 / 市价开多 / 市价开空 (body.token 校验)
  *    POST /api/auto-trade/pending-order   ⭐ 对外挂单交易信号 (body.direction, X-Auth-Token 鉴权)
  *                                          - 限价挂单, 价格回踩到 entry 才真下单
  *                                          - 价位用 regime plan 优先 / ATR 回退 (与 manual-open 同源)
@@ -895,20 +895,28 @@ router.post('/signal', async (req, res) => {
   res.status(r.status).json(r.body);
 });
 
-// ============ POST /tv-alert: TradingView 策略警报 → 执行止盈1 ============
+// ============ POST /tv-alert: TradingView 策略警报 → 止盈1 / 市价开多 / 市价开空 ============
 //
 // 供 TradingView「警报 → Webhook URL」直连:
 //   URL:  http(s)://<host>/api/auto-trade/tv-alert
-//   消息: {"token":"<AUTO_TRADE_WEBHOOK_TOKEN>","action":"tp1","direction":"long"}
+//   消息 (三种动作):
+//     执行止盈1: {"token":"<AUTO_TRADE_WEBHOOK_TOKEN>","action":"tp1","direction":"long"}
+//     市价开多:  {"token":"<AUTO_TRADE_WEBHOOK_TOKEN>","action":"open_long"}
+//     市价开空:  {"token":"<AUTO_TRADE_WEBHOOK_TOKEN>","action":"open_short"}
+//     (开仓也兼容 {"action":"open","direction":"long|short"} 写法;
+//      可选 "position_size": 数字, 覆盖默认置信度仓位, 上限 MAX_MANUAL_POSITION_PCT%)
 //
 // 设计:
 //   - 兼容 TradingView 两种 Content-Type: 消息为合法 JSON 时 TV 发 application/json
 //     (全局 express.json 已解析); 否则为 text/plain, 这里路由级 express.text 接住再手动 JSON.parse
-//   - 仅支持平仓类动作 action='tp1' (执行止盈1), 多空双向由 direction 指定
-//   - 完全复用 processSignal 的 take_profit 分支: 与 riskEngine / 手动按钮共享同一把
-//     幂等锁 (state.markTpHit) — TP1 已触发过或无 active 持仓时返回 409, 不会重复 fire
-//   - set_protection_sl 默认跟随 cfg.tp1Protection (TP1 后止损上移保本), 可在消息里显式传值覆盖
-//   - source='tradingview_alert' 在手动来源白名单内: 自动下单总开关关闭时平仓动作照常放行
+//   - tp1: 完全复用 processSignal 的 take_profit 分支, 与 riskEngine / 手动按钮共享同一把
+//     幂等锁 (state.markTpHit) — TP1 已触发过或无 active 持仓时返回 409, 不会重复 fire;
+//     set_protection_sl 默认跟随 cfg.tp1Protection (TP1 后止损上移保本), 可在消息里显式传值覆盖
+//   - open_long/open_short: 走「一键追单」同通道 (manualFollowImpl) — 立即市价成交,
+//     entry=当前 WS 市价, TP/SL 按 ATR 派生, 仓位按置信度 1%/2%/3% (可用 position_size 覆盖);
+//     同方向已有持仓/挂单时由 processSignal 返回 409, 不会重复开
+//   - source 在手动来源白名单内: TV 警报是用户显式配置的常驻触发器 (与价格触发器同语义),
+//     自动下单总开关关闭时仍放行 (tp1 用 'tradingview_alert', 开仓用 'tradingview_open')
 router.post('/tv-alert', express.text({ type: '*/*' }), async (req, res) => {
   let body = req.body;
   if (typeof body === 'string') {
@@ -923,8 +931,27 @@ router.post('/tv-alert', express.text({ type: '*/*' }), async (req, res) => {
     return res.status(401).json({ ok: false, error: 'invalid_token' });
   }
   const action = String(body.action || '').toLowerCase();
+
+  // ---- 市价开仓: open_long / open_short / open+direction ----
+  if (['open', 'open_long', 'open_short'].includes(action)) {
+    const direction = action === 'open_long' ? 'long'
+      : action === 'open_short' ? 'short'
+      : body.direction;
+    if (!['long', 'short'].includes(direction)) {
+      return res.status(400).json({ ok: false, error: 'direction must be long|short', hint: "action='open' 时必须带 direction, 或直接用 action='open_long'/'open_short'" });
+    }
+    const r = await manualFollowImpl({
+      direction,
+      source: 'tradingview_open',
+      position_size: body.position_size,
+    });
+    console.log(`[auto-trade] 📺 TradingView 警报: 市价开仓 ${direction} → status=${r.status} ${r.body?.error || 'ok'}`);
+    return res.status(r.status).json({ ...r.body, action: `open_${direction}`, direction });
+  }
+
+  // ---- 执行止盈1 ----
   if (action !== 'tp1') {
-    return res.status(400).json({ ok: false, error: `unsupported_action: ${body.action || ''}`, hint: "当前仅支持 action='tp1' (执行止盈1)" });
+    return res.status(400).json({ ok: false, error: `unsupported_action: ${body.action || ''}`, hint: "支持 action='tp1' (执行止盈1) / 'open_long' (市价开多) / 'open_short' (市价开空)" });
   }
   const direction = body.direction;
   if (!['long', 'short'].includes(direction)) {
@@ -970,6 +997,35 @@ router.get('/orderflow/history', (req, res) => {
   };
   const key = tfMap[tf] || '1m';
   res.json({ ok: true, data: orderFlowStore.getHistory(key) });
+});
+
+// ============ POST /notify-profile ============
+// 前端 pro_order_flow 检测到 VAH/VAL/vPOC 变化时，推送到飞书
+const webhook = require('../notifier/feishuWebhook');
+router.post('/notify-profile', express.json(), (req, res) => {
+  const { tf, vpoc, vah, val, symbol } = req.body;
+  if (!tf || !vpoc || !vah || !val) {
+    return res.status(400).json({ ok: false, error: 'Missing parameters' });
+  }
+
+  let title = `📊 ${symbol || 'BTCUSDT'} ${tf} 周期 Volume Profile 变动`;
+  let interpretation = '价值区域代表了 70% 成交量聚集的区间，vPOC 为流动性最密集的吸筹/派发中心。';
+
+  // 针对 15m 周期进行高亮强化，契合狙击手流动性猎杀策略
+  if (tf === '15m') {
+    title = `🚨 [重点关注] ${symbol || 'BTCUSDT'} 15m 主力筹码区转移`;
+    interpretation = '🔥 15分钟级别是寻找流动性猎杀 (Liquidation Hunt) 的核心周期！请结合 15m RSI 极值，在 VAH/VAL 边缘寻找「假突破+吸收」的反转狙击机会！';
+  }
+
+  webhook.sendRich(title, [
+    [{ text: '🎯 控制价位 (vPOC)：', bold: true }, { text: String(vpoc) }],
+    [{ text: '📈 价值区高点 (VAH)：', bold: true }, { text: String(vah) }],
+    [{ text: '📉 价值区低点 (VAL)：', bold: true }, { text: String(val) }],
+    [{ text: '💡 解读：', bold: true }, { text: interpretation }],
+    [{ text: `⏰ ${new Date().toLocaleString()}`, italic: true }]
+  ]);
+
+  res.json({ ok: true });
 });
 
 // ============ GET /status ============
@@ -1536,8 +1592,9 @@ function manualPositionOverridePct(cfg) {
 const MANUAL_TRADE_SOURCES = new Set([
   'manual_ui', 'manual_follow', 'price_trigger_open', 'price_trigger_follow', 'manual_fire',
   'mtf5_auto_open', 'mtf1_auto_open',
-  // TradingView 警报 (/tv-alert): 仅发平仓类动作 (tp_1), 总开关关闭时也应放行
-  'tradingview_alert',
+  // TradingView 警报 (/tv-alert): 用户显式配置的常驻触发器 (与价格触发器同语义), 总开关关闭时也放行.
+  //   tradingview_alert = 平仓类动作 (tp_1); tradingview_open = 市价开多/开空 (走 manualFollowImpl)
+  'tradingview_alert', 'tradingview_open',
 ]);
 function isManualTradeSource(source) {
   return MANUAL_TRADE_SOURCES.has(source);
