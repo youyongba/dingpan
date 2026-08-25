@@ -132,6 +132,39 @@ function _recordNearMiss(direction, level, price, reason) {
 // 期间不能阻塞 TP/SL 的 evaluate, 但同方向的 trigger 自己必须挡住重入.
 const _ptInFlight = { long: false, short: false };
 
+// ---------------- 价格触发器 1m Delta 闸门 ----------------
+//
+// 触发价命中后不立即下单, 先验最近一根**已收盘** 1m K 线的 Delta (主动买量 − 主动卖量):
+//   多单触发: Delta > 0 (买盘) → 放行下单; Delta ≤ 0 → 跳过, 触发器保留, 推飞书说明
+//   空单触发: Delta < 0 (卖盘) → 放行下单; Delta ≥ 0 → 同上
+// 被拦后进入"等待"状态: 每出一根新的 1m 收盘就重验一次, 直到 Delta 转向才真正下单.
+// ⭐ 等多久都不自动取消触发器 (用户硬性要求), 只有 fire 成功/手动删除/成交锁才会清掉.
+// 首次被拦推飞书, 之后每 5 根收盘 (~5分钟) 再推一条"仍在等待", 避免刷屏.
+// Delta 数据拉取失败时**放行** (fail-open): 触发器是用户显式的下单意图, 不因行情接口抖动卡死,
+// 但会在命中通知里加警示行.
+// 关闭闸门: .env 里 PRICE_TRIGGER_DELTA_GATE=0 (默认开启).
+const PT_DELTA_GATE = process.env.PRICE_TRIGGER_DELTA_GATE !== '0';
+const PT_DELTA_RENOTIFY_EVERY = 5;                       // 每 N 根被拦收盘再推一条飞书
+const _ptDeltaWait = { long: new Map(), short: new Map() };  // triggerId -> { since, lastBarTime, checks }
+
+/** 最近一根已收盘 1m K 线的 Delta (复用 regimeModule 的窗口拉取+20s 缓存, 取最后一根) */
+async function _fetchLastClosed1mDelta() {
+  try {
+    const { fetch1mDelta } = require('../regimeModule')._internal;
+    const d = await fetch1mDelta();
+    if (!d || !Array.isArray(d.perBar) || d.perBar.length === 0) return null;
+    return { barTime: d.time, delta: d.perBar[d.perBar.length - 1] };
+  } catch (e) {
+    console.error('[trade.risk] priceTrigger 1m Delta 拉取失败:', e?.message || e);
+    return null;
+  }
+}
+
+/** 当前时刻最近一根已收盘 1m K 线的开盘时间 (用于"是否出了新收盘"判断, 不打 REST) */
+function _lastClosedBarOpenTime(now = Date.now()) {
+  return Math.floor(now / 60000) * 60000 - 60000;
+}
+
 // 注: 早期版本曾保留 _processSignal 懒加载作为 fire 兜底, 现在 firePriceTrigger
 // 一律走 manualOpenImpl / manualFollowImpl (与 HTTP 端点同源), 已移除. 见下方 _getRouterManualOpen / Follow.
 
@@ -786,6 +819,11 @@ function evaluatePriceTriggers(price, tickTs) {
       const hit = (t.side === 'above' && price >= trigger)
                 || (t.side === 'below' && price <= trigger);
       if (!hit) continue;
+      // Delta 闸门等待中: 该收盘已验过且被拦 → 等下一根 1m 收盘再重验, 避免每 tick 打 REST
+      if (PT_DELTA_GATE) {
+        const w = _ptDeltaWait[dir].get(t.id);
+        if (w && _lastClosedBarOpenTime() <= w.lastBarTime) continue;
+      }
       _ptInFlight[dir] = true;
       // firePriceTrigger 内部: 先 consumePriceTrigger 原子按 id 删, 再走 manualOpenImpl/FollowImpl.
       // 即便 _ptInFlight 异常没释放, items[] 已没这条 id, 后续 evaluate 也匹配不到.
@@ -813,6 +851,48 @@ function evaluatePriceTriggers(price, tickTs) {
 async function firePriceTrigger(direction, triggerId, hitPrice, tickTs) {
   _recordFireLatency(tickTs);
   try {
+    // ============ 1m Delta 闸门 (在 consume 之前验, 被拦时触发器原样保留) ============
+    let deltaGateLine = null;
+    if (PT_DELTA_GATE) {
+      const d = await _fetchLastClosed1mDelta();
+      const isLong = direction === 'long';
+      if (d && Number.isFinite(d.delta)) {
+        const pass = isLong ? d.delta > 0 : d.delta < 0;
+        const deltaStr = `${d.delta >= 0 ? '+' : ''}${d.delta.toFixed(3)}`;
+        if (!pass) {
+          const w = _ptDeltaWait[direction].get(triggerId);
+          const next = { since: w?.since || Date.now(), lastBarTime: d.barTime, checks: (w?.checks || 0) + 1 };
+          _ptDeltaWait[direction].set(triggerId, next);
+          const waitMin = Math.round((Date.now() - next.since) / 60000);
+          console.log(`[trade.risk] ⏳ priceTrigger ${direction} id=${triggerId} 命中但 1m Delta 闸门拦截 (第${next.checks}根): Delta=${deltaStr} 需${isLong ? '买盘>卖盘' : '卖盘>买盘'}, 触发器保留等下一根收盘`);
+          // 首次被拦 + 之后每 PT_DELTA_RENOTIFY_EVERY 根推一条, 避免刷屏
+          if (next.checks === 1 || next.checks % PT_DELTA_RENOTIFY_EVERY === 0) {
+            const tInfo = (state.getPriceTriggers()[direction]?.items || []).find((x) => x?.id === triggerId);
+            exec.notify({
+              type: 'wait',
+              title: `⏳ ${direction.toUpperCase()} 价格触发器命中, 但 1m Delta 反向 → 暂不开仓`,
+              lines: [
+                `symbol: ${config.get().symbol}`,
+                `触发价/命中价: ${tInfo ? Number(tInfo.triggerPrice).toFixed(2) : '--'} / ${Number(hitPrice).toFixed(2)}`,
+                `最近一根 1m 收盘 Delta: ${deltaStr} (${d.delta >= 0 ? '买盘/绿柱' : '卖盘/红柱'}), 开${isLong ? '多需买盘' : '空需卖盘'}`,
+                next.checks > 1 ? `已连续 ${next.checks} 根收盘被拦 (约 ${waitMin} 分钟)` : null,
+                `触发器保留不取消, 每根新的 1m 收盘自动重验, Delta 转${isLong ? '正(买盘)' : '负(卖盘)'}后立即${tInfo?.action === 'follow' ? '市价追单' : '按原动作下单'}`,
+              ].filter(Boolean),
+            });
+          }
+          return;                                        // 不 consume, 触发器继续监听
+        }
+        // 通过: 若之前等待过, 把等待信息带进命中通知
+        const waited = _ptDeltaWait[direction].get(triggerId);
+        _ptDeltaWait[direction].delete(triggerId);
+        deltaGateLine = `1m Delta 闸门: ${deltaStr} (${isLong ? '买盘' : '卖盘'}) ✅`
+          + (waited ? ` · 此前被拦 ${waited.checks} 根收盘 (约 ${Math.round((Date.now() - waited.since) / 60000)} 分钟)` : '');
+      } else {
+        // fail-open: 数据不可用不卡用户显式下单意图, 但在通知里警示
+        deltaGateLine = '⚠️ 1m Delta 数据不可用, 闸门放行 (按原逻辑直接下单)';
+      }
+    }
+
     // ⚠️ 关键: 先按 id 原子 consume (写盘把这条从 items[] 删掉), 再走 manualOpenImpl/FollowImpl.
     //         consumePriceTrigger 是幂等的, 第二次返回 null → 直接放弃, 防止重复触发.
     const prev = state.consumePriceTrigger(direction, triggerId, hitPrice);
@@ -860,6 +940,7 @@ async function firePriceTrigger(direction, triggerId, hitPrice, tickTs) {
         `触发价: ${triggerStr} (${prev.side})`,
         `命中价: ${hitStr} ${sideStr} ${triggerStr}`,
         `启用时间: ${cnTime(prev.armedAt)}`,
+        deltaGateLine,
         `动作: ${action === 'follow' ? '🚀 立即市价追单 (ATR动态计算)' : '📋 挂单 (优先 regime plan, 无则 ATR 回退)'}`,
         overrideLine,
       ].filter(Boolean),
@@ -928,6 +1009,7 @@ function _finalizePriceTriggerResult(direction, prev, hitPrice, r, action, overr
   }
 
   // ⭐ 成交锁: fire 成功 → 清空该方向所有剩余触发器 + locked=true
+  _ptDeltaWait[direction].clear();                      // 剩余触发器将被清空, 等待状态一并清理
   const { cleared, lockedItems } = state.markPriceTriggerFiredLock(direction, prev);
   console.log(`[trade.risk] ✅ priceTrigger ${direction} fire 成功 action=${action} status=${r.status}; 成交锁清除剩余 ${cleared} 条触发器`);
 
@@ -1413,6 +1495,18 @@ module.exports = {
   // tick → fire 触发延迟 (ms): 用户能看到"风控真正以多快的速度响应价格触发"
   // evalCount: 累计 evaluate 调用次数, 用于健康检查 (与 priceFeed.tickRateTps 对照)
   getRiskTelemetry,
+  // ⭐ 价格触发器 1m Delta 闸门等待状态: 供 /status 输出, UI 显示"命中但 Delta 反向, 等待中"
+  getPriceTriggerDeltaWait: () => ({
+    enabled: PT_DELTA_GATE,
+    long: Object.fromEntries(_ptDeltaWait.long),
+    short: Object.fromEntries(_ptDeltaWait.short),
+  }),
+  // ⭐ 供离线测试: 直接驱动价格触发器评估 / 篡改等待记录的 lastBarTime 模拟"新收盘已到"
+  evaluatePriceTriggers,
+  _resetPtDeltaWaitForTest: (direction, triggerId, lastBarTime) => {
+    const w = _ptDeltaWait[direction].get(triggerId);
+    if (w) _ptDeltaWait[direction].set(triggerId, { ...w, lastBarTime });
+  },
   // ⭐ 价格围栏: 暴露给 router /direction-guard 端点用 — 用户改了阈值/启停后,
   // 路由立即用 priceFeed.lastPrice 调一次 evaluateDirectionGuard, 不必等下一帧 tick.
   evaluateDirectionGuard,

@@ -1,14 +1,14 @@
 {
   "lastTradeAction": "LONG",
   "startupSent": true,
-  "lastSubRegime": "WEAK_BULL",
-  "lastRsiZone": "OVERBOUGHT",
+  "lastSubRegime": "STRONG_BULL",
+  "lastRsiZone": "NEUTRAL",
   "lastMacdSide": "BULL",
-  "lastRsi15Zone": "OVERBOUGHT",
-  "lastMacd15Side": "BULL",
+  "lastRsi15Zone": "NEUTRAL",
+  "lastMacd15Side": "BEAR",
   "lastCombo1h": "NONE",
   "lastCombo15m": "NONE",
   "lastCombo1hMtf1": "NONE",
   "lastCombo15mMtf1": "NONE",
-  "savedAt": "2026-08-25T03:17:21.561Z"
+  "savedAt": "2026-08-25T05:02:21.102Z"
 }

@@ -1114,6 +1114,10 @@ router.get('/status', (req, res) => {
     positions: state.get(),
     // ⭐ 价格触发器 (后端 WS 监听 + disk 持久化, 浏览器关掉也会触发)
     priceTriggers: state.getPriceTriggers(),
+    // ⭐ 1m Delta 闸门: 命中但 Delta 反向而等待中的触发器 (triggerId -> {since, lastBarTime, checks})
+    priceTriggerDeltaWait: typeof riskEngine.getPriceTriggerDeltaWait === 'function'
+      ? riskEngine.getPriceTriggerDeltaWait()
+      : null,
     // ⭐ 风控引擎遥测: fire 延迟 + near-miss (价格 hit 但被节流挡的计数 + 最近一次详情),
     // 帮助用户在 UI 直接看到"为什么 TP2/TP3 没触发" — 如果 tpSkippedByCooldown 一直涨,
     // 说明 cooldown 偶尔挡住, 但链式接力(_chainEvaluate)应该已经自动补触发了

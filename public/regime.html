@@ -1160,7 +1160,7 @@
 <div class="price-trigger-bar">
   <div class="pt-head">
     <span class="pt-title">🎯 价格触发器</span>
-    <span class="pt-meta">🛰 后端 WS 监听 (浏览器关闭照样触发) · 同方向支持多条 · 成交即锁定整方向</span>
+    <span class="pt-meta" title="1m Delta 闸门: 触发价命中后先验最近一根已收盘 1 分钟 K 线的 Delta (主动买量−卖量)。开多需买盘(绿柱)、开空需卖盘(红柱), 反向时不下单并推飞书, 触发器保留, 每根新收盘自动重验直到 Delta 转向才开仓, 等多久都不自动取消">🛰 后端 WS 监听 (浏览器关闭照样触发) · 同方向支持多条 · 成交即锁定整方向 · ⏳ 命中先验 1m Delta, 反向等收盘转向</span>
   </div>
   <div class="pt-grid">
     <!-- 多单触发器 -->
@@ -1677,7 +1677,7 @@
       // ⭐ 价格触发器: 改为完全后端驱动 (riskEngine + WS 监听 + disk 持久化),
       // 浏览器关闭/刷新都照样触发. 前端只负责显示和 arm/cancel 的 API 调用,
       // 触发器状态从 /status 拉取, 不再 evaluate 本地.
-      syncPriceTriggersFromStatus(j.priceTriggers || {});
+      syncPriceTriggersFromStatus(j.priceTriggers || {}, j.priceTriggerDeltaWait || null);
       renderPriceTriggers(lastPriceForCard);
       // TP1 保本止损开关
       const tp1On = j.tp1Protection !== false;
@@ -3261,12 +3261,13 @@
     }
   } catch (_) {}
 
-  /** 从 /status 拉到的 j.priceTriggers 同步到本地缓存 */
-  function syncPriceTriggersFromStatus(remote) {
+  /** 从 /status 拉到的 j.priceTriggers 同步到本地缓存 (deltaWait = 1m Delta 闸门等待状态) */
+  function syncPriceTriggersFromStatus(remote, deltaWait) {
     ['long', 'short'].forEach((dir) => {
       const r = remote && remote[dir] ? remote[dir] : null;
       const items = (r && Array.isArray(r.items)) ? r.items : [];
       priceTriggers[dir] = {
+        deltaWait: (deltaWait && deltaWait[dir]) || {},
         items: items
           .filter(t => t && t.id && Number.isFinite(Number(t.triggerPrice)))
           .map(t => ({
@@ -3347,12 +3348,18 @@
           else if (distPct < 0.3) { distCls += ' near'; itemCls += ' near'; }
           distHtml = `<span class="${distCls}">距 ${distPct.toFixed(3)}% (${distAbs.toFixed(2)} U)</span>`;
         }
+        // 1m Delta 闸门等待中: 价格已命中但最近收盘 Delta 反向, 每根新收盘自动重验
+        const w = slot.deltaWait && slot.deltaWait[t.id];
+        const waitHtml = w
+          ? `<span style="color:#d29922;font-size:11px;white-space:nowrap;" title="触发价已命中, 但最近 1 分钟收盘 Delta 为${dir === 'long' ? '卖盘(红柱), 开多需买盘' : '买盘(绿柱), 开空需卖盘'}。触发器保留, 每根新的 1 分钟收盘自动重验, Delta 转向后立即下单">⏳ Delta 反向 已拦 ${w.checks} 根收盘</span>`
+          : '';
         parts.push(`
           <div class="${itemCls}" data-id="${t.id}">
             <span class="pt-item-price">${target}</span>
             <span class="pt-item-side">${sideZh}</span>
             <span class="pt-item-action ${actCls}">${actZh}</span>
             ${distHtml}
+            ${waitHtml}
             <button class="pt-item-cancel" data-pt-cancel="${t.id}" data-pt-dir="${dir}" title="取消此条">❎</button>
           </div>
         `);
