@@ -5,7 +5,7 @@
  *
  *  对外接口：
  *    POST /api/auto-trade/signal          接收外部 webhook 入仓/平仓信号 (body.token 校验)
- *    POST /api/auto-trade/tv-alert        📺 TradingView 策略警报 → 止盈1 / 市价开多 / 市价开空 (body.token 校验)
+ *    POST /api/auto-trade/tv-alert        📺 TradingView 策略警报 → 市价开多/开空 · 止盈1/2/3 · 止损 (body.token 校验)
  *    POST /api/auto-trade/pending-order   ⭐ 对外挂单交易信号 (body.direction, X-Auth-Token 鉴权)
  *                                          - 限价挂单, 价格回踩到 entry 才真下单
  *                                          - 价位用 regime plan 优先 / ATR 回退 (与 manual-open 同源)
@@ -895,28 +895,34 @@ router.post('/signal', async (req, res) => {
   res.status(r.status).json(r.body);
 });
 
-// ============ POST /tv-alert: TradingView 策略警报 → 止盈1 / 市价开多 / 市价开空 ============
+// ============ POST /tv-alert: TradingView 策略警报 → 开仓 / 止盈 / 止损 ============
 //
 // 供 TradingView「警报 → Webhook URL」直连:
 //   URL:  http(s)://<host>/api/auto-trade/tv-alert
-//   消息 (三种动作):
-//     执行止盈1: {"token":"<AUTO_TRADE_WEBHOOK_TOKEN>","action":"tp1","direction":"long"}
-//     市价开多:  {"token":"<AUTO_TRADE_WEBHOOK_TOKEN>","action":"open_long"}
-//     市价开空:  {"token":"<AUTO_TRADE_WEBHOOK_TOKEN>","action":"open_short"}
-//     (开仓也兼容 {"action":"open","direction":"long|short"} 写法;
-//      可选 "position_size": 数字, 覆盖默认置信度仓位, 上限 MAX_MANUAL_POSITION_PCT%)
+//   消息 (六种动作, token 均为 AUTO_TRADE_WEBHOOK_TOKEN):
+//     市价开多:  {"token":"...","action":"open_long"}
+//     市价开空:  {"token":"...","action":"open_short"}
+//     执行止盈1: {"token":"...","action":"tp1","direction":"long|short"}
+//     执行止盈2: {"token":"...","action":"tp2","direction":"long|short"}
+//     执行止盈3: {"token":"...","action":"tp3","direction":"long|short"}  (触发后自动解锁该方向)
+//     执行止损:  {"token":"...","action":"sl", "direction":"long|short"}  (100% 全平并解锁)
+//   兼容写法: 开仓可用 {"action":"open","direction":...}; 止盈可用 tp_1/tp_2/tp_3;
+//   开仓可选 "position_size": 数字 (覆盖默认置信度仓位, 上限 MAX_MANUAL_POSITION_PCT%)
 //
 // 设计:
 //   - 兼容 TradingView 两种 Content-Type: 消息为合法 JSON 时 TV 发 application/json
 //     (全局 express.json 已解析); 否则为 text/plain, 这里路由级 express.text 接住再手动 JSON.parse
-//   - tp1: 完全复用 processSignal 的 take_profit 分支, 与 riskEngine / 手动按钮共享同一把
-//     幂等锁 (state.markTpHit) — TP1 已触发过或无 active 持仓时返回 409, 不会重复 fire;
-//     set_protection_sl 默认跟随 cfg.tp1Protection (TP1 后止损上移保本), 可在消息里显式传值覆盖
+//   - tp1/tp2/tp3: 完全复用 processSignal 的 take_profit 分支, 与 riskEngine / 手动按钮共享
+//     同一把幂等锁 (state.markTpHit) — 该级已触发过或无 active 持仓时返回 409, 不会重复 fire;
+//     set_protection_sl (TP 后止损上移保本) 默认: tp1 跟随 cfg.tp1Protection, tp2/tp3 默认 false,
+//     均可在消息里显式传值覆盖
+//   - sl: 复用 processSignal 的 stop_loss 分支, 与 riskEngine.fireSl 共享幂等锁
+//     (state.closeAndUnlock) — 已平仓/无持仓返回 409, 不会双发 webhook
 //   - open_long/open_short: 走「一键追单」同通道 (manualFollowImpl) — 立即市价成交,
 //     entry=当前 WS 市价, TP/SL 按 ATR 派生, 仓位按置信度 1%/2%/3% (可用 position_size 覆盖);
 //     同方向已有持仓/挂单时由 processSignal 返回 409, 不会重复开
 //   - source 在手动来源白名单内: TV 警报是用户显式配置的常驻触发器 (与价格触发器同语义),
-//     自动下单总开关关闭时仍放行 (tp1 用 'tradingview_alert', 开仓用 'tradingview_open')
+//     自动下单总开关关闭时仍放行 (平仓类用 'tradingview_alert', 开仓用 'tradingview_open')
 router.post('/tv-alert', express.text({ type: '*/*' }), async (req, res) => {
   let body = req.body;
   if (typeof body === 'string') {
@@ -949,25 +955,39 @@ router.post('/tv-alert', express.text({ type: '*/*' }), async (req, res) => {
     return res.status(r.status).json({ ...r.body, action: `open_${direction}`, direction });
   }
 
-  // ---- 执行止盈1 ----
-  if (action !== 'tp1') {
-    return res.status(400).json({ ok: false, error: `unsupported_action: ${body.action || ''}`, hint: "支持 action='tp1' (执行止盈1) / 'open_long' (市价开多) / 'open_short' (市价开空)" });
+  // ---- 止盈/止损: tp1 / tp2 / tp3 (兼容 tp_1/tp_2/tp_3) / sl ----
+  const closeAction = action.replace('_', '');          // tp_2 → tp2
+  if (!['tp1', 'tp2', 'tp3', 'sl'].includes(closeAction)) {
+    return res.status(400).json({
+      ok: false,
+      error: `unsupported_action: ${body.action || ''}`,
+      hint: "支持 action='open_long'/'open_short' (市价开仓) / 'tp1'/'tp2'/'tp3' (执行止盈) / 'sl' (执行止损)",
+    });
   }
   const direction = body.direction;
   if (!['long', 'short'].includes(direction)) {
     return res.status(400).json({ ok: false, error: 'direction must be long|short' });
   }
 
-  const setProt = body.set_protection_sl != null
-    ? !!body.set_protection_sl
-    : (cfg.tp1Protection !== false);
-  const sig = {
-    token: cfg.token, action: 'take_profit', symbol: cfg.symbol,
-    direction, trigger: 'tp_1', set_protection_sl: setProt,
-  };
+  let sig;
+  if (closeAction === 'sl') {
+    sig = {
+      token: cfg.token, action: 'stop_loss', symbol: cfg.symbol,
+      direction, trigger: 'sl',
+    };
+  } else {
+    // 保本止损默认: tp1 跟随 cfg.tp1Protection; tp2/tp3 默认 false (通常 TP1 时已上移过)
+    const setProt = body.set_protection_sl != null
+      ? !!body.set_protection_sl
+      : (closeAction === 'tp1' && cfg.tp1Protection !== false);
+    sig = {
+      token: cfg.token, action: 'take_profit', symbol: cfg.symbol,
+      direction, trigger: `tp_${closeAction[2]}`, set_protection_sl: setProt,
+    };
+  }
   const r = await processSignal(sig, { source: 'tradingview_alert' });
-  console.log(`[auto-trade] 📺 TradingView 警报: tp1 ${direction} → status=${r.status} ${r.body?.error || 'ok'}`);
-  res.status(r.status).json({ ...r.body, action: 'tp1', direction });
+  console.log(`[auto-trade] 📺 TradingView 警报: ${closeAction} ${direction} → status=${r.status} ${r.body?.error || 'ok'}`);
+  res.status(r.status).json({ ...r.body, action: closeAction, direction });
 });
 
 // ============ POST /reset: 手动重置（解锁 + 取消所有 TP/SL） ============
@@ -1593,7 +1613,7 @@ const MANUAL_TRADE_SOURCES = new Set([
   'manual_ui', 'manual_follow', 'price_trigger_open', 'price_trigger_follow', 'manual_fire',
   'mtf5_auto_open', 'mtf1_auto_open',
   // TradingView 警报 (/tv-alert): 用户显式配置的常驻触发器 (与价格触发器同语义), 总开关关闭时也放行.
-  //   tradingview_alert = 平仓类动作 (tp_1); tradingview_open = 市价开多/开空 (走 manualFollowImpl)
+  //   tradingview_alert = 平仓类动作 (tp1/tp2/tp3/sl); tradingview_open = 市价开多/开空 (走 manualFollowImpl)
   'tradingview_alert', 'tradingview_open',
 ]);
 function isManualTradeSource(source) {
