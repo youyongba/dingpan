@@ -373,6 +373,10 @@
                     <span>大单追踪 (Smart Tape)</span>
                     <span style="color:var(--large-order)">> 1.0</span>
                 </div>
+                <div style="display:flex; justify-content:space-between; padding: 5px 10px; font-size: 11px; background: rgba(0,0,0,0.2); border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--buy-color);">买(累计): <span id="tape-buy-total">0.00</span></span>
+                    <span style="color: var(--sell-color);">卖(累计): <span id="tape-sell-total">0.00</span></span>
+                </div>
                 <div class="tape-container" id="tape-list">
                     <!-- Tape 内容由 JS 动态生成 -->
                 </div>
@@ -404,6 +408,8 @@ const STATE = {
     historyTicks: [],     // 保存所有的 tick 数据
     footprints: [],       // 聚合后的 K 线 Footprint 数据
     globalVolumeProfile: new Map(), // 记录全局所有价格区间的买卖量，用于画最强买卖墙
+    totalLargeBuy: 0,     // 累计买入大单量
+    totalLargeSell: 0,    // 累计卖出大单量
     offsetX: 0,           // 图表平移偏移量 X
     offsetY: 0,           // 图表平移偏移量 Y
     scaleX: 1.0,          // X 轴缩放
@@ -544,6 +550,13 @@ async function loadHistoricalAndConnect() {
     }
 
     try {
+        // 清空大单追踪状态
+        STATE.totalLargeBuy = 0;
+        STATE.totalLargeSell = 0;
+        document.getElementById('tape-buy-total').innerText = '0.00';
+        document.getElementById('tape-sell-total').innerText = '0.00';
+        document.getElementById('tape-list').innerHTML = '';
+
         // 并行拉取 Binance K 线和我们后端的真实 tick 聚合数据
         const [binanceRes, historyRes] = await Promise.all([
             fetch(`https://api.binance.com/api/v3/klines?symbol=${currentSymbol.toUpperCase()}&interval=${currentBinanceTF}&limit=150`),
@@ -803,6 +816,14 @@ function handleDepth(data) {
 }
 
 function addTapeRecord(price, qty, isSell, timeMs) {
+    if (isSell) {
+        STATE.totalLargeSell += qty;
+        document.getElementById('tape-sell-total').innerText = STATE.totalLargeSell.toFixed(2);
+    } else {
+        STATE.totalLargeBuy += qty;
+        document.getElementById('tape-buy-total').innerText = STATE.totalLargeBuy.toFixed(2);
+    }
+
     const timeStr = new Date(timeMs || Date.now()).toLocaleTimeString('en-US', {hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'});
     const row = document.createElement('div');
     row.className = `tape-row tape-large ${isSell ? 'tape-sell' : 'tape-buy'}`;
