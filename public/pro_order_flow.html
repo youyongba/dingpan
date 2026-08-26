@@ -898,6 +898,9 @@ function renderAll() {
     // 2. 画 Footprint K 线
     drawFootprints(ctxFP, w, h);
     
+    // 画时间轴 (底部)
+    drawTimeAxis(ctxFP, w, h);
+    
     // 3. 画右侧面板的 Volume Profile (最强买卖单墙)
     drawVolumeProfileWalls();
     
@@ -945,6 +948,47 @@ function drawPriceAxis(ctx, w, h) {
         ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w - 75, y); ctx.stroke();
         
         p += step;
+    }
+}
+
+function drawTimeAxis(ctx, w, h) {
+    const cw = CONFIG.candleWidth * STATE.scaleX;
+    if (STATE.footprints.length === 0) return;
+
+    ctx.fillStyle = '#1e222d';
+    ctx.fillRect(0, h - 20, w - 75, 20); // 底部留 20px 黑色背景条
+    
+    ctx.strokeStyle = '#2a2e39';
+    ctx.beginPath(); ctx.moveTo(0, h - 20); ctx.lineTo(w - 75, h - 20); ctx.stroke();
+
+    ctx.fillStyle = '#787b86';
+    ctx.font = '10px Consolas';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // 决定间隔，避免文字重叠
+    const minPixelSpacing = 80; 
+    const stepCount = Math.ceil(minPixelSpacing / cw);
+    
+    for (let i = 0; i < STATE.footprints.length; i += stepCount) {
+        const cx = indexToX(i);
+        if (cx < -cw || cx > w - 75) continue; // 超出可视范围
+        
+        const timestamp = STATE.footprints[i].startTime;
+        // 强制转换为东八区时间 (UTC+8)
+        const d = new Date(timestamp + 8 * 3600 * 1000);
+        const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+        const dd = String(d.getUTCDate()).padStart(2, '0');
+        const HH = String(d.getUTCHours()).padStart(2, '0');
+        const min = String(d.getUTCMinutes()).padStart(2, '0');
+        
+        const timeStr = `${mm}-${dd} ${HH}:${min}`;
+        
+        ctx.fillText(timeStr, cx, h - 10);
+        
+        // 竖向短虚线，指示刻度对齐
+        ctx.strokeStyle = 'rgba(42, 46, 57, 0.5)';
+        ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, h - 20); ctx.stroke();
     }
 }
 
@@ -1150,103 +1194,113 @@ function drawFootprints(ctx, w, h) {
         const bodyTop = Math.min(yOpen, yClose);
         const bodyBottom = Math.max(yOpen, yClose) + rh;
         
-        ctx.fillStyle = isBull ? 'rgba(38, 166, 154, 0.08)' : 'rgba(239, 83, 80, 0.08)';
-        ctx.fillRect(cx - cw/2 + 2, bodyTop, cw - 4, bodyBottom - bodyTop);
-        ctx.strokeStyle = wickColor;
-        ctx.lineWidth = 1;
-        ctx.strokeRect(cx - cw/2 + 2, bodyTop, cw - 4, bodyBottom - bodyTop);
+        if (cw < 10) {
+            // 宏观 K 线模式 (缩小状态)：只画实心柱体，并确保居中
+            const bodyW = Math.max(1, cw * 0.8);
+            ctx.fillStyle = isBull ? '#26a69a' : '#ef5350';
+            ctx.fillRect(cx - bodyW / 2, bodyTop, bodyW, Math.max(1, bodyBottom - bodyTop));
+        } else {
+            // 订单流微观模式：画透明边框
+            ctx.fillStyle = isBull ? 'rgba(38, 166, 154, 0.08)' : 'rgba(239, 83, 80, 0.08)';
+            ctx.fillRect(cx - cw/2 + 2, bodyTop, cw - 4, Math.max(1, bodyBottom - bodyTop));
+            ctx.strokeStyle = wickColor;
+            ctx.lineWidth = 1;
+            ctx.strokeRect(cx - cw/2 + 2, bodyTop, cw - 4, bodyBottom - bodyTop);
+        }
 
-        // 3. 画每个格子的买卖量
-        ctx.font = `${Math.max(9, 11 * STATE.scaleY)}px Consolas`;
-        ctx.textBaseline = 'middle';
+        // 3. 画每个格子的买卖量 (只有在放大到一定程度时才渲染数字和单元格边框)
+        const showCells = (rh >= 6 && cw >= 20);
         
-        const pocLvl = bar.pocLevel;
+        if (showCells) {
+            ctx.font = `${Math.max(9, 11 * STATE.scaleY)}px Consolas`;
+            ctx.textBaseline = 'middle';
+            
+            const pocLvl = bar.pocLevel;
 
-        bar.cells.forEach((cell, lvl) => {
-            const y = priceToY(lvl);
-            // 过滤不可见的格子
-            if (y < 0 || y > h) return;
+            bar.cells.forEach((cell, lvl) => {
+                const y = priceToY(lvl);
+                // 过滤不可见的格子
+                if (y < 0 || y > h) return;
 
-            // POC 边框
-            if (lvl === pocLvl) {
-                ctx.fillStyle = 'rgba(255, 202, 40, 0.3)';
-                ctx.fillRect(cx - cw/2 + 4, y, cw - 8, rh - 1);
-                ctx.strokeStyle = '#ffca28';
-                ctx.setLineDash([2, 2]);
-                ctx.strokeRect(cx - cw/2 + 4, y, cw - 8, rh - 1);
-                ctx.setLineDash([]);
-            }
-
-            const cy = y + rh / 2;
-
-            const mode = STATE.fpMode || 'bidask';
-
-            if (mode === 'bidask') {
-                // 卖单 (Ask) - 画在左边
-                if (cell.sellVol > 0) {
-                    ctx.fillStyle = cell.sellImbalance ? '#ef5350' : '#ffcdd2';
-                    ctx.textAlign = 'right';
-                    ctx.fillText(cell.sellVol.toFixed(1), cx - 5, cy);
+                // POC 边框
+                if (lvl === pocLvl) {
+                    ctx.fillStyle = 'rgba(255, 202, 40, 0.3)';
+                    ctx.fillRect(cx - cw/2 + 4, y, cw - 8, rh - 1);
+                    ctx.strokeStyle = '#ffca28';
+                    ctx.setLineDash([2, 2]);
+                    ctx.strokeRect(cx - cw/2 + 4, y, cw - 8, rh - 1);
+                    ctx.setLineDash([]);
                 }
 
-                // 买单 (Bid) - 画在右边
-                if (cell.buyVol > 0) {
-                    ctx.fillStyle = cell.buyImbalance ? '#26a69a' : '#b2dfdb';
-                    ctx.textAlign = 'left';
-                    ctx.fillText(cell.buyVol.toFixed(1), cx + 5, cy);
-                }
-                
-                // 中间分隔线
-                ctx.fillStyle = 'rgba(255,255,255,0.1)';
-                ctx.fillRect(cx - 1, y + 2, 2, rh - 4);
-            } else if (mode === 'volume') {
-                const total = cell.buyVol + cell.sellVol;
-                if (total > 0) {
-                    // Color based on dominant side
-                    if (cell.buyVol > cell.sellVol * 1.5) ctx.fillStyle = '#26a69a';
-                    else if (cell.sellVol > cell.buyVol * 1.5) ctx.fillStyle = '#ef5350';
-                    else ctx.fillStyle = '#d1d4dc';
+                const cy = y + rh / 2;
+
+                const mode = STATE.fpMode || 'bidask';
+
+                if (mode === 'bidask') {
+                    // 卖单 (Ask) - 画在左边
+                    if (cell.sellVol > 0) {
+                        ctx.fillStyle = cell.sellImbalance ? '#ef5350' : '#ffcdd2';
+                        ctx.textAlign = 'right';
+                        ctx.fillText(cell.sellVol.toFixed(1), cx - 5, cy);
+                    }
+
+                    // 买单 (Bid) - 画在右边
+                    if (cell.buyVol > 0) {
+                        ctx.fillStyle = cell.buyImbalance ? '#26a69a' : '#b2dfdb';
+                        ctx.textAlign = 'left';
+                        ctx.fillText(cell.buyVol.toFixed(1), cx + 5, cy);
+                    }
                     
-                    ctx.textAlign = 'center';
-                    ctx.fillText(total.toFixed(1), cx, cy);
-                }
-            } else if (mode === 'delta') {
-                const delta = cell.buyVol - cell.sellVol;
-                if (delta !== 0) {
-                    ctx.fillStyle = delta > 0 ? '#26a69a' : '#ef5350';
-                    ctx.textAlign = 'center';
-                    ctx.fillText((delta > 0 ? '+' : '') + delta.toFixed(1), cx, cy);
-                }
-            } else if (mode === 'volumedelta') {
-                const total = cell.buyVol + cell.sellVol;
-                const delta = cell.buyVol - cell.sellVol;
-                
-                // Volume - 画在左边
-                if (total > 0) {
-                    ctx.fillStyle = '#d1d4dc';
-                    ctx.textAlign = 'right';
-                    ctx.fillText(total.toFixed(1), cx - 5, cy);
-                }
+                    // 中间分隔线
+                    ctx.fillStyle = 'rgba(255,255,255,0.1)';
+                    ctx.fillRect(cx - 1, y + 2, 2, rh - 4);
+                } else if (mode === 'volume') {
+                    const total = cell.buyVol + cell.sellVol;
+                    if (total > 0) {
+                        if (cell.buyVol > cell.sellVol * 1.5) ctx.fillStyle = '#26a69a';
+                        else if (cell.sellVol > cell.buyVol * 1.5) ctx.fillStyle = '#ef5350';
+                        else ctx.fillStyle = '#d1d4dc';
+                        
+                        ctx.textAlign = 'center';
+                        ctx.fillText(total.toFixed(1), cx, cy);
+                    }
+                } else if (mode === 'delta') {
+                    const delta = cell.buyVol - cell.sellVol;
+                    if (delta !== 0) {
+                        ctx.fillStyle = delta > 0 ? '#26a69a' : '#ef5350';
+                        ctx.textAlign = 'center';
+                        ctx.fillText((delta > 0 ? '+' : '') + delta.toFixed(1), cx, cy);
+                    }
+                } else if (mode === 'volumedelta') {
+                    const total = cell.buyVol + cell.sellVol;
+                    const delta = cell.buyVol - cell.sellVol;
+                    
+                    if (total > 0) {
+                        ctx.fillStyle = '#d1d4dc';
+                        ctx.textAlign = 'right';
+                        ctx.fillText(total.toFixed(1), cx - 5, cy);
+                    }
 
-                // Delta - 画在右边
-                if (delta !== 0) {
-                    ctx.fillStyle = delta > 0 ? '#26a69a' : '#ef5350';
-                    ctx.textAlign = 'left';
-                    ctx.fillText((delta > 0 ? '+' : '') + delta.toFixed(1), cx + 5, cy);
+                    if (delta !== 0) {
+                        ctx.fillStyle = delta > 0 ? '#26a69a' : '#ef5350';
+                        ctx.textAlign = 'left';
+                        ctx.fillText((delta > 0 ? '+' : '') + delta.toFixed(1), cx + 5, cy);
+                    }
+                    
+                    ctx.fillStyle = 'rgba(255,255,255,0.1)';
+                    ctx.fillRect(cx - 1, y + 2, 2, rh - 4);
                 }
-                
-                // 中间分隔线
-                ctx.fillStyle = 'rgba(255,255,255,0.1)';
-                ctx.fillRect(cx - 1, y + 2, 2, rh - 4);
-            }
-        });
+            });
+        }
 
         // 4. 画 Delta 和 Total Vol (在 K 线底部)
-        ctx.textAlign = 'center';
-        const dY = yLow + 15;
-        const delta = bar.totalDelta;
-        ctx.fillStyle = delta > 0 ? '#26a69a' : '#ef5350';
-        ctx.fillText(`Δ: ${delta > 0 ? '+' : ''}${delta.toFixed(0)}`, cx, dY);
+        if (cw >= 20) {
+            ctx.textAlign = 'center';
+            const dY = yLow + 15;
+            const delta = bar.totalDelta;
+            ctx.fillStyle = delta > 0 ? '#26a69a' : '#ef5350';
+            ctx.fillText(`Δ: ${delta > 0 ? '+' : ''}${delta.toFixed(0)}`, cx, dY);
+        }
     }
 }
 
@@ -1838,11 +1892,12 @@ function bindChartEvents(container, isDelta) {
         
         const zoomFactor = 0.1;
         if (e.deltaY < 0) {
-            STATE.scaleX = Math.min(3.0, STATE.scaleX + zoomFactor);
-            STATE.scaleY = Math.min(3.0, STATE.scaleY + zoomFactor);
+            STATE.scaleX = Math.min(10.0, STATE.scaleX + zoomFactor);
+            STATE.scaleY = Math.min(10.0, STATE.scaleY + zoomFactor);
         } else {
-            STATE.scaleX = Math.max(0.5, STATE.scaleX - zoomFactor);
-            STATE.scaleY = Math.max(0.5, STATE.scaleY - zoomFactor);
+            // 允许缩放到极小，以便看清宏观 K 线
+            STATE.scaleX = Math.max(0.01, STATE.scaleX - zoomFactor);
+            STATE.scaleY = Math.max(0.01, STATE.scaleY - zoomFactor);
         }
         
         const h = canvasFPMain.height;
