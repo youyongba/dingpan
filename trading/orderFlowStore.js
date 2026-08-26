@@ -26,6 +26,12 @@ class OrderFlowStore extends EventEmitter {
         // 保存足够长的历史以满足前端 150 根 K 线的需求
         this.maxBars = 150;
 
+        // 大单追踪记录，保存在后端以支持前端跨周期/刷新不丢失
+        this.largeOrders = [];
+        this.maxLargeOrders = 30; // 对应前端 tapeList 显示数量
+        this.largeOrderStats = { totalBuy: 0, totalSell: 0 };
+        this.LARGE_ORDER_THRESHOLD = 1.0;
+
         // 无阻塞监听 tick，O(1) 操作，不影响风控引擎
         priceFeed.on('tick', (data) => this._onTick(data));
     }
@@ -38,6 +44,19 @@ class OrderFlowStore extends EventEmitter {
         const isSell = raw.m; // true = active sell (maker is buyer)
 
         const level = Math.floor(price / TICK_SIZE) * TICK_SIZE;
+
+        // 大单追踪记录
+        if (qty >= this.LARGE_ORDER_THRESHOLD) {
+            if (isSell) {
+                this.largeOrderStats.totalSell += qty;
+            } else {
+                this.largeOrderStats.totalBuy += qty;
+            }
+            this.largeOrders.unshift({ price, qty, isSell, timeMs: ts });
+            if (this.largeOrders.length > this.maxLargeOrders) {
+                this.largeOrders.pop();
+            }
+        }
 
         this._updateBar('1m', 60 * 1000, ts, price, qty, isSell, level);
         this._updateBar('5m', 5 * 60 * 1000, ts, price, qty, isSell, level);

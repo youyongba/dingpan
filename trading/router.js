@@ -1016,7 +1016,12 @@ router.get('/orderflow/history', (req, res) => {
     '1m': '1m', '5m': '5m', '15m': '15m', '60m': '1h', '1h': '1h'
   };
   const key = tfMap[tf] || '1m';
-  res.json({ ok: true, data: orderFlowStore.getHistory(key) });
+  res.json({ 
+    ok: true, 
+    data: orderFlowStore.getHistory(key),
+    largeOrders: orderFlowStore.largeOrders,
+    largeOrderStats: orderFlowStore.largeOrderStats
+  });
 });
 
 // ============ POST /notify-profile ============

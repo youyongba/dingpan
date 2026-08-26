@@ -550,7 +550,7 @@ async function loadHistoricalAndConnect() {
     }
 
     try {
-        // 清空大单追踪状态
+        // 清空大单追踪状态 (如果后端没有数据则使用此默认值)
         STATE.totalLargeBuy = 0;
         STATE.totalLargeSell = 0;
         document.getElementById('tape-buy-total').innerText = '0.00';
@@ -566,6 +566,25 @@ async function loadHistoricalAndConnect() {
         const klines = await binanceRes.json();
         const historyData = await historyRes.json();
         const realOrderFlow = historyData.ok ? historyData.data : [];
+        
+        // 恢复后端保存的大单追踪数据
+        if (historyData.ok && historyData.largeOrderStats) {
+            STATE.totalLargeBuy = historyData.largeOrderStats.totalBuy;
+            STATE.totalLargeSell = historyData.largeOrderStats.totalSell;
+            document.getElementById('tape-buy-total').innerText = STATE.totalLargeBuy.toFixed(2);
+            document.getElementById('tape-sell-total').innerText = STATE.totalLargeSell.toFixed(2);
+            
+            // 倒序恢复列表 (因为 addTapeRecord 是 insertBefore)
+            if (historyData.largeOrders && historyData.largeOrders.length > 0) {
+                // historyData.largeOrders 是最新的在最前面 [0]=newest
+                // 我们需要从最老的开始 addTapeRecord，这样最新的才会在最上面
+                for (let i = historyData.largeOrders.length - 1; i >= 0; i--) {
+                    const order = historyData.largeOrders[i];
+                    // 第五个参数设置为 true，代表这是历史恢复，不要再重复累加 totalLargeBuy/Sell
+                    addTapeRecord(order.price, order.qty, order.isSell, order.timeMs, true);
+                }
+            }
+        }
         
         buildHistoricalFootprint(klines, realOrderFlow);
         
@@ -815,13 +834,15 @@ function handleDepth(data) {
     domList.innerHTML = html;
 }
 
-function addTapeRecord(price, qty, isSell, timeMs) {
-    if (isSell) {
-        STATE.totalLargeSell += qty;
-        document.getElementById('tape-sell-total').innerText = STATE.totalLargeSell.toFixed(2);
-    } else {
-        STATE.totalLargeBuy += qty;
-        document.getElementById('tape-buy-total').innerText = STATE.totalLargeBuy.toFixed(2);
+function addTapeRecord(price, qty, isSell, timeMs, isHistory = false) {
+    if (!isHistory) {
+        if (isSell) {
+            STATE.totalLargeSell += qty;
+            document.getElementById('tape-sell-total').innerText = STATE.totalLargeSell.toFixed(2);
+        } else {
+            STATE.totalLargeBuy += qty;
+            document.getElementById('tape-buy-total').innerText = STATE.totalLargeBuy.toFixed(2);
+        }
     }
 
     const timeStr = new Date(timeMs || Date.now()).toLocaleTimeString('en-US', {hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'});
