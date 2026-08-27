@@ -11,6 +11,7 @@
 
 const EventEmitter = require('events');
 const priceFeed = require('./priceFeed');
+const feishuWebhook = require('../notifier/feishuWebhook');
 
 const TICK_SIZE = 10.0;
 
@@ -76,7 +77,9 @@ class OrderFlowStore extends EventEmitter {
             }
             map.set(startTime, {
                 startTime,
-                cells: {} // level -> { buyVol, sellVol }
+                cells: {}, // level -> { buyVol, sellVol }
+                totalDelta: 0,
+                alertedDir: 0
             });
         }
 
@@ -86,8 +89,21 @@ class OrderFlowStore extends EventEmitter {
         }
         if (isSell) {
             bar.cells[level].sellVol += qty;
+            bar.totalDelta -= qty;
         } else {
             bar.cells[level].buyVol += qty;
+            bar.totalDelta += qty;
+        }
+
+        // 1分钟 Delta 阈值报警
+        if (tfKey === '1m') {
+            if (bar.totalDelta >= 50 && bar.alertedDir !== 1) {
+                bar.alertedDir = 1;
+                feishuWebhook.sendText(`🚨 [Order Flow] 1分钟 Delta 激增\n时间: ${new Date(startTime).toLocaleTimeString()}\n方向: 多头 (Delta ≥ 50)\n当前 Delta: +${bar.totalDelta.toFixed(2)}`, { eventKey: `1m_delta_50_${startTime}` });
+            } else if (bar.totalDelta <= -50 && bar.alertedDir !== -1) {
+                bar.alertedDir = -1;
+                feishuWebhook.sendText(`🚨 [Order Flow] 1分钟 Delta 激增\n时间: ${new Date(startTime).toLocaleTimeString()}\n方向: 空头 (Delta ≤ -50)\n当前 Delta: ${bar.totalDelta.toFixed(2)}`, { eventKey: `1m_delta_-50_${startTime}` });
+            }
         }
     }
 
