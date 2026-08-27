@@ -556,6 +556,8 @@ async function loadHistoricalAndConnect() {
         document.getElementById('tape-buy-total').innerText = '0.00';
         document.getElementById('tape-sell-total').innerText = '0.00';
         document.getElementById('tape-list').innerHTML = '';
+        
+        hasNoMoreHistory = false; // 切换周期时重置
 
         // 并行拉取 Binance K 线和我们后端的真实 tick 聚合数据
         const [binanceRes, historyRes] = await Promise.all([
@@ -601,14 +603,18 @@ async function loadHistoricalAndConnect() {
     }
 }
 
-function buildHistoricalFootprint(klines, realOrderFlow = []) {
-    STATE.footprints = [];
-    STATE.globalVolumeProfile.clear();
+function buildHistoricalFootprint(klines, realOrderFlow = [], prepend = false) {
+    if (!prepend) {
+        STATE.footprints = [];
+        STATE.globalVolumeProfile.clear();
+    }
     
     // 将后端传来的真实 tick 数据转为 map 方便 O(1) 查找
     const realDataMap = new Map();
     realOrderFlow.forEach(bar => realDataMap.set(bar.startTime, bar.cells));
     
+    const newBars = [];
+
     klines.forEach(k => {
         const startTime = k[0];
         const open = parseFloat(k[1]);
@@ -698,11 +704,64 @@ function buildHistoricalFootprint(klines, realOrderFlow = []) {
             }
         }
         
-        STATE.footprints.push(bar);
+        newBars.push(bar);
     });
     
-    if (STATE.footprints.length > 0) {
+    if (prepend) {
+        STATE.footprints = newBars.concat(STATE.footprints);
+    } else {
+        STATE.footprints = newBars;
+    }
+    
+    if (STATE.footprints.length > 0 && !prepend) {
         STATE.currentPrice = STATE.footprints[STATE.footprints.length - 1].close;
+    }
+}
+
+let isLoadingMoreHistory = false;
+let hasNoMoreHistory = false;
+
+async function loadMoreHistory() {
+    if (isLoadingMoreHistory || hasNoMoreHistory || STATE.footprints.length === 0) return;
+    isLoadingMoreHistory = true;
+    
+    // UI 提示加载中
+    document.getElementById('conn-status').textContent = '加载更早历史数据...';
+    
+    try {
+        const oldestTime = STATE.footprints[0].startTime;
+        // 拉取更早的150根
+        const [binanceRes, historyRes] = await Promise.all([
+            fetch(`https://api.binance.com/api/v3/klines?symbol=${currentSymbol.toUpperCase()}&interval=${currentBinanceTF}&limit=150&endTime=${oldestTime - 1}`),
+            // 后端暂不支持 endTime, 但这里可以安全地传入, 之后若支持可以生效; 目前返回的 [] 不影响拟合逻辑
+            fetch(`/api/auto-trade/orderflow/history?tf=${currentBinanceTF}&endTime=${oldestTime - 1}`).catch(() => ({ json: () => ({ ok: false }) }))
+        ]);
+        
+        const klines = await binanceRes.json();
+        const historyData = await historyRes.json();
+        const realOrderFlow = historyData.ok ? historyData.data : [];
+        
+        if (klines && klines.length > 0) {
+            // 记住添加新数据前的视口坐标宽度，由于添加到前面，我们需要调整 offsetX 以维持当前视口不发生跳动
+            const addedWidth = klines.length * CONFIG.candleWidth * STATE.scaleX;
+            
+            buildHistoricalFootprint(klines, realOrderFlow, true);
+            
+            // 调整 offsetX 以保持画面不动
+            STATE.offsetX -= addedWidth;
+            renderAll();
+            
+            if (klines.length < 150) {
+                hasNoMoreHistory = true; // 已经拉取到尽头
+            }
+        } else {
+            hasNoMoreHistory = true;
+        }
+    } catch (e) {
+        console.error("加载历史数据失败:", e);
+    } finally {
+        isLoadingMoreHistory = false;
+        document.getElementById('conn-status').textContent = '已连接真实数据';
     }
 }
 
@@ -927,6 +986,14 @@ function renderAll() {
             const targetOffsetY = (h / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
             // 每次移动差值的 10%（平滑滚动）
             STATE.offsetY += (targetOffsetY - STATE.offsetY) * 0.1;
+        }
+    }
+    
+    // --- 动态加载历史数据逻辑 ---
+    if (STATE.footprints.length > 0 && !isLoadingMoreHistory) {
+        const oldestX = indexToX(0);
+        if (oldestX > -200) { // 当最左侧 K 线进入屏幕左侧 200px 范围内时触发加载
+            loadMoreHistory();
         }
     }
     
