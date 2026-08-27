@@ -2101,6 +2101,17 @@ function updateTooltip(e, x, y, inDelta) {
         
         let hasContent = false;
         
+        // 格式化东八区时间 (月-日 时:分:秒)
+        const timeStr = new Date(bar.startTime).toLocaleString('zh-CN', { 
+            timeZone: 'Asia/Shanghai', 
+            month: '2-digit', 
+            day: '2-digit', 
+            hour: '2-digit', 
+            minute: '2-digit', 
+            second: '2-digit', 
+            hour12: false 
+        }).replace(/\//g, '-');
+        
         if (inDelta) {
             let cumulativeDelta = 0;
             for (let i = 0; i <= idx; i++) {
@@ -2110,6 +2121,7 @@ function updateTooltip(e, x, y, inDelta) {
             tooltip.innerHTML = `
 <b>Bar Delta & CVD</b>
 -----------------
+时间: ${timeStr}
 Delta: <span style="color:${bar.totalDelta>0?'var(--buy-color)':'var(--sell-color)'}">${bar.totalDelta > 0 ? '+' : ''}${bar.totalDelta.toFixed(2)}</span>
 CVD:   <span style="color:var(--poc-color)">${cumulativeDelta > 0 ? '+' : ''}${cumulativeDelta.toFixed(2)}</span>
             `;
@@ -2124,6 +2136,7 @@ CVD:   <span style="color:var(--poc-color)">${cumulativeDelta > 0 ? '+' : ''}${c
                 tooltip.innerHTML = `
 <b>Price: ${p.toFixed(1)}</b>
 -----------------
+时间: ${timeStr}
 Ask(卖量): <span style="color:var(--sell-color)">${cell.sellVol.toFixed(2)}</span> ${isImbS}
 Bid(买量): <span style="color:var(--buy-color)">${cell.buyVol.toFixed(2)}</span> ${isImbB}
 Delta:   <span style="color:${cell.delta>0?'var(--buy-color)':'var(--sell-color)'}">${cell.delta > 0 ? '+' : ''}${cell.delta.toFixed(2)}</span>

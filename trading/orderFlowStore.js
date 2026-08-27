@@ -99,10 +99,12 @@ class OrderFlowStore extends EventEmitter {
         if (tfKey === '1m') {
             if (bar.totalDelta >= 50 && bar.alertedDir !== 1) {
                 bar.alertedDir = 1;
-                feishuWebhook.sendText(`🚨 [Order Flow] 1分钟 Delta 激增\n时间: ${new Date(startTime).toLocaleTimeString()}\n方向: 多头 (Delta ≥ 50)\n当前 Delta: +${bar.totalDelta.toFixed(2)}`, { eventKey: `1m_delta_50_${startTime}` });
+                const timeStr = new Date(startTime).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+                feishuWebhook.sendText(`🚨 [Order Flow] 1分钟 Delta 激增\n时间: ${timeStr}\n方向: 多头 (Delta ≥ 50)\n当前 Delta: +${bar.totalDelta.toFixed(2)}`, { eventKey: `1m_delta_50_${startTime}`, force: true });
             } else if (bar.totalDelta <= -50 && bar.alertedDir !== -1) {
                 bar.alertedDir = -1;
-                feishuWebhook.sendText(`🚨 [Order Flow] 1分钟 Delta 激增\n时间: ${new Date(startTime).toLocaleTimeString()}\n方向: 空头 (Delta ≤ -50)\n当前 Delta: ${bar.totalDelta.toFixed(2)}`, { eventKey: `1m_delta_-50_${startTime}` });
+                const timeStr = new Date(startTime).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+                feishuWebhook.sendText(`🚨 [Order Flow] 1分钟 Delta 激增\n时间: ${timeStr}\n方向: 空头 (Delta ≤ -50)\n当前 Delta: ${bar.totalDelta.toFixed(2)}`, { eventKey: `1m_delta_-50_${startTime}`, force: true });
             }
         }
     }
