@@ -1132,12 +1132,12 @@
   <button id="manualOpenShortBtn" class="manual-btn short" disabled>📉 挂空单</button>
   <span style="font-size:12px;color:#8b949e;white-space:nowrap;">🤖 组合:</span>
   <label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:#c9d1d9;cursor:pointer;white-space:nowrap;"
-         title="组合条件自动开多 (四条全满足才市价开多): ① MTF 240分钟或60分钟为「强多/偏多」 ② 15分钟 RSI 最近8根收盘内出现过超卖 ③ MTF 1分钟连续确认转为「强多」(边缘触发) ④ 转强确认窗口内 (最近3根已收盘1分钟K线) 累计 Delta 主动买盘>卖盘。条件不满足时跳过并保持武装。单次武装: 成功开仓后本开关自动关闭。与「一键追单」同通道 (市价成交, TP/SL 按 ATR 派生, 小仓位)。后端运行, 关闭浏览器仍生效">
+         title="组合开多: 仅看最近一根已收盘 1 分钟 K 线的 Delta, 不参与其它指标。该根净 Delta ≥ +50 即市价开多。开启时不追溯当前这根, 之后每出一根新收盘再评估。单次武装: 成功开仓后本开关自动关闭。与「一键追单」同通道 (市价成交, TP/SL 按 ATR 派生, 小仓位)。后端运行, 关闭浏览器仍生效">
     <input type="checkbox" id="mtf1AutoLongChk" style="accent-color:#2ea043;cursor:pointer;" />
     🟢组合开多
   </label>
   <label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:#c9d1d9;cursor:pointer;white-space:nowrap;"
-         title="组合条件自动开空 (四条全满足才市价开空): ① MTF 240分钟或60分钟为「强空/偏空」 ② 15分钟 RSI 最近8根收盘内出现过超买 ③ MTF 1分钟连续确认转为「强空」(边缘触发) ④ 转强确认窗口内 (最近3根已收盘1分钟K线) 累计 Delta 主动卖盘>买盘。条件不满足时跳过并保持武装。单次武装: 成功开仓后本开关自动关闭。与「一键追单」同通道 (市价成交, TP/SL 按 ATR 派生, 小仓位)。后端运行, 关闭浏览器仍生效">
+         title="组合开空: 仅看最近一根已收盘 1 分钟 K 线的 Delta, 不参与其它指标。该根净 Delta ≤ -50 即市价开空。开启时不追溯当前这根, 之后每出一根新收盘再评估。单次武装: 成功开仓后本开关自动关闭。与「一键追单」同通道 (市价成交, TP/SL 按 ATR 派生, 小仓位)。后端运行, 关闭浏览器仍生效">
     <input type="checkbox" id="mtf1AutoShortChk" style="accent-color:#f85149;cursor:pointer;" />
     🔴组合开空
   </label>
@@ -3171,11 +3171,9 @@
     }
   }
 
-  // ============ MTF 组合条件自动开仓开关 ============
+  // ============ 组合 Delta / 1M强多强空 自动开仓开关 ============
   //
-  // 后端 regimeModule 每 30s 检查: MTF 1分钟连续 2 个新快照确认「转为」强多/强空 (边缘触发),
-  // 触发时再验组合过滤 (① 240m/60m 强偏多空 ② 15m RSI 最近超卖/超买过 ③ 1m Delta 买/卖盘),
-  // 全过才自动市价开仓 (manualFollowImpl, 与「一键追单」同一实现).
+  // 组合开多/开空: 只看最近一根已收盘 1m Delta ±阈值, 无其它指标; 1M强多/强空: MTF 1分钟转强。
   // 这里只负责: 开关切换 (走管理鉴权) + 状态展示 (30s 轮询).
   const MTF_AUTO_CHK_IDS = {
     '1': { long: 'mtf1AutoLongChk', short: 'mtf1AutoShortChk' },
@@ -3183,12 +3181,14 @@
   const MTF_PURE_CHK_IDS = {
     '1': { long: 'mtf1PureLongChk', short: 'mtf1PureShortChk' },
   };
+  let mtfComboDeltaMin = 50;
 
   async function loadMtf5AutoOpen() {
     try {
       const r = await fetch('/api/regime/mtf-auto-open');
       if (!r.ok) return;
       const j = await r.json();
+      if (Number.isFinite(Number(j.deltaMin)) && Number(j.deltaMin) >= 0) mtfComboDeltaMin = Number(j.deltaMin);
       const tfs = j.tfs || {};
       const parts = [];
       let latestFired = null;
@@ -3216,10 +3216,15 @@
           latestFired = { ...t.lastFired, tfKey };
         }
       }
-      // 组合过滤条件当前状态 (①大周期 ②15m RSI; ③Delta 只在触发时评估不轮询)
-      const f = j.filters || {};
-      const fStr = (ff) => ff ? `${ff.htfOk ? '✅' : '✖'}大周期 ${ff.rsiOk ? '✅' : '✖'}RSI` : '--';
-      if (f.long || f.short) parts.push(`过滤: 多[${fStr(f.long)}] 空[${fStr(f.short)}]`);
+      const dlt = j.delta;
+      if (dlt && Number.isFinite(dlt.delta)) {
+        const sign = dlt.delta >= 0 ? '+' : '';
+        const longOk = !!(j.deltaOk && j.deltaOk.long);
+        const shortOk = !!(j.deltaOk && j.deltaOk.short);
+        parts.push(`Δ${sign}${dlt.delta} 多${longOk ? '✅' : '✖'}(≥+${mtfComboDeltaMin}) 空${shortOk ? '✅' : '✖'}(≤-${mtfComboDeltaMin})`);
+      } else {
+        parts.push(`Δ -- 开多≥+${mtfComboDeltaMin} / 开空≤-${mtfComboDeltaMin}`);
+      }
       if (latestFired) {
         const modeTag = latestFired.mode === 'pure' ? '1M' : '组合';
         parts.push(`上次: ${modeTag}${latestFired.direction === 'long' ? '开多' : '开空'}${latestFired.ok ? '✅' : '❌'} ${new Date(latestFired.at).toLocaleString()}`);
@@ -3232,16 +3237,14 @@
   async function toggleMtf5AutoOpen(tfKey, direction, want) {
     const isLong = direction === 'long';
     const chk = document.getElementById(MTF_AUTO_CHK_IDS[tfKey][direction]);
-    const dirZh = isLong ? '组合条件自动开多' : '组合条件自动开空';
+    const dirZh = isLong ? '组合开多 (Delta≥+' + mtfComboDeltaMin + ')' : '组合开空 (Delta≤-' + mtfComboDeltaMin + ')';
     if (want && !confirm(
       `确认开启「${dirZh}」?\n` +
-      `触发条件 (四条全满足才市价开${isLong ? '多' : '空'}单):\n` +
-      `· ① MTF 240分钟 或 60分钟 为「${isLong ? '强多/偏多' : '强空/偏空'}」\n` +
-      `· ② 15分钟 RSI 最近 8 根收盘内出现过${isLong ? '超卖' : '超买'}\n` +
-      `· ③ MTF 1分钟连续确认「转为」${isLong ? '强多' : '强空'} (边缘触发, 开启时不追溯已有状态)\n` +
-      `· ④ 转强确认窗口内 (最近 3 根已收盘 1分钟K线) 累计 Delta 主动${isLong ? '买盘 > 卖盘' : '卖盘 > 买盘'}\n` +
+      `触发条件 (只看 1 分钟 Delta, 无其它指标):\n` +
+      `· 最近一根已收盘 1分钟K线净 Delta ${isLong ? '≥ +' : '≤ -'}${mtfComboDeltaMin} 即市价开${isLong ? '多' : '空'}\n` +
+      `· 开启时不追溯当前这根, 之后每出一根新收盘再评估\n` +
       '其他:\n' +
-      '· 条件不满足时跳过下单并保持武装 (推飞书说明哪条没过)\n' +
+      '· 未达阈值时跳过下单并保持武装\n' +
       '· ⭐ 单次武装: 成功开仓后本开关自动关闭; 需再次手动开启\n' +
       '· 与「一键追单」同通道: 市价成交, TP/SL 按 ATR 动态派生, 置信度小仓位\n' +
       '· 后端运行, 关闭浏览器仍生效; 触发结果推飞书'
@@ -3251,7 +3254,7 @@
         isLong ? { tf: tfKey, enabledLong: want } : { tf: tfKey, enabledShort: want });
       showToast('ok',
         want ? `🤖 已开启「${dirZh}」` : `🛑 已关闭「${dirZh}」`,
-        want ? `1分钟确认转${isLong ? '强多' : '强空'} + 大周期/RSI/Delta 过滤全过后自动市价开${isLong ? '多' : '空'}单, 结果同步推飞书` : '');
+        want ? `最近一根已收盘 1m Delta ${isLong ? '≥ +' : '≤ -'}${mtfComboDeltaMin} 后自动市价开${isLong ? '多' : '空'}单, 成交后开关自动关闭` : '');
     } catch (e) {
       if (chk) chk.checked = !want;
       showToast('err', `❌ 切换「${dirZh}」失败`, e.message, 8000);

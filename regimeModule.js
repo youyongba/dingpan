@@ -1105,22 +1105,18 @@ function buildComboLines(isBull, ctx) {
   ];
 }
 
-// ---------------------- MTF 组合条件自动开仓（1分钟边缘触发 + 三重过滤） ----------------------
+// ---------------------- MTF 自动开仓（组合 = 纯 Delta±阈值；1M强多/强空 = MTF 转强） ----------------------
 //
-// 用户在 regime 页面「手动开仓」栏拨开关武装后，两种模式共用同一条 1分钟转强边缘：
-//   · 组合开多/开空：确认转强后再验三重过滤（全过才下单，任一不满足则跳过并保持武装）
-//       ① 大周期方向：MTF 240分钟 或 60分钟 状态为「强多/偏多」（开空为「强空/偏空」）
-//       ② 15分钟 RSI：最近 COMBO.lookback15m 根收盘内出现过超卖（开空为超买过）
-//       ③ 1分钟 Delta：转强确认窗口内（最近 MTF_COMBO_DELTA_BARS 根已收盘 1m K 线, 默认 3）
-//          累计主动买盘 > 卖盘（开空为卖盘 > 买盘）, 不看单独一根避免偶然性
-//   · 1M强多/强空（单纯模式）：确认转强即市价开仓，不验组合过滤
-//   其余机制与旧版一致：
+// 用户在 regime 页面「手动开仓」栏拨开关武装后，两种模式互相独立：
+//   · 组合开多/开空：只看最近一根已收盘 1 分钟 K 线的 Delta，不参与任何其它指标
+//       该根净 Delta ≥ +MIN → 市价开多；≤ −MIN → 市价开空（默认 MIN=50）
+//       开启时先记一根基线、不追溯当前已达阈值的 K 线；之后每出一根新收盘再评估
+//   · 1M强多/强空：MTF 1分钟连续确认转为强多/强空即市价开仓，不看 Delta
+//   其余机制：
 //   - 多/空开关独立武装、独立触发、独立自动关闭
-//   - 每 30s 检查（只评估新快照, 按 updatedAt 去重）
-//   - 从全关到武装时只记基线不追溯, 避免对着已存在的陈旧强多/强空立刻下单
-//   - ⭐ 市价单：下单复用 trading/router.manualFollowImpl（与 UI「一键追单」同一实现：
-//     立即市价成交, entry=当前 WS 市价, TP/SL 按 ATR 动态派生, 置信度小仓位）
-//   - ⭐ 单次武装：成功开仓后只自动关闭该方向的开关（被拒/过滤不过时保持武装）
+//   - 每 30s 检查
+//   - ⭐ 市价单：下单复用 trading/router.manualFollowImpl（与 UI「一键追单」同一实现）
+//   - ⭐ 单次武装：成功开仓后只自动关闭该方向的开关（被拒时保持武装）
 //   - 触发后冷却 MTF5_AUTO_OPEN_COOLDOWN_MS（默认 10 分钟, 兜底）
 //   - ⭐ 1分钟确认转为强多/强空时, 无论开关是否武装都推飞书
 //   - 开关与触发记录持久化到磁盘, 进程重启后保持
@@ -1137,10 +1133,10 @@ const MTF_AUTO_TF_CFG = {
 };
 function newMtfAutoSlot() {
   return {
-    enabledLong: false,   // 组合条件: 强多 + 三重过滤 → 自动开多
-    enabledShort: false,  // 组合条件: 强空 + 三重过滤 → 自动开空
-    pureLong: false,      // ⚡ 单纯模式: 1分钟确认转强多即市价开多 (不验组合过滤)
-    pureShort: false,     // ⚡ 单纯模式: 1分钟确认转强空即市价开空 (不验组合过滤)
+    enabledLong: false,   // 组合: 最近一根已收盘 1m Delta ≥ +MIN → 自动开多
+    enabledShort: false,  // 组合: 最近一根已收盘 1m Delta ≤ −MIN → 自动开空
+    pureLong: false,      // ⚡ 单纯模式: 1分钟确认转强多即市价开多
+    pureShort: false,     // ⚡ 单纯模式: 1分钟确认转强空即市价开空
     lastFiredAt: 0,
     lastFired: null,      // { at, state, score, direction, status, ok, note, mode }
     // 运行时（不持久化）
@@ -1149,12 +1145,20 @@ function newMtfAutoSlot() {
     _pendingState: null,
     _pendingCount: 0,
     _firing: false,
+    _lastDeltaBarTime: 0, // 组合 Delta 已评估过的最后一根已收盘 1m 开盘时间
+    _deltaSnap: null,     // { at, delta, bars, buySum, sellSum } 供 UI 展示
   };
 }
 const mtfAuto = { '1': newMtfAutoSlot() };
 const mtf5Auto = mtfAuto['1'];   // 兼容别名（测试/旧引用; 组合逻辑后仅剩 1分钟槽）
+function comboArmed(slot) {
+  return slot.enabledLong || slot.enabledShort;
+}
+function pureArmed(slot) {
+  return slot.pureLong || slot.pureShort;
+}
 function mtfAutoArmed(slot) {
-  return slot.enabledLong || slot.enabledShort || slot.pureLong || slot.pureShort;
+  return comboArmed(slot) || pureArmed(slot);
 }
 
 function applyMtfAutoSlot(slot, obj) {
@@ -1202,11 +1206,8 @@ function saveMtf5AutoState() {
 }
 loadMtf5AutoState();
 
-// ---- 组合过滤条件 ① 大周期 ② 15m RSI ③ 1m Delta (确认窗口累计) ----
-
-// Delta 统计窗口: 最近 N 根已收盘 1m K 线 (默认 3 ≈ 1分钟转强的 2 个 MTF 快照确认时长),
-// 累计主动买盘要多于卖盘才算买盘占优 — 不看单独一根, 避免单根绿柱的偶然性
-const MTF_COMBO_DELTA_BARS = Math.max(1, parseInt(process.env.MTF_COMBO_DELTA_BARS, 10) || 3);
+// ---- 1m Delta：最近一根已收盘 1 分钟 K 线的主动买卖差 ----
+const MTF_COMBO_DELTA_MIN = Math.max(0, parseFloat(process.env.MTF_COMBO_DELTA_MIN) || 50);
 
 let _delta1mCache = { fetchedAt: 0, data: null };
 async function fetch1mDelta() {
@@ -1214,30 +1215,24 @@ async function fetch1mDelta() {
   if (_delta1mCache.data && now - _delta1mCache.fetchedAt < 20 * 1000) return _delta1mCache.data;
   const url = `${BINANCE_FAPI}/fapi/v1/klines`;
   const { data } = await axios.get(url, {
-    params: { symbol: SYMBOL, interval: '1m', limit: MTF_COMBO_DELTA_BARS + 1 },
+    params: { symbol: SYMBOL, interval: '1m', limit: 2 },
     timeout: TIMEOUT,
     httpAgent, httpsAgent,
   });
   if (!Array.isArray(data) || data.length < 2) return null;
-  const closed = data.slice(0, -1);              // 最后一根尚未收盘, 只统计已收盘的
-  let buySum = 0;
-  let sellSum = 0;
-  const perBar = [];
-  for (const k of closed) {
-    const volume = +k[5];
-    const takerBuy = +k[9];                      // 主动买量 (taker buy base volume)
-    buySum += takerBuy;
-    sellSum += volume - takerBuy;
-    perBar.push(+(2 * takerBuy - volume).toFixed(3));   // 单根 delta（诊断用）
-  }
+  const k = data[data.length - 2];               // 最后一根尚未收盘, 取倒数第二根（已收盘）
+  const volume = +k[5];
+  const takerBuy = +k[9];
+  const takerSell = volume - takerBuy;
+  const delta = +(takerBuy - takerSell).toFixed(3);
   const out = {
-    bars: closed.length,
-    time: closed[closed.length - 1][0],
-    close: +closed[closed.length - 1][4],
-    buySum: +buySum.toFixed(3),
-    sellSum: +sellSum.toFixed(3),
-    perBar,
-    delta: +(buySum - sellSum).toFixed(3),       // >0 = 窗口内买盘占优 / <0 = 卖盘占优
+    bars: 1,
+    time: k[0],
+    close: +k[4],
+    buySum: +takerBuy.toFixed(3),
+    sellSum: +takerSell.toFixed(3),
+    perBar: [delta],
+    delta,                                       // 最近一根已收盘 1m: >0 买盘 / <0 卖盘
   };
   _delta1mCache = { fetchedAt: now, data: out };
   return out;
@@ -1245,8 +1240,8 @@ async function fetch1mDelta() {
 
 /**
  * 组合过滤条件评估（1分钟确认转强多/强空后、下单前调用）:
- *   开多: (240m 或 60m ∈ 强多/偏多) + 15m RSI 最近超卖过 + 1m 确认窗口累计 Delta 买盘>卖盘
- *   开空: (240m 或 60m ∈ 强空/偏空) + 15m RSI 最近超买过 + 1m 确认窗口累计 Delta 卖盘>买盘
+ *   开多: (240m 或 60m ∈ 强多/偏多) + 15m RSI 最近超卖过 + 1m 确认窗口累计 Delta ≥ +MIN
+ *   开空: (240m 或 60m ∈ 强空/偏空) + 15m RSI 最近超买过 + 1m 确认窗口累计 Delta ≤ −MIN
  * @returns {{pass, htfOk, rsiOk, deltaOk, detail: string[]}}
  */
 function evalMtfComboFilters(direction, delta1m) {
@@ -1263,27 +1258,71 @@ function evalMtfComboFilters(direction, delta1m) {
   const rsiNow = Array.isArray(rsiArr) && rsiArr.length ? rsiArr[rsiArr.length - 1] : null;
 
   const deltaOk = delta1m != null && Number.isFinite(delta1m.delta)
-    && (isLong ? delta1m.delta > 0 : delta1m.delta < 0);
+    && (isLong ? delta1m.delta >= MTF_COMBO_DELTA_MIN : delta1m.delta <= -MTF_COMBO_DELTA_MIN);
 
   const mk = (ok) => (ok ? '✅' : '❌');
   const deltaStr = delta1m
     ? `近${delta1m.bars}根累计 买${delta1m.buySum} vs 卖${delta1m.sellSum} (净${delta1m.delta >= 0 ? '+' : ''}${delta1m.delta})`
     : '--';
+  const needStr = isLong ? `净Delta≥+${MTF_COMBO_DELTA_MIN}` : `净Delta≤-${MTF_COMBO_DELTA_MIN}`;
   const detail = [
     `${mk(htfOk)} ① 240m「${r240?.state || '--'}」/ 60m「${r60?.state || '--'}」需含${isLong ? '强多/偏多' : '强空/偏空'}`,
     `${mk(rsiOk)} ② 15m RSI 最近 ${COMBO.lookback15m} 根内${isLong ? '超卖过' : '超买过'} (当前 ${rsiNow != null ? rsiNow.toFixed(1) : '--'})`,
-    `${mk(deltaOk)} ③ 1m Delta ${deltaStr} 需${isLong ? '买盘>卖盘' : '卖盘>买盘'}`,
+    `${mk(deltaOk)} ③ 1m Delta ${deltaStr} 需${needStr}`,
   ];
   return { pass: htfOk && rsiOk && deltaOk, htfOk, rsiOk, deltaOk, detail };
 }
 
-/** 单个周期的状态机：基线 → 变化确认 → (可选)强多强空飞书 → (武装时)组合过滤 → 自动开仓 */
+function fmtDeltaSnap(d) {
+  if (!d || !Number.isFinite(d.delta)) return '--';
+  return `1m收盘 买${d.buySum} vs 卖${d.sellSum} (净${d.delta >= 0 ? '+' : ''}${d.delta})`;
+}
+
+/** 组合开仓：只看 1m Delta ±MIN，新收盘才评估，开启时不追溯当前已达阈值的 K 线 */
+async function comboDeltaTick() {
+  const slot = mtfAuto['1'];
+  if (slot._firing || !comboArmed(slot)) return;
+  let d = null;
+  try { d = await fetch1mDelta(); }
+  catch (e) {
+    console.error('[regime] 组合 1m Delta 拉取失败:', e?.message || e);
+    return;
+  }
+  if (!d || !Number.isFinite(d.delta)) return;
+  slot._deltaSnap = { at: Date.now(), delta: d.delta, bars: d.bars, buySum: d.buySum, sellSum: d.sellSum };
+  if (d.time === slot._lastDeltaBarTime) return;
+  if (!slot._lastDeltaBarTime) {
+    slot._lastDeltaBarTime = d.time;
+    console.log(`[regime] 组合 Delta 基线: ${fmtDeltaSnap(d)} (不追溯当前已达阈值的 K 线)`);
+    return;
+  }
+  slot._lastDeltaBarTime = d.time;
+
+  const longHit = slot.enabledLong && d.delta >= MTF_COMBO_DELTA_MIN;
+  const shortHit = slot.enabledShort && d.delta <= -MTF_COMBO_DELTA_MIN;
+  if (!longHit && !shortHit) {
+    console.log(`[regime] 组合 Delta 新收盘 ${fmtDeltaSnap(d)} 未达 ±${MTF_COMBO_DELTA_MIN}, 保持武装`);
+    return;
+  }
+  const direction = longHit ? 'long' : 'short';
+  const need = direction === 'long' ? `≥+${MTF_COMBO_DELTA_MIN}` : `≤-${MTF_COMBO_DELTA_MIN}`;
+  const tfRow = {
+    state: `Δ${d.delta >= 0 ? '+' : ''}${d.delta}`,
+    score: d.delta,
+    action: direction === 'long' ? '市价开多' : '市价开空',
+  };
+  const filters = { detail: [`✅ 1m Delta ${fmtDeltaSnap(d)} ${need}`] };
+  console.log(`[regime] 🤖 组合 Delta 达标 → 市价开${direction === 'long' ? '多' : '空'}: ${fmtDeltaSnap(d)} ${need}`);
+  await fireMtfAutoOpen('1', direction, tfRow, { mode: 'combo', filters });
+}
+
+/** 单个周期的状态机：基线 → 变化确认 → 强多强空飞书 → (1M强多/强空武装时)自动开仓 */
 async function mtfAutoTickTf(tfKey, mtf) {
   const slot = mtfAuto[tfKey];
   const cfg = MTF_AUTO_TF_CFG[tfKey];
   if (slot._firing) return;
-  // 未武装且该周期不需要强多/强空推送时, 无事可做
-  if (!mtfAutoArmed(slot) && !cfg.pushStrong) return;
+  // 未武装单纯开关且该周期不需要强多/强空推送时, 无事可做
+  if (!pureArmed(slot) && !cfg.pushStrong) return;
 
   const updatedAt = mtf.getUpdatedAt();
   if (!updatedAt || updatedAt === slot._lastSeenMtfAt) return; // 只评估新快照
@@ -1319,47 +1358,19 @@ async function mtfAutoTickTf(tfKey, mtf) {
   // 强多/强空确认成立：按配置推飞书（与开关是否武装无关）
   if (cfg.pushStrong) pushMtfStrongFeishu(tfKey, cfg.label, from, tfRow);
 
-  // 方向开关独立：组合 / 单纯 可同时武装, 同一 tick 只开一次仓 (组合优先, 过滤不过则走单纯)
   const direction = cur === '强多' ? 'long' : 'short';
-  const comboArmed = direction === 'long' ? slot.enabledLong : slot.enabledShort;
-  const pureArmed = direction === 'long' ? slot.pureLong : slot.pureShort;
-  if (!comboArmed && !pureArmed) {
-    console.log(`[regime] ⏭ MTF${tfKey} 状态确认 ${from} → ${cur}, 但${direction === 'long' ? '多' : '空'}方向开关未武装, 跳过下单`);
+  const armed = direction === 'long' ? slot.pureLong : slot.pureShort;
+  if (!armed) {
+    console.log(`[regime] ⏭ MTF${tfKey} 状态确认 ${from} → ${cur}, 但 1M强${direction === 'long' ? '多' : '空'}开关未武装, 跳过下单`);
     return;
   }
-
-  let openedOk = false;
-  if (comboArmed) {
-    // ⭐ 组合过滤：① 240m/60m 大周期方向 ② 15m RSI 最近超卖/超买过 ③ 1m Delta 买/卖盘
-    let delta1m = null;
-    try { delta1m = await fetch1mDelta(); }
-    catch (e) { console.error('[regime] 1m Delta 拉取失败:', e?.message || e); }
-    const filters = evalMtfComboFilters(direction, delta1m);
-    if (!filters.pass) {
-      console.log(`[regime] ⏭ MTF${tfKey} 确认转「${cur}」但组合过滤未通过, 组合开关保持武装:\n  ${filters.detail.join('\n  ')}`);
-      webhook.sendRich(
-        `⏭ 组合自动开${direction === 'long' ? '多' : '空'}条件未满足（保持武装）`,
-        [
-          [{ text: `📊 MTF 1分钟已确认转「${cur}」, 但组合过滤未全部通过:` }],
-          ...filters.detail.map((t) => [{ text: t }]),
-          [{ text: '组合开关保持武装, 下次 1分钟再次确认转强时会重新评估', italic: true }],
-          [{ text: `⏰ ${new Date().toLocaleString()}` }],
-        ],
-        { eventKey: `mtfComboSkip_${direction}` }
-      );
-    } else {
-      console.log(`[regime] 🤖 MTF${tfKey} 组合自动开仓条件全部成立: ${from} → ${cur}\n  ${filters.detail.join('\n  ')}`);
-      openedOk = await fireMtfAutoOpen(tfKey, direction, tfRow, { mode: 'combo', filters });
-    }
-  }
-
-  if (pureArmed && !openedOk) {
-    console.log(`[regime] ⚡ MTF${tfKey} 单纯 1分钟${cur} → 市价开${direction === 'long' ? '多' : '空'} (不验组合过滤)`);
-    await fireMtfAutoOpen(tfKey, direction, tfRow, { mode: 'pure' });
-  }
+  console.log(`[regime] ⚡ MTF${tfKey} 单纯 1分钟${cur} → 市价开${direction === 'long' ? '多' : '空'}`);
+  await fireMtfAutoOpen(tfKey, direction, tfRow, { mode: 'pure' });
 }
 
 async function mtfAutoTick() {
+  try { await comboDeltaTick(); }
+  catch (e) { console.error('[regime] 组合 Delta 自动开仓检测异常:', e?.message || e); }
   let mtf;
   try { mtf = require('./mtfModule'); } catch (e) { return; }
   if (typeof mtf.getUpdatedAt !== 'function' || typeof mtf.getTimeframe !== 'function') return;
@@ -1399,8 +1410,8 @@ async function fireMtfAutoOpen(tfKey, direction, tfRow, opts = {}) {
   }
   slot._firing = true;
   const dirLabel = direction === 'long' ? '多单' : '空单';
-  const scoreStr = tfRow.score > 0 ? `+${tfRow.score}` : String(tfRow.score);
-  const modeZh = mode === 'pure' ? '1分钟强多/强空' : '组合条件';
+  const scoreStr = Number(tfRow?.score) > 0 ? `+${tfRow.score}` : String(tfRow?.score ?? '--');
+  const modeZh = mode === 'pure' ? '1分钟强多/强空' : 'Delta±' + MTF_COMBO_DELTA_MIN;
   try {
     // ⭐ 市价单: 用 manualFollowImpl (与 UI「一键追单」同一实现, 立即市价成交),
     //    不用 manualOpenImpl (那是 pending 限价, 要等价格回踩 entry 才成交).
@@ -1426,7 +1437,7 @@ async function fireMtfAutoOpen(tfKey, direction, tfRow, opts = {}) {
     const note = ok
       ? `entry=${p.entryPrice ?? '--'} sl=${p.currentStopLoss ?? p.initialStopLoss ?? '--'} 仓位=${p.positionSize || '--'}`
       : (r.body?.error || r.body?.hint || `HTTP ${r.status}`);
-    slot.lastFired = { at: now, state: tfRow.state, score: tfRow.score, direction, status: r.status, ok, note, mode };
+    slot.lastFired = { at: now, state: tfRow?.state, score: tfRow?.score, direction, status: r.status, ok, note, mode };
     saveMtf5AutoState();
     console.log(`[regime] ${ok ? '✅' : '⏭'} MTF${tfKey} ${modeZh}自动开仓(市价) ${direction} status=${r.status} ${note}`);
 
@@ -1437,26 +1448,28 @@ async function fireMtfAutoOpen(tfKey, direction, tfRow, opts = {}) {
       ok
         ? (mode === 'pure'
           ? `⚡ 1分钟${tfRow.state} → 已市价开${dirLabel}`
-          : `🤖 组合自动开仓：${label}转「${tfRow.state}」+ 组合过滤通过 → 已市价开${dirLabel}`)
+          : `🤖 组合开仓：1m Delta ${tfRow.state} → 已市价开${dirLabel}`)
         : (mode === 'pure'
           ? `⚡ 1分钟${tfRow.state}自动开仓被拒`
-          : `🤖 组合自动开仓被拒：${label}转「${tfRow.state}」`),
+          : `🤖 组合开仓被拒：1m Delta ${tfRow.state}`),
       [
         [{ text: '⏰ 时间：', bold: true }, { text: new Date().toLocaleString() }],
-        [{ text: `📊 ${label} MTF：`, bold: true }, { text: `${tfRow.state}（评分 ${scoreStr} · ${tfRow.action || '--'}）` }],
+        mode === 'pure'
+          ? [{ text: `📊 ${label} MTF：`, bold: true }, { text: `${tfRow.state}（评分 ${scoreStr} · ${tfRow.action || '--'}）` }]
+          : [{ text: '📊 条件：', bold: true }, { text: `仅 1m Delta ±${MTF_COMBO_DELTA_MIN}（无其它指标）` }],
         ...(filters ? filters.detail.map((t) => [{ text: t }]) : []),
         [{ text: '🎬 动作：', bold: true }, { text: ok ? `市价开${dirLabel}（立即成交）` : `开${dirLabel}失败` }],
         [{ text: '📋 结果：', bold: true }, { text: note }],
         ok
           ? [{ text: `🔒 「${switchZh}」开关已自动关闭（单次触发防重复开仓），另一方向开关不受影响；如需再次自动开仓请到页面重新开启`, italic: true }]
-          : [{ text: '⚠️ 本次未成交，开关保持武装，等待下一次状态转变', italic: true }],
-        [{ text: `来源：MTF ${modeZh}自动开仓（与「一键追单」同通道：市价成交, TP/SL 按 ATR 派生）`, italic: true }],
+          : [{ text: '⚠️ 本次未成交，开关保持武装，等待下一根新的 1m 收盘', italic: true }],
+        [{ text: `来源：${mode === 'pure' ? 'MTF 1分钟强多/强空' : '组合 Delta'}自动开仓（与「一键追单」同通道：市价成交, TP/SL 按 ATR 派生）`, italic: true }],
       ],
       { eventKey: `mtf${tfKey}AutoOpen_${mode}`, force: true }
     );
     return ok;
   } catch (e) {
-    slot.lastFired = { at: now, state: tfRow.state, score: tfRow.score, direction, status: 0, ok: false, note: e?.message || String(e), mode };
+    slot.lastFired = { at: now, state: tfRow?.state, score: tfRow?.score, direction, status: 0, ok: false, note: e?.message || String(e), mode };
     saveMtf5AutoState();
     console.error(`[regime] ❌ MTF${tfKey} 自动开仓异常 (${direction}/${mode}):`, e?.message || e);
     return false;
@@ -1783,22 +1796,22 @@ router.get('/mtf-auto-open', (req, res) => {
       lastFiredAt: s.lastFiredAt || null,
       lastFired: s.lastFired,
       mtf: row ? { state: row.state, score: row.score, action: row.action } : null,
+      deltaSnap: s._deltaSnap,
     };
   }
-  // 组合过滤条件当前快照（不拉 Delta, 避免 GET 轮询打 REST; Delta 只在触发时评估）
-  const filters = {
-    long: evalMtfComboFilters('long', null),
-    short: evalMtfComboFilters('short', null),
-  };
+  const snap = mtfAuto['1']._deltaSnap;
+  const dlt = snap && Number.isFinite(snap.delta) ? snap.delta : null;
   res.json({
     ok: true,
     tfs,
-    filters: {
-      long: { htfOk: filters.long.htfOk, rsiOk: filters.long.rsiOk, detail: filters.long.detail },
-      short: { htfOk: filters.short.htfOk, rsiOk: filters.short.rsiOk, detail: filters.short.detail },
+    delta: snap,
+    deltaOk: {
+      long: dlt != null && dlt >= MTF_COMBO_DELTA_MIN,
+      short: dlt != null && dlt <= -MTF_COMBO_DELTA_MIN,
     },
     confirm: MTF5_AUTO.confirm,
     cooldownMs: MTF5_AUTO.cooldownMs,
+    deltaMin: MTF_COMBO_DELTA_MIN,
     // 兼容旧字段（= 1分钟槽; 组合逻辑后 5分钟槽已移除）
     enabledLong: mtfAuto['1'].enabledLong,
     enabledShort: mtfAuto['1'].enabledShort,
@@ -1826,16 +1839,17 @@ router.post('/mtf-auto-open', mtf5AdminGuard, (req, res) => {
   if (!Object.keys(patch).length) {
     return res.status(400).json({ ok: false, error: 'enabledLong / enabledShort / pureLong / pureShort 至少提供一个 boolean' });
   }
-  const wasArmed = mtfAutoArmed(slot);
+  const comboWas = comboArmed(slot);
+  const pureWas = pureArmed(slot);
   Object.assign(slot, patch);
-  // 从「全关」到「武装」时重置该周期运行时基线：第一个快照只记基线,
-  // 不对已存在的强多/强空追溯下单; 已武装状态下切另一方向不打断状态跟踪.
-  // （注: 1分钟槽因需持续推强多/强空飞书, 状态机常驻, 基线通常已存在, 重置同样安全）
-  if (!wasArmed && mtfAutoArmed(slot)) {
+  if (!pureWas && pureArmed(slot)) {
     slot._lastState = null;
     slot._pendingState = null;
     slot._pendingCount = 0;
     slot._lastSeenMtfAt = 0;
+  }
+  if (!comboWas && comboArmed(slot)) {
+    slot._lastDeltaBarTime = 0;
   }
   saveMtf5AutoState();
   console.log(`[regime] MTF${tfKey} 自动开仓开关 → 组合 long=${slot.enabledLong ? '✅' : '🛑'} short=${slot.enabledShort ? '✅' : '🛑'} · 单纯 long=${slot.pureLong ? '✅' : '🛑'} short=${slot.pureShort ? '✅' : '🛑'}`);
@@ -1934,13 +1948,16 @@ module.exports = {
     notifyState,
     // MTF 组合条件自动开仓（供测试复用；mtf5Auto 为 mtfAuto['1'] 的兼容别名）
     mtfAutoTick,
+    comboDeltaTick,
     mtfAuto,
     mtf5Auto,
     MTF5_AUTO,
     evalMtfComboFilters,
     fetch1mDelta,
+    MTF_COMBO_DELTA_MIN,
     __setCacheM15ForTest: (m15) => { cache.m15 = m15; },
     __resetDelta1mCacheForTest: () => { _delta1mCache = { fetchedAt: 0, data: null }; },
+    __setDelta1mCacheForTest: (data) => { _delta1mCache = { fetchedAt: Date.now(), data }; },
     // 同时暴露 enhanceRegime 给回测使用 (已经从 ./regime/enhancedJudge require)
     enhanceRegime,
     // 暴露常量
