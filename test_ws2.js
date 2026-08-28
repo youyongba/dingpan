@@ -1,16 +1,8 @@
 const WebSocket = require('ws');
-const ws = new WebSocket('wss://fstream.binance.com/stream?streams=btcusdt@aggTrade/btcusdt@depth20@100ms');
+const ws = new WebSocket('wss://fstream.binance.com/stream?streams=btcusdt@aggtrade/btcusdt@depth20@100ms');
 
 ws.on('open', () => {
     console.log('Connected');
-});
-
-ws.on('error', (e) => {
-    console.error('WS Error:', e);
-});
-
-ws.on('close', () => {
-    console.log('WS Closed');
 });
 
 let aggCount = 0;
@@ -22,8 +14,6 @@ ws.on('message', (data) => {
         aggCount++;
     } else if (msg.stream && msg.stream.includes('depth')) {
         depthCount++;
-    } else {
-        console.log('Other msg:', msg);
     }
 });
 
