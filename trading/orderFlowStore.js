@@ -48,13 +48,13 @@ function maybeAlertBar(bar, tfKey, source) {
     if (!bar || tfKey !== '1m') return;
     const d = bar.totalDelta;
     if (!Number.isFinite(d)) return;
-    if (d >= DELTA_ALERT_MIN && !bar.alertedLong) {
+    if (d >= DELTA_ALERT_MIN) {
         bar.alertedLong = true;
         trySendDeltaAlert({
             tf: '1m', direction: 'long', delta: d,
             startTime: bar.startTime, source,
         });
-    } else if (d <= -DELTA_ALERT_MIN && !bar.alertedShort) {
+    } else if (d <= -DELTA_ALERT_MIN) {
         bar.alertedShort = true;
         trySendDeltaAlert({
             tf: '1m', direction: 'short', delta: d,
@@ -151,8 +151,8 @@ class OrderFlowStore extends EventEmitter {
             bar.cells[level].buyVol += qty;
             bar.totalDelta += qty;
         }
-        // 盘中一旦越过 ±50 立刻推飞书 (不必等收盘); 每根每方向只推一次
-        if (tfKey === '1m') maybeAlertBar(bar, tfKey, 'store-live');
+        // 移除盘中触发，严格执行收盘结算触发 (根据 memory 约束)
+        // 确保最终推送的是整根 K 线的准确净 Delta 值
     }
 
     getHistory(tfKey) {

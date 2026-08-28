@@ -563,7 +563,7 @@ async function loadHistoricalAndConnect() {
 
         // 并行拉取 Binance K 线和我们后端的真实 tick 聚合数据
         const [binanceRes, historyRes] = await Promise.all([
-            fetch(`https://api.binance.com/api/v3/klines?symbol=${currentSymbol.toUpperCase()}&interval=${currentBinanceTF}&limit=150`),
+            fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=${currentSymbol.toUpperCase()}&interval=${currentBinanceTF}&limit=150`),
             fetch(`/api/auto-trade/orderflow/history?tf=${currentBinanceTF}`).catch(() => ({ json: () => ({ ok: false }) }))
         ]);
         
@@ -734,7 +734,7 @@ async function loadMoreHistory() {
         const oldestTime = STATE.footprints[0].startTime;
         // 拉取更早的150根
         const [binanceRes, historyRes] = await Promise.all([
-            fetch(`https://api.binance.com/api/v3/klines?symbol=${currentSymbol.toUpperCase()}&interval=${currentBinanceTF}&limit=150&endTime=${oldestTime - 1}`),
+            fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=${currentSymbol.toUpperCase()}&interval=${currentBinanceTF}&limit=150&endTime=${oldestTime - 1}`),
             // 后端暂不支持 endTime, 但这里可以安全地传入, 之后若支持可以生效; 目前返回的 [] 不影响拟合逻辑
             fetch(`/api/auto-trade/orderflow/history?tf=${currentBinanceTF}&endTime=${oldestTime - 1}`).catch(() => ({ json: () => ({ ok: false }) }))
         ]);
@@ -775,7 +775,7 @@ function connectWebSocket() {
         .catch(e => console.warn("Failed to fetch initial MTF walls:", e));
 
     const streams = `${currentSymbol}@aggTrade/${currentSymbol}@depth20@100ms`;
-    ws = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
+    ws = new WebSocket(`wss://fstream.binance.com/stream?streams=${streams}`);
     
     ws.onopen = () => {
         document.getElementById('conn-status').textContent = '已连接真实数据';
