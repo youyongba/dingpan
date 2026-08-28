@@ -70,6 +70,21 @@ class OrderFlowStore extends EventEmitter {
         let map = this.history[tfKey];
 
         if (!map.has(startTime)) {
+            // === 收盘判定与报警逻辑 ===
+            // 当新的 startTime 出现时，意味着上一根 K 线刚刚走完
+            if (tfKey === '1m' && map.size > 0) {
+                const lastStartTime = Math.max(...Array.from(map.keys()));
+                const lastBar = map.get(lastStartTime);
+
+                if (lastBar.totalDelta >= 50) {
+                    const timeStr = new Date(lastStartTime).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+                    feishuWebhook.sendText(`🚨 [Order Flow] 1分钟 Delta 收盘确认\n时间: ${timeStr}\n方向: 多头强势 (收盘 Delta ≥ 50)\n最终净买入: +${lastBar.totalDelta.toFixed(2)}`, { eventKey: `1m_delta_close_50_${lastStartTime}`, force: true });
+                } else if (lastBar.totalDelta <= -50) {
+                    const timeStr = new Date(lastStartTime).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+                    feishuWebhook.sendText(`🚨 [Order Flow] 1分钟 Delta 收盘确认\n时间: ${timeStr}\n方向: 空头强势 (收盘 Delta ≤ -50)\n最终净卖出: ${lastBar.totalDelta.toFixed(2)}`, { eventKey: `1m_delta_close_-50_${lastStartTime}`, force: true });
+                }
+            }
+
             // 清理旧数据，防止内存泄漏 (Ring Buffer 机制)
             if (map.size >= this.maxBars) {
                 const oldest = Math.min(...Array.from(map.keys()));
@@ -93,19 +108,6 @@ class OrderFlowStore extends EventEmitter {
         } else {
             bar.cells[level].buyVol += qty;
             bar.totalDelta += qty;
-        }
-
-        // 1分钟 Delta 阈值报警
-        if (tfKey === '1m') {
-            if (bar.totalDelta >= 50 && bar.alertedDir !== 1) {
-                bar.alertedDir = 1;
-                const timeStr = new Date(startTime).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
-                feishuWebhook.sendText(`🚨 [Order Flow] 1分钟 Delta 激增\n时间: ${timeStr}\n方向: 多头 (Delta ≥ 50)\n当前 Delta: +${bar.totalDelta.toFixed(2)}`, { eventKey: `1m_delta_50_${startTime}`, force: true });
-            } else if (bar.totalDelta <= -50 && bar.alertedDir !== -1) {
-                bar.alertedDir = -1;
-                const timeStr = new Date(startTime).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
-                feishuWebhook.sendText(`🚨 [Order Flow] 1分钟 Delta 激增\n时间: ${timeStr}\n方向: 空头 (Delta ≤ -50)\n当前 Delta: ${bar.totalDelta.toFixed(2)}`, { eventKey: `1m_delta_-50_${startTime}`, force: true });
-            }
         }
     }
 

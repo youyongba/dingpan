@@ -294,6 +294,8 @@
             <button class="btn" data-tf="240">4h</button>
             <button class="btn" data-tf="1440">1D</button>
         </div>
+        
+        <span id="candle-countdown" style="margin-left: 15px; font-family: Consolas; color: #ffca28; font-size: 14px; font-weight: bold; line-height: 32px;">⏳ --:--</span>
 
         <div class="btn-group" style="margin-left: 20px;">
             <button class="btn active" id="btn-play">■ 实时</button>
@@ -2266,6 +2268,34 @@ document.getElementById('btn-screenshot').addEventListener('click', () => {
         showToast('截图失败，请查看控制台');
     });
 });
+
+// 当前 K 线倒计时更新
+setInterval(() => {
+    const countdownEl = document.getElementById('candle-countdown');
+    if (!countdownEl || !CONFIG.timeframe) return;
+    
+    const now = Date.now();
+    // 计算下一个周期整点的时间戳
+    const nextBarTime = Math.floor(now / CONFIG.timeframe) * CONFIG.timeframe + CONFIG.timeframe;
+    const remainingMs = nextBarTime - now;
+    
+    if (remainingMs > 0) {
+        const totalSecs = Math.floor(remainingMs / 1000);
+        const hours = Math.floor(totalSecs / 3600);
+        const mins = Math.floor((totalSecs % 3600) / 60);
+        const secs = totalSecs % 60;
+        
+        let timeStr = '';
+        if (hours > 0) {
+            timeStr += hours.toString().padStart(2, '0') + ':';
+        }
+        timeStr += mins.toString().padStart(2, '0') + ':' + secs.toString().padStart(2, '0');
+        
+        countdownEl.textContent = '⏳ ' + timeStr;
+    } else {
+        countdownEl.textContent = '⏳ 00:00';
+    }
+}, 1000);
 
 // ================= 启动 =================
 setTimeout(() => {
