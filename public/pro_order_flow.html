@@ -775,7 +775,12 @@ function connectWebSocket() {
         .catch(e => console.warn("Failed to fetch initial MTF walls:", e));
 
     const streams = `${currentSymbol}@aggTrade/${currentSymbol}@depth20@100ms`;
-    ws = new WebSocket(`wss://fstream.binance.com/stream?streams=${streams}`);
+    
+    // 使用后端代理。这会完美解决本地测试时浏览器的代理问题（后端自动读取终端环境变量），
+    // 并且部署到韩国云主机后，由于没有环境变量，代理会自动退化为直连，代码完全无需修改。
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${window.location.host}/ws/binance/?streams=${streams}`;
+    ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {
         document.getElementById('conn-status').textContent = '已连接真实数据';
@@ -787,16 +792,19 @@ function connectWebSocket() {
         
         try {
             const msg = JSON.parse(event.data);
+            
             const stream = msg.stream;
-            const data = msg.data;
+            const data = msg.data || msg; // 兼容可能没包裹 data 的情况
             
             if (!stream || !data) return;
             
             const lowerStream = stream.toLowerCase();
+            const eventType = data.e;
             
-            if (lowerStream.endsWith('@aggtrade')) {
+            // 兼容流名称大小写和 eventType 判断
+            if (eventType === 'aggTrade' || lowerStream.endsWith('@aggtrade')) {
                 handleAggTrade(data);
-            } else if (lowerStream.endsWith('@depth20@100ms') || lowerStream.includes('depth')) {
+            } else if (eventType === 'depthUpdate' || lowerStream.includes('depth')) {
                 handleDepth(data);
             }
         } catch (e) {
