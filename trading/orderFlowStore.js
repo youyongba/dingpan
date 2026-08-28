@@ -10,7 +10,6 @@
 'use strict';
 
 const EventEmitter = require('events');
-const priceFeed = require('./priceFeed');
 const feishuWebhook = require('../notifier/feishuWebhook');
 
 const TICK_SIZE = 10.0;
@@ -96,8 +95,38 @@ class OrderFlowStore extends EventEmitter {
         this.largeOrderStats = { totalBuy: 0, totalSell: 0 };
         this.LARGE_ORDER_THRESHOLD = 1.0;
 
-        // 无阻塞监听 tick，O(1) 操作，不影响风控引擎
-        priceFeed.on('tick', (data) => this._onTick(data));
+        // 彻底解耦：独立建立专属的 aggTrade WebSocket 连接，完全不依赖 priceFeed。
+        // 这样 .env 中的 AUTO_TRADE_STREAM 无论改成什么 (比如 markPrice)，都不会影响此处的飞书推送。
+        this._connectAggTrade();
+    }
+
+    _connectAggTrade() {
+        const WebSocket = require('ws');
+        let agent = undefined;
+        // 尝试复用终端代理 (本地测试用，韩国云主机会自动忽略)
+        const proxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
+        if (proxy) {
+            try {
+                const HttpsProxyAgent = require('https-proxy-agent');
+                agent = new HttpsProxyAgent(proxy);
+            } catch(e) {}
+        }
+        
+        const ws = new WebSocket('wss://fstream.binance.com/market/ws/btcusdt@aggTrade', { agent });
+        
+        ws.on('message', (buf) => {
+            try {
+                const raw = JSON.parse(buf.toString());
+                // 确保只处理 e: 'aggTrade' 数据
+                if (raw && raw.e === 'aggTrade') {
+                    this._onTick({ ts: Date.now(), raw });
+                }
+            } catch(e) {}
+        });
+        
+        ws.on('open', () => console.log('[orderFlowStore] 🟢 独立 aggTrade 价格流已连接 (专供 Delta 与飞书)'));
+        ws.on('close', () => setTimeout(() => this._connectAggTrade(), 3000));
+        ws.on('error', (err) => console.warn('[orderFlowStore] ⚠️ 独立 WS 错误:', err.message));
     }
 
     _onTick(data) {
