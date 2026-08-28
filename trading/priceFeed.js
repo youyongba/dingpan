@@ -145,14 +145,28 @@ class PriceFeed extends EventEmitter {
   _connect() {
     if (this.stopped) return;
     const cfg = config.get();
-    let stream = cfg.priceFeed.stream || 'btcusdt@aggTrade';
     
-    // 强制纠正大小写错误，避免静默断流
-    if (stream.toLowerCase() === 'btcusdt@aggtrade') {
-        stream = 'btcusdt@aggTrade';
+    // 1. 获取用户配置的流（如 markPrice@1s）
+    let configuredStream = cfg.priceFeed.stream || 'btcusdt@aggTrade';
+    if (configuredStream.toLowerCase() === 'btcusdt@aggtrade') {
+        configuredStream = 'btcusdt@aggTrade'; // 纠正大小写
     }
     
-    const url = `${FAPI_WS_BASE}/${stream}`;
+    // 2. OrderFlow 模块必须强制需要 aggTrade 才能算 Delta
+    const requiredStream = 'btcusdt@aggTrade';
+    
+    // 3. 组合订阅（去重）。币安 /market/ws 实际上只支持单流，但这里可以通过 /stream?streams= 实现多路复用。
+    // 但是由于币安合约 /stream?streams= 有丢数据 Bug，我们在后端可以启动多路复用。
+    // 这里最安全的方式是：如果配置的流不是 aggTrade，我们就走多路复用网关；如果本来就是 aggTrade，就走单流网关。
+    let url;
+    if (configuredStream === requiredStream) {
+        url = `${FAPI_WS_BASE}/${configuredStream}`;
+    } else {
+        // 多路复用必须走老的 /stream 路径
+        const wsProtocol = FAPI_WS_BASE.startsWith('wss') ? 'wss' : 'ws';
+        const host = FAPI_WS_BASE.split('/')[2];
+        url = `${wsProtocol}://${host}/stream?streams=${configuredStream}/${requiredStream}`;
+    }
 
     const agent = buildProxyAgent();
     console.log(`[trade.priceFeed] 连接 ${url} (attempt=${this.attempt + 1}, proxy=${agent ? 'on' : 'direct'}, handshakeTimeout=${HANDSHAKE_TIMEOUT}ms)`);
@@ -191,16 +205,23 @@ class PriceFeed extends EventEmitter {
     ws.on('message', (buf) => {
       let msg;
       try { msg = JSON.parse(buf.toString()); } catch { return; }
-      // aggTrade: {e:'aggTrade', p:'69123.45', T: 1234567890, ...}
-      // markPrice: {e:'markPriceUpdate', p:'...', E:..., ...}
-      const priceStr = msg.p || msg.c || (msg.k && msg.k.c);
+      
+      // 处理多路复用的数据包格式 { stream: '...', data: { e: 'aggTrade', ... } }
+      let rawMsg = msg;
+      if (msg.stream && msg.data) {
+          rawMsg = msg.data;
+      }
+      
+      const priceStr = rawMsg.p || rawMsg.c || (rawMsg.k && rawMsg.k.c);
       const price = parseFloat(priceStr);
       if (!Number.isFinite(price)) return;
       const now = Date.now();
       this.lastPrice = price;
       this.lastTickAt = now;
       this._bumpTickRate(now);
-      this.emit('tick', { price, ts: now, raw: msg });
+      
+      // 将真实的数据包 emit 出去，供风控和 OrderFlow 各自消费
+      this.emit('tick', { price, ts: now, raw: rawMsg });
     });
 
     ws.on('ping', (data) => { try { ws.pong(data); } catch (_) {} });
