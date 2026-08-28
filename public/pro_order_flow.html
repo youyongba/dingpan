@@ -561,7 +561,7 @@ async function loadHistoricalAndConnect() {
         
         hasNoMoreHistory = false; // 切换周期时重置
 
-        // 依然从币安直接拉取 K 线 (普通 HTTP 请求往往受限于墙较少，或受梯子保护较好)
+        // 并行拉取 Binance K 线和我们后端的真实 tick 聚合数据
         const [binanceRes, historyRes] = await Promise.all([
             fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=${currentSymbol.toUpperCase()}&interval=${currentBinanceTF}&limit=150`),
             fetch(`/api/auto-trade/orderflow/history?tf=${currentBinanceTF}`).catch(() => ({ json: () => ({ ok: false }) }))
@@ -774,12 +774,8 @@ function connectWebSocket() {
         .then(data => { STATE.mtfWallsData = data; })
         .catch(e => console.warn("Failed to fetch initial MTF walls:", e));
 
-    const streams = `${currentSymbol}@aggtrade/${currentSymbol}@depth20@100ms`;
-    // 通过后端代理转发，解决部分网络环境下前端直连 fstream.binance.com 被墙的问题
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProtocol}//${window.location.host}/ws/binance/?streams=${streams}`;
-    
-    ws = new WebSocket(wsUrl);
+    const streams = `${currentSymbol}@aggTrade/${currentSymbol}@depth20@100ms`;
+    ws = new WebSocket(`wss://fstream.binance.com/stream?streams=${streams}`);
     
     ws.onopen = () => {
         document.getElementById('conn-status').textContent = '已连接真实数据';
