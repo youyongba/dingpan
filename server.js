@@ -8,6 +8,9 @@ const path = require('path');
 const { httpAgent, httpsAgent } = require('./lib/httpAgents');
 const regimeMod = require('./regimeModule');
 
+require('https-proxy-agent');
+require('socks-proxy-agent');
+
 // ================= 环境变量与常量 =================
 const PORT = parseInt(process.env.PORT, 10) || 3001;
 
@@ -708,7 +711,7 @@ fetchBinanceData();
 
 setInterval(heartbeat, HEARTBEAT_INTERVAL_MS);
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
     console.log(`盯盘服务已启动: http://localhost:${PORT}`);
     console.log(
         `规则: ${POLL_INTERVAL_MS / 1000}s 轮询 | 近1H均值拥挤阈值 ${(RATE1H_MIN_ABS * 100).toFixed(4)}% | 方向变化防抖 ${DIRECTION_CHANGE_CONFIRM} 次 | 心跳 ${HEARTBEAT_INTERVAL_MS / 60000} 分钟`
@@ -719,6 +722,68 @@ app.listen(PORT, () => {
         [{ text: '📊 监控内容：', bold: true }, { text: '资金费率穿轴 · 宏观 Regime · 交易计划' }],
         [{ text: '🧭 模式：', bold: true }, { text: '纯盯盘（不自动下单）' }],
     ]);
+});
+
+// ================= WebSocket 代理 (供前端直连币安流使用) =================
+const WebSocket = require('ws');
+const wss = new WebSocket.Server({ noServer: true });
+
+function buildProxyAgent() {
+  const proxy = process.env.HTTPS_PROXY || process.env.https_proxy
+    || process.env.ALL_PROXY    || process.env.all_proxy
+    || process.env.HTTP_PROXY   || process.env.http_proxy;
+  if (!proxy) return null;
+  try {
+    if (/^socks/i.test(proxy)) {
+      const { SocksProxyAgent } = require('socks-proxy-agent');
+      return new SocksProxyAgent(proxy);
+    }
+    const { HttpsProxyAgent } = require('https-proxy-agent');
+    return new HttpsProxyAgent(proxy);
+  } catch (e) {
+    return null;
+  }
+}
+
+server.on('upgrade', (request, socket, head) => {
+    if (request.url.startsWith('/ws/binance/')) {
+        wss.handleUpgrade(request, socket, head, (ws) => {
+            wss.emit('connection', ws, request);
+        });
+    }
+});
+
+wss.on('connection', (ws, request) => {
+    // 动态提取前端请求的完整路径，支持 /stream?streams=... 和 /market/ws/... 等所有币安端点
+    const targetPath = request.url.replace(/^\/ws\/binance/, '');
+    const targetUrl = `wss://fstream.binance.com${targetPath}`;
+    console.log(`[WS Proxy] 代理前端直连: ${targetUrl}`);
+    
+    const agent = buildProxyAgent();
+    const targetWs = new WebSocket(targetUrl, { agent: agent });
+    
+    targetWs.on('message', (msg) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(msg.toString());
+    });
+    
+    ws.on('message', (msg) => {
+        if (targetWs.readyState === WebSocket.OPEN) targetWs.send(msg.toString());
+    });
+    
+    targetWs.on('close', () => {
+        if (ws.readyState === WebSocket.OPEN) ws.close();
+    });
+    ws.on('close', () => {
+        if (targetWs.readyState === WebSocket.OPEN) targetWs.close();
+    });
+    targetWs.on('error', (err) => {
+        console.warn(`[WS Proxy] targetWs error:`, err.message);
+        if (ws.readyState === WebSocket.OPEN) ws.close();
+    });
+    ws.on('error', (err) => {
+        console.warn(`[WS Proxy] ws error:`, err.message);
+        if (targetWs.readyState === WebSocket.OPEN) targetWs.close();
+    });
 });
 
 // ================= Event-loop lag 探针 =================

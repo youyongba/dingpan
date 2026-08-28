@@ -1,7 +1,7 @@
 {
-  "lastTradeAction": "SHORT",
+  "lastTradeAction": "NEUTRAL",
   "startupSent": true,
-  "lastSubRegime": "WEAK_BEAR",
+  "lastSubRegime": "RANGE_NEUTRAL",
   "lastRsiZone": "NEUTRAL",
   "lastMacdSide": "BEAR",
   "lastRsi15Zone": "NEUTRAL",
@@ -10,5 +10,5 @@
   "lastCombo15m": "NONE",
   "lastCombo1hMtf1": "NONE",
   "lastCombo15mMtf1": "NONE",
-  "savedAt": "2026-08-28T11:28:40.763Z"
+  "savedAt": "2026-08-28T12:02:05.197Z"
 }

@@ -534,6 +534,7 @@ class FPBar {
 // ================= 真实数据引擎 (Binance API) =================
 
 let ws = null;
+let wsDepth = null;
 let currentSymbol = 'btcusdt';
 let currentBinanceTF = '1m';
 
@@ -549,6 +550,10 @@ async function loadHistoricalAndConnect() {
     if (ws) {
         ws.close();
         ws = null;
+    }
+    if (wsDepth) {
+        wsDepth.close();
+        wsDepth = null;
     }
 
     try {
@@ -774,13 +779,12 @@ function connectWebSocket() {
         .then(data => { STATE.mtfWallsData = data; })
         .catch(e => console.warn("Failed to fetch initial MTF walls:", e));
 
-    const streams = `${currentSymbol}@aggTrade/${currentSymbol}@depth20@100ms`;
-    
-    // 使用后端代理。这会完美解决本地测试时浏览器的代理问题（后端自动读取终端环境变量），
-    // 并且部署到韩国云主机后，由于没有环境变量，代理会自动退化为直连，代码完全无需修改。
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProtocol}//${window.location.host}/ws/binance/?streams=${streams}`;
-    ws = new WebSocket(wsUrl);
+    // 拆分成两个独立的流，解决多路复用时丢数据的问题
+    const baseUrl = `${wsProtocol}//${window.location.host}/ws/binance/market/ws`;
+
+    // 1. 专门连价格 (aggTrade)
+    ws = new WebSocket(`${baseUrl}/${currentSymbol}@aggTrade`);
     
     ws.onopen = () => {
         document.getElementById('conn-status').textContent = '已连接真实数据';
@@ -789,26 +793,16 @@ function connectWebSocket() {
     
     ws.onmessage = (event) => {
         if (!STATE.isRunning) return;
-        
         try {
-            const msg = JSON.parse(event.data);
+            const data = JSON.parse(event.data);
+            if (!data) return;
             
-            const stream = msg.stream;
-            const data = msg.data || msg; // 兼容可能没包裹 data 的情况
-            
-            if (!stream || !data) return;
-            
-            const lowerStream = stream.toLowerCase();
-            const eventType = data.e;
-            
-            // 兼容流名称大小写和 eventType 判断
-            if (eventType === 'aggTrade' || lowerStream.endsWith('@aggtrade')) {
+            // 独立连接没有 stream 外层包装，直接解析
+            if (data.e === 'aggTrade' || data.m !== undefined) {
                 handleAggTrade(data);
-            } else if (eventType === 'depthUpdate' || lowerStream.includes('depth')) {
-                handleDepth(data);
             }
         } catch (e) {
-            console.warn("WebSocket message error:", e);
+            console.warn("WebSocket aggTrade error:", e);
         }
     };
     
@@ -817,6 +811,25 @@ function connectWebSocket() {
             document.getElementById('conn-status').textContent = '连接断开，重连中...';
             document.getElementById('conn-dot').style.backgroundColor = '#ef5350';
             setTimeout(connectWebSocket, 3000);
+        }
+    };
+
+    // 2. 专门连深度 (depth20)
+    // 根据刚才的测试，币安的 /stream?streams= 多路复用端点能稳定下发深度数据，而 /market/ws 端点对深度的支持似乎有坑
+    wsDepth = new WebSocket(`${wsProtocol}//${window.location.host}/ws/binance/stream?streams=${currentSymbol}@depth20@100ms`);
+    
+    wsDepth.onmessage = (event) => {
+        if (!STATE.isRunning) return;
+        try {
+            const data = JSON.parse(event.data);
+            if (!data) return;
+            
+            const depthData = data.data || data; 
+            if (depthData.bids || depthData.asks || depthData.b || depthData.a) {
+                handleDepth(depthData);
+            }
+        } catch (e) {
+            console.warn("WebSocket depth error:", e);
         }
     };
 }
@@ -868,11 +881,13 @@ function updateGlobalProfile(price, qty, isSell) {
 function handleDepth(data) {
     if (!STATE.isRunning || !data) return;
     
-    // 币安现货的深度流字段是 asks/bids，而合约 (fapi) 的深度流字段是 a/b
+    // 币安 @depth20 返回的是 asks/bids，如果是 @depth 更新流返回的是 a/b
     const asksData = data.asks || data.a;
     const bidsData = data.bids || data.b;
     
-    if (!asksData || !bidsData) return;
+    if (!asksData || !bidsData || asksData.length === 0 || bidsData.length === 0) {
+        return;
+    }
     
     let html = '';
     const cp = STATE.currentPrice;
