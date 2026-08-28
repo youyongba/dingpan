@@ -38,14 +38,22 @@ function trySendDeltaAlert({ tf, direction, delta, startTime, symbol, source }) 
         ? `🟢 [Order Flow] ${tf || '1m'} Delta ≥ +${DELTA_ALERT_MIN}`
         : `🔴 [Order Flow] ${tf || '1m'} Delta ≤ -${DELTA_ALERT_MIN}`;
     console.log(`[orderFlow] 📣 飞书 ${title} Δ=${dStr} bar=${timeStr} source=${source || 'store'} (Force Push)`);
+    
+    // 强制使用东八区时间
+    const alertTimeStr = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
     feishuWebhook.sendRich(title, [
         [{ text: '交易对：' }, { text: String(symbol || 'BTCUSDT') }],
         [{ text: 'K线开盘：' }, { text: timeStr }],
         [{ text: '净 Delta：' }, { text: dStr }],
         [{ text: '方向：' }, { text: isLong ? '买盘占优' : '卖盘占优' }],
         [{ text: `来源：${source || 'orderFlowStore'} · 单根 1m 达到 ±${DELTA_ALERT_MIN} 即推`, italic: true }],
-        [{ text: `⏰ ${new Date().toLocaleString()}`, italic: true }],
-    ], { force: true }); // 使用 force: true 绕过 30s 限制，不要传递 eventKey 给 webhook 引擎，避免 webhook 层面的去重误伤
+        [{ text: `⏰ ${alertTimeStr}`, italic: true }],
+    ], { force: true }).then(res => {
+        if (!res.ok) console.error(`[orderFlow] 飞书推送被拦截或失败:`, res);
+    }).catch(err => {
+        console.error(`[orderFlow] 飞书推送异常:`, err.message);
+    });
+    
     return { ok: true, eventKey };
 }
 
