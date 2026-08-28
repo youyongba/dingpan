@@ -880,18 +880,23 @@ function postOrderFlowDeltaAlert(direction, delta, startTime) {
 // ================= DOM 与 Tape UI 更新 =================
 
 function handleDepth(data) {
-    if (!STATE.isRunning || !data || !data.asks || !data.bids) return;
+    if (!STATE.isRunning || !data) return;
+    
+    // 币安现货的深度流字段是 asks/bids，而合约 (fapi) 的深度流字段是 a/b
+    const asksData = data.asks || data.a;
+    const bidsData = data.bids || data.b;
+    
+    if (!asksData || !bidsData) return;
     
     let html = '';
     const cp = STATE.currentPrice;
     
-    // 币安的部分深度流推送字段为 asks 和 bids，而不是 a 和 b
     // Asks (Sells)
-    const asks = data.asks.slice(0, CONFIG.domLevels).reverse();
+    const asks = asksData.slice(0, CONFIG.domLevels).reverse();
     
     let maxVol = 0;
-    data.asks.slice(0, CONFIG.domLevels).forEach(a => maxVol = Math.max(maxVol, parseFloat(a[1])));
-    data.bids.slice(0, CONFIG.domLevels).forEach(b => maxVol = Math.max(maxVol, parseFloat(b[1])));
+    asksData.slice(0, CONFIG.domLevels).forEach(a => maxVol = Math.max(maxVol, parseFloat(a[1])));
+    bidsData.slice(0, CONFIG.domLevels).forEach(b => maxVol = Math.max(maxVol, parseFloat(b[1])));
     if (maxVol === 0) maxVol = 1;
 
     html += '<div class="dom-half dom-sell-half">';
@@ -909,7 +914,7 @@ function handleDepth(data) {
     
     html += `</div><div class="dom-spread">${cp.toFixed(1)}</div><div class="dom-half dom-buy-half">`;
     
-    const bids = data.bids.slice(0, CONFIG.domLevels);
+    const bids = bidsData.slice(0, CONFIG.domLevels);
     bids.forEach(bid => {
         const p = parseFloat(bid[0]);
         const vol = parseFloat(bid[1]);
