@@ -21,7 +21,12 @@ function trySendDeltaAlert({ tf, direction, delta, startTime, symbol, source }) 
     const isLong = direction === 'long';
     const barTs = Number(startTime) || 0;
     const eventKey = `orderflow_delta_${tf || '1m'}_${isLong ? 'L' : 'S'}_${barTs}`;
-    if (_deltaAlertSent.has(eventKey)) return { ok: false, skipped: 'already_sent' };
+    
+    // 如果已经发送过这个时间点的报警，不再发送
+    if (_deltaAlertSent.has(eventKey) && source === 'store-live') {
+        return { ok: false, skipped: 'already_sent' };
+    }
+    
     _deltaAlertSent.add(eventKey);
     if (_deltaAlertSent.size > 400) {
         const first = _deltaAlertSent.values().next().value;
@@ -32,7 +37,7 @@ function trySendDeltaAlert({ tf, direction, delta, startTime, symbol, source }) 
     const title = isLong
         ? `🟢 [Order Flow] ${tf || '1m'} Delta ≥ +${DELTA_ALERT_MIN}`
         : `🔴 [Order Flow] ${tf || '1m'} Delta ≤ -${DELTA_ALERT_MIN}`;
-    console.log(`[orderFlow] 📣 飞书 ${title} Δ=${dStr} bar=${timeStr} source=${source || 'store'}`);
+    console.log(`[orderFlow] 📣 飞书 ${title} Δ=${dStr} bar=${timeStr} source=${source || 'store'} (Force Push)`);
     feishuWebhook.sendRich(title, [
         [{ text: '交易对：' }, { text: String(symbol || 'BTCUSDT') }],
         [{ text: 'K线开盘：' }, { text: timeStr }],
@@ -40,7 +45,7 @@ function trySendDeltaAlert({ tf, direction, delta, startTime, symbol, source }) 
         [{ text: '方向：' }, { text: isLong ? '买盘占优' : '卖盘占优' }],
         [{ text: `来源：${source || 'orderFlowStore'} · 单根 1m 达到 ±${DELTA_ALERT_MIN} 即推`, italic: true }],
         [{ text: `⏰ ${new Date().toLocaleString()}`, italic: true }],
-    ], { eventKey, force: true });
+    ], { force: true }); // 使用 force: true 绕过 30s 限制，不要传递 eventKey 给 webhook 引擎，避免 webhook 层面的去重误伤
     return { ok: true, eventKey };
 }
 
@@ -48,14 +53,16 @@ function maybeAlertBar(bar, tfKey, source) {
     if (!bar || tfKey !== '1m') return;
     const d = bar.totalDelta;
     if (!Number.isFinite(d)) return;
-    if (d >= DELTA_ALERT_MIN) {
+    if (d >= DELTA_ALERT_MIN && !bar.alertedLong) {
         bar.alertedLong = true;
+        console.log(`[OrderFlow] Delta Alert Triggered (Long): delta=${d}, time=${new Date(bar.startTime).toLocaleTimeString()}`);
         trySendDeltaAlert({
             tf: '1m', direction: 'long', delta: d,
             startTime: bar.startTime, source,
         });
-    } else if (d <= -DELTA_ALERT_MIN) {
+    } else if (d <= -DELTA_ALERT_MIN && !bar.alertedShort) {
         bar.alertedShort = true;
+        console.log(`[OrderFlow] Delta Alert Triggered (Short): delta=${d}, time=${new Date(bar.startTime).toLocaleTimeString()}`);
         trySendDeltaAlert({
             tf: '1m', direction: 'short', delta: d,
             startTime: bar.startTime, source,
@@ -122,8 +129,11 @@ class OrderFlowStore extends EventEmitter {
         if (!map.has(startTime)) {
             // 新 K 线开始: 再对「刚走完的上一分钟」补一次收盘检查 (防止最后一笔刚越过阈值)
             if (tfKey === '1m' && map.size > 0) {
-                const prev = map.get(startTime - tfMs) || map.get(Math.max(...Array.from(map.keys())));
-                maybeAlertBar(prev, tfKey, 'store-close');
+                const prevKey = Math.max(...Array.from(map.keys()));
+                const prev = map.get(prevKey);
+                if (prev) {
+                    maybeAlertBar(prev, tfKey, 'store-close');
+                }
             }
 
             // 清理旧数据，防止内存泄漏 (Ring Buffer 机制)
@@ -151,8 +161,13 @@ class OrderFlowStore extends EventEmitter {
             bar.cells[level].buyVol += qty;
             bar.totalDelta += qty;
         }
-        // 移除盘中触发，严格执行收盘结算触发 (根据 memory 约束)
-        // 确保最终推送的是整根 K 线的准确净 Delta 值
+
+        // --- 核心修复：移除布尔值拦截，每次更新时都检查一次报警 ---
+        // 这样不仅能在收盘时由 store-close 补发，也能在盘中到达阈值时立刻发出，
+        // 配合前面的 eventKey 去重机制，保证一根 K 线同方向只报一次，且能拿到最及时的信号。
+        if (tfKey === '1m') {
+            maybeAlertBar(bar, tfKey, 'store-live');
+        }
     }
 
     getHistory(tfKey) {

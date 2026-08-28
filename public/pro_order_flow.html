@@ -820,7 +820,6 @@ function handleAggTrade(data) {
     
     // Check if new bar is needed based on timeframe
     if (time >= currBar.startTime + CONFIG.timeframe) {
-        checkOrderFlowDeltaAlert(currBar); // 收盘再确认一次
         const newStartTime = Math.floor(time / CONFIG.timeframe) * CONFIG.timeframe;
         currBar = new FPBar(newStartTime);
         currBar.open = price;
@@ -829,7 +828,6 @@ function handleAggTrade(data) {
     }
 
     currBar.addTick(price, qty, isBuyerMaker);
-    checkOrderFlowDeltaAlert(currBar);
     updateGlobalProfile(price, qty, isBuyerMaker);
 
     if (qty >= CONFIG.largeOrderThr) {
@@ -847,34 +845,6 @@ function updateGlobalProfile(price, qty, isSell) {
     if (isSell) pData.sell += qty;
     else pData.buy += qty;
     pData.total += qty;
-}
-
-const ORDERFLOW_DELTA_ALERT_MIN = 50;
-function checkOrderFlowDeltaAlert(bar) {
-    // 只推 1 分钟单根 Delta, 与页面「你看见的」一致
-    if (!bar || CONFIG.timeframe !== 60 * 1000) return;
-    const d = bar.totalDelta;
-    if (!Number.isFinite(d)) return;
-    if (d >= ORDERFLOW_DELTA_ALERT_MIN && !bar._alertedLong) {
-        bar._alertedLong = true;
-        postOrderFlowDeltaAlert('long', d, bar.startTime);
-    } else if (d <= -ORDERFLOW_DELTA_ALERT_MIN && !bar._alertedShort) {
-        bar._alertedShort = true;
-        postOrderFlowDeltaAlert('short', d, bar.startTime);
-    }
-}
-function postOrderFlowDeltaAlert(direction, delta, startTime) {
-    fetch('/api/auto-trade/notify-delta', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            tf: '1m',
-            direction,
-            delta,
-            startTime,
-            symbol: (currentSymbol || 'btcusdt').toUpperCase(),
-        }),
-    }).catch((e) => console.warn('Failed to send delta alert:', e));
 }
 
 // ================= DOM 与 Tape UI 更新 =================
