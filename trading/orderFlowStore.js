@@ -162,12 +162,9 @@ class OrderFlowStore extends EventEmitter {
             bar.totalDelta += qty;
         }
 
-        // --- 核心修复：移除布尔值拦截，每次更新时都检查一次报警 ---
-        // 这样不仅能在收盘时由 store-close 补发，也能在盘中到达阈值时立刻发出，
-        // 配合前面的 eventKey 去重机制，保证一根 K 线同方向只报一次，且能拿到最及时的信号。
-        if (tfKey === '1m') {
-            maybeAlertBar(bar, tfKey, 'store-live');
-        }
+        // 严格执行“收盘结算触发”纪律：
+        // 不在这里（盘中）调用 maybeAlertBar，过滤掉盘中的假突破噪音。
+        // 只有当 K 线走完，在上方的新 K 线生成逻辑中，才会通过 'store-close' 结算上一根 K 线的最终真实 Delta。
     }
 
     getHistory(tfKey) {

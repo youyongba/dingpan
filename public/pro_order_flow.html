@@ -785,14 +785,22 @@ function connectWebSocket() {
     ws.onmessage = (event) => {
         if (!STATE.isRunning) return;
         
-        const msg = JSON.parse(event.data);
-        const stream = msg.stream;
-        const data = msg.data;
-        
-        if (stream.endsWith('@aggTrade')) {
-            handleAggTrade(data);
-        } else if (stream.endsWith('@depth20@100ms')) {
-            handleDepth(data);
+        try {
+            const msg = JSON.parse(event.data);
+            const stream = msg.stream;
+            const data = msg.data;
+            
+            if (!stream || !data) return;
+            
+            const lowerStream = stream.toLowerCase();
+            
+            if (lowerStream.endsWith('@aggtrade')) {
+                handleAggTrade(data);
+            } else if (lowerStream.endsWith('@depth20@100ms') || lowerStream.includes('depth')) {
+                handleDepth(data);
+            }
+        } catch (e) {
+            console.warn("WebSocket message error:", e);
         }
     };
     
