@@ -1053,6 +1053,30 @@ router.post('/notify-profile', express.json(), (req, res) => {
   res.json({ ok: true });
 });
 
+// ============ POST /notify-delta ============
+// 前端 pro_order_flow 在 1m 图上看到单根 Delta 越过 ±50 时推飞书
+// (页面用现货 aggTrade, 后台 store 用合约, 两边 Delta 可能不一致; 此接口保证「你看见的」能推到)
+router.post('/notify-delta', express.json(), (req, res) => {
+  const { tf, delta, direction, startTime, symbol } = req.body || {};
+  const dir = direction === 'short' ? 'short' : direction === 'long' ? 'long' : null;
+  const d = Number(delta);
+  if (!dir || !Number.isFinite(d)) {
+    return res.status(400).json({ ok: false, error: 'direction must be long|short, delta must be a number' });
+  }
+  const min = orderFlowStore.DELTA_ALERT_MIN || 50;
+  if (dir === 'long' && d < min) return res.json({ ok: false, skipped: 'below_threshold' });
+  if (dir === 'short' && d > -min) return res.json({ ok: false, skipped: 'below_threshold' });
+  const r = orderFlowStore.trySendDeltaAlert({
+    tf: tf || '1m',
+    direction: dir,
+    delta: d,
+    startTime: Number(startTime) || Date.now(),
+    symbol: symbol || 'BTCUSDT',
+    source: 'pro_order_flow',
+  });
+  res.json({ ok: r.ok !== false, ...r });
+});
+
 // ============ GET /status ============
 router.get('/status', (req, res) => {
   const cfg = config.get();
