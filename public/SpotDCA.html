@@ -722,8 +722,10 @@
             const maxVol = Math.max(maxBuyVol, maxSellVol, 1);
             
             const formatVol = (vol) => {
-                if (vol > 1000) return (vol / 1000).toFixed(1) + 'K BTC';
-                return vol.toFixed(2) + ' BTC';
+                const volUsdt = vol * currentPrice;
+                if (volUsdt >= 1000000) return (volUsdt / 1000000).toFixed(2) + 'M $';
+                if (volUsdt >= 1000) return (volUsdt / 1000).toFixed(1) + 'K $';
+                return volUsdt.toFixed(0) + ' $';
             };
             
             document.getElementById('ui-buy-vpoc-val').textContent = formatVol(maxBuyVol);
