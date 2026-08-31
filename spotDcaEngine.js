@@ -1,7 +1,24 @@
 const express = require('express');
 const crypto = require('crypto');
 const axios = require('axios');
-require('dotenv').config(); // 确保在文件顶部显式加载 .env
+const path = require('path');
+
+// 强制使用绝对路径加载 .env，防止 PM2 工作目录 (cwd) 偏移导致找不到文件
+const envPath = path.resolve(__dirname, '.env');
+const envResult = require('dotenv').config({ path: envPath });
+
+console.log('\n================ [SpotDCA Env Debug] ================');
+console.log('1. Current Working Dir (cwd):', process.cwd());
+console.log('2. Target .env path:', envPath);
+if (envResult.error) {
+    console.log('3. Dotenv Load Error:', envResult.error.message);
+} else {
+    console.log('3. Dotenv Load Success. Keys found in file:', Object.keys(envResult.parsed || {}).filter(k => k.includes('BINANCE')));
+}
+console.log('4. Raw SPOT_API_KEY length:', (process.env.BINANCE_SPOT_API_KEY || '').length);
+console.log('5. Raw SPOT_API_SECRET length:', (process.env.BINANCE_SPOT_API_SECRET || '').length);
+console.log('=====================================================\n');
+
 const router = express.Router();
 
 let config = {
@@ -34,9 +51,9 @@ let state = {
   spotBalanceBtc: 0   // 现货 BTC 余额
 };
 
-// 币安现货 API 密钥 (需在环境变量中配置)
-const SPOT_API_KEY = process.env.BINANCE_SPOT_API_KEY || '';
-const SPOT_API_SECRET = process.env.BINANCE_SPOT_API_SECRET || '';
+// 币安现货 API 密钥 (需在环境变量中配置)，加入 trim() 防止不可见换行符或空格干扰
+const SPOT_API_KEY = (process.env.BINANCE_SPOT_API_KEY || '').trim();
+const SPOT_API_SECRET = (process.env.BINANCE_SPOT_API_SECRET || '').trim();
 
 // 引入全局的代理配置 (复用主程序的代理)
 const { httpAgent, httpsAgent } = require('./lib/httpAgents');
