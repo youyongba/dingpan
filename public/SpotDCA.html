@@ -987,11 +987,16 @@
                 document.getElementById('ui-pattern-box').className = 'flex items-center gap-2 text-green';
                 document.getElementById('ui-pattern-desc').textContent = '多头主动吃单，突破上层阻力';
                 document.getElementById('ui-delta-msg').textContent = '发现顶部 Delta 激增';
-            } else {
+            } else if (deltaHistory.length > 0 || currentMinuteDelta !== 0) {
                 document.getElementById('ui-pattern-box').innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>正在监控订单流微观结构...</span>';
                 document.getElementById('ui-pattern-box').className = 'flex items-center gap-2 text-gray-500';
                 document.getElementById('ui-pattern-desc').textContent = '等待冰山吸收或强买盘信号';
                 document.getElementById('ui-delta-msg').textContent = 'Delta 处于正常波动范围';
+            } else {
+                document.getElementById('ui-pattern-box').innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>等待 Delta 数据流接入...</span>';
+                document.getElementById('ui-pattern-box').className = 'flex items-center gap-2 text-gray-500';
+                document.getElementById('ui-pattern-desc').textContent = '连接建立中，等待首次成交发生';
+                document.getElementById('ui-delta-msg').textContent = '等待数据';
             }
         }
         setInterval(fetchStatus, 2000);
