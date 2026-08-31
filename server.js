@@ -519,6 +519,21 @@ app.get('/api/status', (req, res) => {
     res.json(state);
 });
 
+app.get('/api/proxy/depth', async (req, res) => {
+    const symbol = req.query.symbol || 'BTCUSDT';
+    const limit = req.query.limit || 1000;
+    try {
+        const response = await axios.get(`https://fapi.binance.com/fapi/v1/depth?symbol=${symbol}&limit=${limit}`, {
+            timeout: 5000,
+            httpAgent, httpsAgent
+        });
+        res.json(response.data);
+    } catch (e) {
+        console.error('[Depth Proxy] Error fetching depth:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // ================= MTF Walls Backend Storage =================
 const MTF_WALLS_FILE = path.join(__dirname, 'data', 'mtf_walls.json');
 
