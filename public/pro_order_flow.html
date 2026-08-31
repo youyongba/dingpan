@@ -1329,65 +1329,6 @@ function drawFootprints(ctx, w, h) {
         });
     }
 
-    // ==========================================
-    // 绘制真实的挂单墙 (从深度数据提取的 Real Buy/Sell Walls)
-    // ==========================================
-    if (STATE.realBuyWall && STATE.realBuyWall.price > 0) {
-        const by = priceToY(STATE.realBuyWall.price) + rh/2;
-        if (by > -h * 2 && by < h * 3) {
-            ctx.strokeStyle = '#00e676'; // 更亮更纯的绿色 (实线)
-            ctx.lineWidth = 2;
-            ctx.beginPath(); ctx.moveTo(0, by); ctx.lineTo(w - 75, by); ctx.stroke();
-        }
-        let labelY = Math.max(12, Math.min(h - 12, by));
-        
-        ctx.fillStyle = '#00e676';
-        ctx.fillRect(w - 430, labelY - 12, 140, 24); 
-        ctx.fillStyle = '#000000';
-        ctx.font = 'bold 11px Consolas';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(`挂买墙 ${STATE.realBuyWall.price.toFixed(1)}`, w - 360, labelY);
-        
-        STATE.wallLabels.push({
-            x: w - 430, y: labelY - 12, width: 140, height: 24,
-            targetPrice: STATE.realBuyWall.price
-        });
-    }
-    
-    if (STATE.realSellWall && STATE.realSellWall.price > 0) {
-        const sy = priceToY(STATE.realSellWall.price) + rh/2;
-        if (sy > -h * 2 && sy < h * 3) {
-            ctx.strokeStyle = '#ff1744'; // 更亮更纯的红色 (实线)
-            ctx.lineWidth = 2;
-            ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(w - 75, sy); ctx.stroke();
-        }
-        let labelY = Math.max(12, Math.min(h - 12, sy));
-        
-        // 防重叠处理 (如果买卖挂单墙离得太近)
-        if (STATE.realBuyWall && STATE.realBuyWall.price > 0) {
-            const by = priceToY(STATE.realBuyWall.price) + rh/2;
-            if (Math.abs(by - sy) < 26) {
-                if (by < 0 && sy < 0) labelY += 26; 
-                else if (by > h && sy > h) labelY -= 26;
-                else labelY -= 26; // 默认卖单墙向上挪
-            }
-        }
-
-        ctx.fillStyle = '#ff1744';
-        ctx.fillRect(w - 430, labelY - 12, 140, 24); 
-        ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 11px Consolas';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(`挂卖墙 ${STATE.realSellWall.price.toFixed(1)}`, w - 360, labelY);
-        
-        STATE.wallLabels.push({
-            x: w - 430, y: labelY - 12, width: 140, height: 24,
-            targetPrice: STATE.realSellWall.price
-        });
-    }
-
     // 存储当前周期的最强vPOC到后端 (原称单墙)
     const tfLabel = document.querySelector('.btn-group .btn.active[data-tf]').innerText;
     if (strongestBuyPrice > 0 || strongestSellPrice > 0) {
