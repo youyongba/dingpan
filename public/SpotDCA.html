@@ -206,12 +206,14 @@
             
             <div class="space-y-4">
                 <!-- Current Position -->
-                <div class="p-4 bg-gray-800 rounded border border-gray-700">
-                    <div class="text-sm text-gray-400 mb-2" id="ui-dca-batch-label">当前现货持仓价值 (暂无持仓)</div>
-                    <div class="text-2xl font-mono font-bold mb-1"><span id="ui-dca-amount">0.00</span> <span class="text-sm font-normal text-gray-400">USDT</span></div>
-                    <div class="flex justify-between text-xs">
-                        <span class="text-gray-500">均价: <span class="font-mono text-gray-300" id="ui-dca-avg-price">0.00</span> | 数量: <span class="font-mono text-gray-300" id="ui-dca-coin-amount">0.0000 BTC</span></span>
-                        <span class="text-gray-500" id="ui-dca-pnl">0.00%</span>
+                <div id="ui-positions-container" class="space-y-2">
+                    <div class="p-4 bg-gray-800 rounded border border-gray-700">
+                        <div class="text-sm text-gray-400 mb-2" id="ui-dca-batch-label">当前现货持仓价值 (暂无持仓)</div>
+                        <div class="text-2xl font-mono font-bold mb-1"><span id="ui-dca-amount">0.00</span> <span class="text-sm font-normal text-gray-400">USDT</span></div>
+                        <div class="flex justify-between text-xs">
+                            <span class="text-gray-500">均价: <span class="font-mono text-gray-300" id="ui-dca-avg-price">0.00</span> | 数量: <span class="font-mono text-gray-300" id="ui-dca-coin-amount">0.0000 BTC</span></span>
+                            <span class="text-gray-500" id="ui-dca-pnl">0.00%</span>
+                        </div>
                     </div>
                 </div>
 
@@ -889,23 +891,64 @@
             }
 
             // Render State
-            const totalUsdt = currentState.totalUsdtAmount || 0;
-            const totalCoin = currentState.totalCoinAmount || 0;
+            const modeText = currentConfig.tradeMode === 'futures' ? '合约' : '现货';
+            const posContainer = document.getElementById('ui-positions-container');
+            
+            if (currentConfig.tradeMode === 'futures' && currentState.futuresPositions && currentState.futuresPositions.length > 0) {
+                posContainer.innerHTML = currentState.futuresPositions.map(pos => {
+                    const isLong = pos.positionAmt > 0 || pos.positionSide === 'LONG';
+                    const sideText = isLong ? '多头' : '空头';
+                    const colorClass = isLong ? 'text-green' : 'text-red';
+                    const notionalUsdt = Math.abs(pos.positionAmt) * currentPrice;
+                    const pnlUsdt = pos.unRealizedProfit;
+                    const pnlPct = (pnlUsdt / (notionalUsdt / pos.leverage)) * 100 || 0;
+                    
+                    return `
+                    <div class="p-4 bg-gray-800 rounded border border-gray-700">
+                        <div class="text-sm text-gray-400 mb-2">当前${modeText}持仓 (${sideText}) - 杠杆 ${pos.leverage}x</div>
+                        <div class="text-2xl font-mono font-bold mb-1"><span class="${colorClass}">${notionalUsdt.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span> <span class="text-sm font-normal text-gray-400">USDT (名义)</span></div>
+                        <div class="flex justify-between text-xs">
+                            <span class="text-gray-500">均价: <span class="font-mono text-gray-300">${pos.entryPrice.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span> | 数量: <span class="font-mono text-gray-300">${pos.positionAmt} BTC</span></span>
+                            <span class="${pnlUsdt >= 0 ? 'text-green' : 'text-red'} font-bold">${pnlUsdt >= 0 ? '+' : ''}${pnlUsdt.toFixed(2)} USDT (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)</span>
+                        </div>
+                    </div>`;
+                }).join('');
+            } else if (currentConfig.tradeMode === 'spot' && currentState.spotBalanceBtc > 0) {
+                const btcBal = currentState.spotBalanceBtc;
+                const notionalUsdt = btcBal * currentPrice;
+                // For spot, we might not have a reliable entry price from Binance API easily in this scope, we fallback to internal state avgPrice if available, else 0
+                const avgPrice = currentState.averagePrice || 0;
+                let pnlHtml = '<span class="text-gray-500">0.00%</span>';
+                if (avgPrice > 0) {
+                    const pnlUsdt = (currentPrice - avgPrice) * btcBal;
+                    const pnlPct = ((currentPrice - avgPrice) / avgPrice) * 100;
+                    pnlHtml = `<span class="${pnlUsdt >= 0 ? 'text-green' : 'text-red'} font-bold">${pnlUsdt >= 0 ? '+' : ''}${pnlUsdt.toFixed(2)} USDT (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)</span>`;
+                }
+                
+                posContainer.innerHTML = `
+                <div class="p-4 bg-gray-800 rounded border border-gray-700">
+                    <div class="text-sm text-gray-400 mb-2">当前${modeText}持仓价值</div>
+                    <div class="text-2xl font-mono font-bold mb-1"><span class="text-green">${notionalUsdt.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span> <span class="text-sm font-normal text-gray-400">USDT</span></div>
+                    <div class="flex justify-between text-xs">
+                        <span class="text-gray-500">均价: <span class="font-mono text-gray-300">${avgPrice > 0 ? avgPrice.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '--'}</span> | 数量: <span class="font-mono text-gray-300">${btcBal.toFixed(4)} BTC</span></span>
+                        ${pnlHtml}
+                    </div>
+                </div>`;
+            } else {
+                posContainer.innerHTML = `
+                <div class="p-4 bg-gray-800 rounded border border-gray-700">
+                    <div class="text-sm text-gray-400 mb-2">当前${modeText}持仓价值 (暂无持仓)</div>
+                    <div class="text-2xl font-mono font-bold mb-1"><span class="text-gray-500">0.00</span> <span class="text-sm font-normal text-gray-400">USDT</span></div>
+                    <div class="flex justify-between text-xs">
+                        <span class="text-gray-500">均价: <span class="font-mono text-gray-300">0.00</span> | 数量: <span class="font-mono text-gray-300">0.0000 BTC</span></span>
+                        <span class="text-gray-500">0.00%</span>
+                    </div>
+                </div>`;
+            }
+            
             const avgPrice = currentState.averagePrice || 0;
             
-            document.getElementById('ui-dca-amount').textContent = totalUsdt.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-            document.getElementById('ui-dca-coin-amount').textContent = totalCoin.toFixed(4) + ' BTC';
-            document.getElementById('ui-dca-avg-price').textContent = avgPrice > 0 ? avgPrice.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '0.00';
-            
             if (avgPrice > 0 && currentPrice > 0) {
-                const pnlUsdt = ((currentPrice - avgPrice) * totalCoin).toFixed(2);
-                const pnlPct = ((currentPrice - avgPrice) / avgPrice * 100).toFixed(2);
-                const pnlEl = document.getElementById('ui-dca-pnl');
-                pnlEl.textContent = (pnlUsdt >= 0 ? '+' : '') + pnlUsdt + ' USDT (' + (pnlPct >= 0 ? '+' : '') + pnlPct + '%)';
-                pnlEl.className = pnlUsdt >= 0 ? 'text-green font-bold' : 'text-red font-bold';
-                document.getElementById('ui-dca-batch-label').textContent = `当前现货持仓价值 (DCA 批次 #${currentState.activeDcaCount})`;
-                
-                // TP Logic (Based on overall average price to ensure overall profitability)
                 const tp1Target = currentConfig.tp1Target || 1.0;
                 const tp2Target = currentConfig.tp2Target || 3.0;
                 const tp3Target = currentConfig.tp3Target || 5.0;
@@ -960,10 +1003,6 @@
                     document.getElementById('ui-sl-box').className = 'mt-4 p-3 bg-green-dim border border-green-500 rounded text-sm';
                 }
             } else {
-                document.getElementById('ui-dca-pnl').textContent = '0.00%';
-                document.getElementById('ui-dca-pnl').className = 'text-gray-500';
-                document.getElementById('ui-dca-batch-label').textContent = '当前现货持仓价值 (暂无持仓)';
-                
                 ['ui-tp1', 'ui-tp2', 'ui-tp3'].forEach(id => {
                     document.getElementById(`${id}-price`).textContent = '--';
                     document.getElementById(`${id}-price`).classList.remove('line-through');
