@@ -375,8 +375,8 @@
                                             <input type="checkbox" id="cfg-trigger-delta" checked class="w-4 h-4 bg-gray-900 border-gray-600 rounded text-blue-500 focus:ring-blue-500 focus:ring-2">
                                         </div>
                                         <div class="flex-1">
-                                            <label for="cfg-trigger-delta" class="text-sm font-bold text-white cursor-pointer block">1m Delta 异常激增</label>
-                                            <div class="text-xs text-gray-400 mt-1 mb-2">当 1 分钟内的净买入量超过设定阈值时触发。</div>
+                                            <label for="cfg-trigger-delta" class="text-sm font-bold text-white cursor-pointer block">1m Delta 异常激增 (买盘/卖盘)</label>
+                                            <div class="text-xs text-gray-400 mt-1 mb-2">做多时监控买盘激增，做空时监控卖盘激增 (阈值绝对值)。</div>
                                             <div class="flex items-center gap-2">
                                                 <span class="text-xs text-gray-500">阈值 (USDT):</span>
                                                 <input type="number" id="cfg-delta-threshold" value="2500000" class="w-32 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-sm text-white focus:outline-none focus:border-blue-500">
@@ -392,8 +392,8 @@
                                             <input type="checkbox" id="cfg-trigger-mtf" checked class="w-4 h-4 bg-gray-900 border-gray-600 rounded text-blue-500 focus:ring-blue-500 focus:ring-2">
                                         </div>
                                         <div class="flex-1">
-                                            <label for="cfg-trigger-mtf" class="text-sm font-bold text-white cursor-pointer block">MTF 1分钟强多信号</label>
-                                            <div class="text-xs text-gray-400 mt-1">依赖多时间框架 (Multiple Time Frame) 共振产生的底部反转确认信号。</div>
+                                            <label for="cfg-trigger-mtf" class="text-sm font-bold text-white cursor-pointer block">MTF 1分钟强劲信号 (强多/强空)</label>
+                                            <div class="text-xs text-gray-400 mt-1">依赖多时间框架 (Multiple Time Frame) 共振产生的反转确认信号 (做多看强多，做空看强空)。</div>
                                         </div>
                                     </div>
 
