@@ -121,8 +121,15 @@ async function fetchBalances() {
       state.futuresBalanceUsdt = parseFloat(futuresRes.data.availableBalance);
     }
     
-    if (futuresRes.data && Array.isArray(futuresRes.data.positions)) {
-        state.futuresPositions = futuresRes.data.positions.filter(p => parseFloat(p.positionAmt) !== 0).map(p => ({
+    // 获取合约持仓
+    const posUrl = `https://fapi.binance.com/fapi/v2/positionRisk?symbol=BTCUSDT&${queryString}&signature=${signature}`;
+    const posRes = await axios.get(posUrl, {
+      headers: { 'X-MBX-APIKEY': SPOT_API_KEY },
+      httpAgent, httpsAgent
+    });
+    
+    if (posRes.data && Array.isArray(posRes.data)) {
+        state.futuresPositions = posRes.data.filter(p => parseFloat(p.positionAmt) !== 0).map(p => ({
             positionAmt: parseFloat(p.positionAmt),
             entryPrice: parseFloat(p.entryPrice),
             unRealizedProfit: parseFloat(p.unRealizedProfit),
@@ -132,14 +139,14 @@ async function fetchBalances() {
         
         // 自动纠正内存中的 DCA 状态，防止由于网络或解析导致与真实持仓脱节
         if (config.tradeMode === 'futures') {
-            const targetSide = state.positionSide === 'short' ? 'SHORT' : 'LONG';
-            const activePos = state.futuresPositions.find(p => p.positionSide === targetSide);
+            const activePos = state.futuresPositions.find(p => p.positionSide === (state.positionSide === 'short' ? 'SHORT' : 'LONG'));
             if (activePos) {
                 const actualAmt = Math.abs(activePos.positionAmt);
-                if (Math.abs(state.totalCoinAmount - actualAmt) > 0.001) {
+                if (Math.abs(state.totalCoinAmount - actualAmt) > 0.001 || state.totalCoinAmount === 0) {
                     state.totalCoinAmount = actualAmt;
                     state.averagePrice = activePos.entryPrice;
                     state.totalUsdtAmount = actualAmt * activePos.entryPrice;
+                    if (state.activeDcaCount === 0) state.activeDcaCount = 1;
                 }
             } else if (state.totalCoinAmount > 0) {
                 state.totalCoinAmount = 0;
