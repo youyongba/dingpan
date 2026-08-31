@@ -113,6 +113,81 @@ async function fetchSpotBalance() {
 fetchSpotBalance();
 setInterval(fetchSpotBalance, 60000);
 
+// 全局缓存宏观固化 vPOC 数据
+let macroVpocData = { vpoc: null, vah: null, val: null, updatedAt: 0 };
+
+async function fetchMacroVpoc() {
+    try {
+        // 拉取最近 24 小时的 15m K线 (96 根)
+        const res = await axios.get('https://api.binance.com/api/v3/klines', {
+            params: { symbol: 'BTCUSDT', interval: '15m', limit: 96 },
+            httpAgent, httpsAgent
+        });
+        
+        const klines = res.data;
+        const tickSize = 10;
+        const profile = new Map();
+        let totalSessionVolume = 0;
+        
+        // 基于 K 线的粗略 Volume Profile 分布 (将单根 K 线的成交量均匀平摊到 H-L 区间)
+        klines.forEach(k => {
+            const high = parseFloat(k[2]);
+            const low = parseFloat(k[3]);
+            const vol = parseFloat(k[5]); // base asset volume
+            
+            const startTick = Math.floor(low / tickSize) * tickSize;
+            const endTick = Math.floor(high / tickSize) * tickSize;
+            const ticksCount = Math.max(1, (endTick - startTick) / tickSize + 1);
+            const volPerTick = vol / ticksCount;
+            
+            for (let t = startTick; t <= endTick; t += tickSize) {
+                profile.set(t, (profile.get(t) || 0) + volPerTick);
+                totalSessionVolume += volPerTick;
+            }
+        });
+        
+        let maxVol = 0;
+        let vpoc = 0;
+        let prices = [];
+        
+        profile.forEach((v, p) => {
+            prices.push({ price: p, vol: v });
+            if (v > maxVol) {
+                maxVol = v;
+                vpoc = p;
+            }
+        });
+        
+        // 计算 VAH 和 VAL (累积成交量达到总成交量 70% 的价值区间)
+        prices.sort((a, b) => b.vol - a.vol); // 按成交量降序
+        let accumulatedVol = 0;
+        const valueAreaPrices = [];
+        const targetVol = totalSessionVolume * 0.70;
+        
+        for (let item of prices) {
+            accumulatedVol += item.vol;
+            valueAreaPrices.push(item.price);
+            if (accumulatedVol >= targetVol) break;
+        }
+        
+        valueAreaPrices.sort((a, b) => a - b); // 再按价格升序排序找边界
+        const vah = valueAreaPrices.length > 0 ? valueAreaPrices[valueAreaPrices.length - 1] : vpoc;
+        const val = valueAreaPrices.length > 0 ? valueAreaPrices[0] : vpoc;
+        
+        macroVpocData = {
+            vpoc, vah, val,
+            updatedAt: Date.now()
+        };
+        console.log(`[SpotDCA] Macro vPOC updated: ${vpoc} (VAH: ${vah}, VAL: ${val})`);
+    } catch (e) {
+        console.error('[SpotDCA] Failed to fetch macro vPOC klines:', e.message);
+    }
+}
+
+// 启动时拉取，并每 15 分钟更新一次
+fetchMacroVpoc();
+setInterval(fetchMacroVpoc, 15 * 60 * 1000);
+
 router.get('/status', (req, res) => {
   // 获取真实的指标状态
   let realIndicators = { rsi15m: null, macd15m: null, mtf1m: null };
@@ -145,7 +220,8 @@ router.get('/status', (req, res) => {
     ok: true,
     config,
     state,
-    realIndicators
+    realIndicators,
+    macroVpoc: macroVpocData
   });
 });
 

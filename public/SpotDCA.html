@@ -537,6 +537,7 @@
         // --- API Integration ---
         let currentConfig = {};
         let currentState = {};
+        let currentMacroVpoc = null;
         let globalVolumeProfile = new Map();
         let currentPrice = 0; // Removed mock data 64230
 
@@ -588,6 +589,7 @@
                 if (data.ok) {
                     currentConfig = data.config;
                     currentState = data.state;
+                    currentMacroVpoc = data.macroVpoc || null;
                     
                     // 更新真实的指标 UI
                     if (data.realIndicators) {
@@ -732,8 +734,21 @@
             document.getElementById('ui-buy-vpoc-bar').style.width = (maxBuyVol / maxVol * 100) + '%';
             document.getElementById('ui-sell-vpoc-bar').style.width = (maxSellVol / maxVol * 100) + '%';
             
-            // Render Dynamic Ambush Zones based on recent volume profile
-            if (globalVolumeProfile.size > 5) {
+            // Render Dynamic Ambush Zones based on backend Macro vPOC first, fallback to micro profile
+            if (currentMacroVpoc && currentMacroVpoc.vpoc) {
+                const vah = currentMacroVpoc.vah;
+                const val = currentMacroVpoc.val;
+                
+                document.getElementById('ui-vpoc-val').textContent = currentMacroVpoc.vpoc.toFixed(2);
+                document.getElementById('ui-vah-val').textContent = vah ? vah.toFixed(2) : '--';
+                document.getElementById('ui-val-val').textContent = val ? val.toFixed(2) : '--';
+                
+                if (currentPrice > val && currentPrice < vah) {
+                    document.getElementById('ui-va-alert').classList.remove('hidden');
+                } else {
+                    document.getElementById('ui-va-alert').classList.add('hidden');
+                }
+            } else if (globalVolumeProfile.size > 0) {
                 // Find absolute max volume node as Naked vPOC
                 let absoluteMaxVol = 0;
                 let nakedVpoc = 0;
@@ -748,10 +763,10 @@
                 });
                 
                 prices.sort((a,b) => a - b);
-                const vah = prices[Math.floor(prices.length * 0.8)]; // roughly 80% percentile price
-                const val = prices[Math.floor(prices.length * 0.2)];
+                const vah = prices.length > 1 ? prices[Math.floor(prices.length * 0.8)] : prices[0]; // roughly 80% percentile price
+                const val = prices.length > 1 ? prices[Math.floor(prices.length * 0.2)] : prices[0];
                 
-                document.getElementById('ui-vpoc-val').textContent = nakedVpoc.toFixed(2);
+                document.getElementById('ui-vpoc-val').textContent = nakedVpoc ? nakedVpoc.toFixed(2) : '--';
                 document.getElementById('ui-vah-val').textContent = vah ? vah.toFixed(2) : '--';
                 document.getElementById('ui-val-val').textContent = val ? val.toFixed(2) : '--';
                 
