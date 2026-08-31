@@ -295,21 +295,24 @@ function startBotLoop(getEngineConfig, getEngineState) {
                 }
             };
 
-            // TP1
+            // 计算触发条件
             const hitTp1 = isLong ? (currentPrice >= tp1Price) : (currentPrice <= tp1Price);
+            const hitTp2 = isLong ? (currentPrice >= tp2Price) : (currentPrice <= tp2Price);
+            const hitTp3 = isLong ? (currentPrice >= tp3Price) : (currentPrice <= tp3Price);
+            const hitSl = isLong ? (currentPrice <= avgP) : (currentPrice >= avgP);
+
+            // TP1
             if (!state.tp1Fired && hitTp1 && !botSignalState.isExecuting) {
                 const closeQty = floorVol(state.totalCoinAmount * (config.tp1 / 100));
                 if (await executeClose(closeQty, 'TP1')) state.tp1Fired = true;
             }
             // TP2
-            const hitTp2 = isLong ? (currentPrice >= tp2Price) : (currentPrice <= tp2Price);
             else if (state.tp1Fired && !state.tp2Fired && hitTp2 && !botSignalState.isExecuting) {
                 const remainingRatio = config.tp2 / (config.tp2 + config.tp3);
                 const closeQty = floorVol(state.totalCoinAmount * remainingRatio);
                 if (await executeClose(closeQty, 'TP2')) state.tp2Fired = true;
             }
             // TP3
-            const hitTp3 = isLong ? (currentPrice >= tp3Price) : (currentPrice <= tp3Price);
             else if (state.tp2Fired && !state.tp3Fired && hitTp3 && !botSignalState.isExecuting) {
                 const closeQty = floorVol(state.totalCoinAmount); // 全抛
                 if (await executeClose(closeQty, 'TP3')) {
@@ -319,7 +322,6 @@ function startBotLoop(getEngineConfig, getEngineState) {
                 }
             }
             // 保本止损 SL (仅在 TP1 触发后激活)
-            const hitSl = isLong ? (currentPrice <= avgP) : (currentPrice >= avgP);
             else if (state.tp1Fired && config.breakevenSl && hitSl && !botSignalState.isExecuting) {
                 const closeQty = floorVol(state.totalCoinAmount);
                 if (await executeClose(closeQty, '保本止损')) {
