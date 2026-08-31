@@ -15,8 +15,10 @@ let lastMinuteStamp = 0;
 let deltaUsdt = 0;
 
 let botSignalState = {
-    rsiHitTime: 0,
-    macdHitTime: 0,
+    longRsiHitTime: 0,
+    longMacdHitTime: 0,
+    shortRsiHitTime: 0,
+    shortMacdHitTime: 0,
     lastDcaTime: 0,
     isExecuting: false
 };
@@ -107,7 +109,8 @@ function startBotLoop(getEngineConfig, getEngineState) {
         const config = getEngineConfig();
         const state = getEngineState();
         
-        if (!state.isBotRunning || !config.autoLoop) return;
+        if (!config.autoLoop) return;
+        if (!state.isLongBotRunning && !state.isShortBotRunning) return;
         if (botSignalState.isExecuting) return;
 
         const now = Date.now();
@@ -135,54 +138,72 @@ function startBotLoop(getEngineConfig, getEngineState) {
         }
 
         // --- B. 状态机时序流转 ---
-        const isLong = config.tradeDirection !== 'short';
+        
+        // 如果有持仓，只允许当前方向的加仓；如果是空仓，允许配置中开启的方向
+        const canLong = state.isLongBotRunning && (state.positionSide === 'long' || state.positionSide === null);
+        const canShort = (config.tradeMode === 'futures') && state.isShortBotRunning && (state.positionSide === 'short' || state.positionSide === null);
 
         // 1. RSI 曾超卖(做多) / 曾超买(做空)
         if (rsi !== null) {
-            if (isLong && rsi < config.rsiThreshold) botSignalState.rsiHitTime = now;
-            if (!isLong && rsi > (config.rsiOverboughtThreshold || 70)) botSignalState.rsiHitTime = now;
+            if (canLong && rsi < config.rsiThreshold) botSignalState.longRsiHitTime = now;
+            if (canShort && rsi > (config.rsiOverboughtThreshold || 70)) botSignalState.shortRsiHitTime = now;
         }
 
-        if (now - botSignalState.rsiHitTime > windowMs) {
-            botSignalState.rsiHitTime = 0;
-            botSignalState.macdHitTime = 0;
+        if (now - botSignalState.longRsiHitTime > windowMs) {
+            botSignalState.longRsiHitTime = 0;
+            botSignalState.longMacdHitTime = 0;
+        }
+        if (now - botSignalState.shortRsiHitTime > windowMs) {
+            botSignalState.shortRsiHitTime = 0;
+            botSignalState.shortMacdHitTime = 0;
         }
 
         // 2. MACD 曾金叉(做多) / 曾死叉(做空)
-        if (botSignalState.rsiHitTime > 0) {
-            if (isLong && macdState === '金叉') botSignalState.macdHitTime = now;
-            if (!isLong && macdState === '死叉') botSignalState.macdHitTime = now;
-        }
+        if (botSignalState.longRsiHitTime > 0 && macdState === '金叉') botSignalState.longMacdHitTime = now;
+        if (botSignalState.shortRsiHitTime > 0 && macdState === '死叉') botSignalState.shortMacdHitTime = now;
 
         // 3. 判断大周期环境是否就绪
-        let ready = config.requireMacd ? (botSignalState.rsiHitTime > 0 && botSignalState.macdHitTime > 0) : (botSignalState.rsiHitTime > 0);
+        let longReady = canLong && (config.requireMacd ? (botSignalState.longRsiHitTime > 0 && botSignalState.longMacdHitTime > 0) : (botSignalState.longRsiHitTime > 0));
+        let shortReady = canShort && (config.requireMacd ? (botSignalState.shortRsiHitTime > 0 && botSignalState.shortMacdHitTime > 0) : (botSignalState.shortRsiHitTime > 0));
         
         // --- C. 微观扳机扣动 (真实买入/做空) ---
-        if (ready && (now - botSignalState.lastDcaTime > 15 * 60 * 1000)) { // 15分钟冷却防抖
-            let triggerMtfFired = false;
-            let triggerDeltaFired = false;
+        if ((longReady || shortReady) && (now - botSignalState.lastDcaTime > 15 * 60 * 1000)) { // 15分钟冷却防抖
+            
+            let triggerMtfLong = config.triggerMtf && mtfState && mtfState.includes('强多');
+            let triggerDeltaLong = config.triggerDelta && (currentMinuteDelta > 0 && Math.abs(deltaUsdt) > config.deltaThreshold);
 
-            if (isLong) {
-                triggerMtfFired = config.triggerMtf && mtfState && mtfState.includes('强多');
-                triggerDeltaFired = config.triggerDelta && (currentMinuteDelta > 0 && Math.abs(deltaUsdt) > config.deltaThreshold);
-            } else {
-                triggerMtfFired = config.triggerMtf && mtfState && mtfState.includes('强空');
-                triggerDeltaFired = config.triggerDelta && (currentMinuteDelta < 0 && Math.abs(deltaUsdt) > config.deltaThreshold);
+            let triggerMtfShort = config.triggerMtf && mtfState && mtfState.includes('强空');
+            let triggerDeltaShort = config.triggerDelta && (currentMinuteDelta < 0 && Math.abs(deltaUsdt) > config.deltaThreshold);
+
+            let isExecutingLong = longReady && (triggerMtfLong || triggerDeltaLong);
+            let isExecutingShort = shortReady && (triggerMtfShort || triggerDeltaShort);
+            
+            // 极小概率多空同时满足时，顺延当前仓位方向，否则偏好做多
+            if (isExecutingLong && isExecutingShort) {
+                if (state.positionSide === 'short') isExecutingLong = false;
+                else isExecutingShort = false;
             }
 
-            if (triggerMtfFired || triggerDeltaFired) {
+            if (isExecutingLong || isExecutingShort) {
                 const maxSteps = config.dcaMaxSteps || 5;
+                const isLongTrade = isExecutingLong;
+                
                 if (state.activeDcaCount >= maxSteps) {
                     botSignalState.lastDcaTime = now;
-                    botSignalState.rsiHitTime = 0;
-                    botSignalState.macdHitTime = 0;
+                    if (isLongTrade) {
+                        botSignalState.longRsiHitTime = 0; botSignalState.longMacdHitTime = 0;
+                    } else {
+                        botSignalState.shortRsiHitTime = 0; botSignalState.shortMacdHitTime = 0;
+                    }
                     console.log(`[AutoBot] 已达到最大 DCA 次数 (${maxSteps})，本次信号被忽略`);
                     return;
                 }
 
                 botSignalState.isExecuting = true;
                 try {
-                    const actionLabel = isLong ? '买入(做多)' : '卖出(做空)';
+                    const actionLabel = isLongTrade ? '买入(做多)' : '卖出(做空)';
+                    const triggerMtfFired = isLongTrade ? triggerMtfLong : triggerMtfShort;
+                    const triggerDeltaFired = isLongTrade ? triggerDeltaLong : triggerDeltaShort;
                     const logMsg = `[AutoBot] 触发${actionLabel}! (MTF:${triggerMtfFired}, Delta:${triggerDeltaFired}) - 第 ${state.activeDcaCount + 1} 仓`;
                     console.log(logMsg);
                     
@@ -218,13 +239,13 @@ function startBotLoop(getEngineConfig, getEngineState) {
                         
                         if (qtyToBuy < 0.001) throw new Error(`仓位太小, 计算数量: ${qtyToBuy} BTC, 最小需 0.001 BTC`);
                         
-                        const side = isLong ? 'BUY' : 'SELL';
+                        const side = isLongTrade ? 'BUY' : 'SELL';
                         const res = await executeFuturesOrder(side, qtyToBuy);
                         executedQty = parseFloat(res.executedQty || qtyToBuy);
                         // 合约接口返回的是 cumQuoteQty 可能为空或0, 估算一下
                         cumQuote = res.cumQuoteQty ? parseFloat(res.cumQuoteQty) : executedQty * currentPrice;
                     } else {
-                        if (!isLong) throw new Error('现货模式不支持做空!');
+                        if (!isLongTrade) throw new Error('现货模式不支持做空!');
                         // 现货模式: 首仓直接取配置金额，后续乘马丁格尔
                         const currentStepUsdt = config.dcaAmount * Math.pow(multiplier, state.activeDcaCount);
                         const res = await executeRealOrder('BUY', null, currentStepUsdt);
@@ -235,6 +256,11 @@ function startBotLoop(getEngineConfig, getEngineState) {
                     // 防止分母为 0
                     const avgP = executedQty > 0 ? (cumQuote / executedQty) : currentPrice;
 
+                    // 设置持仓方向 (首仓时)
+                    if (state.totalCoinAmount < 0.00001) {
+                        state.positionSide = isLongTrade ? 'long' : 'short';
+                    }
+
                     state.activeDcaCount++;
                     state.totalUsdtAmount += cumQuote;
                     state.totalCoinAmount += executedQty;
@@ -243,8 +269,11 @@ function startBotLoop(getEngineConfig, getEngineState) {
                     state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 真实${actionLabel}: ${cumQuote.toFixed(2)} USDT @ ${avgP.toFixed(2)}`);
                     
                     botSignalState.lastDcaTime = now;
-                    botSignalState.rsiHitTime = 0; // 消耗掉大周期信号，需要重新孕育
-                    botSignalState.macdHitTime = 0;
+                    if (isLongTrade) {
+                        botSignalState.longRsiHitTime = 0; botSignalState.longMacdHitTime = 0;
+                    } else {
+                        botSignalState.shortRsiHitTime = 0; botSignalState.shortMacdHitTime = 0;
+                    }
                 } catch (e) {
                     const errorMsg = e.response ? JSON.stringify(e.response.data) : e.message;
                     console.error('[SpotAutoBot] Action Error:', errorMsg);
@@ -258,6 +287,7 @@ function startBotLoop(getEngineConfig, getEngineState) {
         // --- D. 真实止盈/止损抛售 (TP / SL) ---
         if (state.totalCoinAmount > 0 && state.averagePrice > 0) {
             const avgP = state.averagePrice;
+            const isLong = state.positionSide !== 'short'; // 默认视为多头
             
             let tp1Price, tp2Price, tp3Price;
             if (isLong) {

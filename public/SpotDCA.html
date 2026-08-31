@@ -54,11 +54,17 @@
                 <div class="text-xs text-gray-400">当前时间 (UTC+8)</div>
                 <div id="utc8-clock" class="text-lg font-mono font-semibold text-blue-400">--:--:--</div>
             </div>
-            <!-- Bot Toggle Button -->
-            <button id="ui-bot-toggle-btn" onclick="toggleBot()" class="flex items-center gap-2 px-4 py-2 bg-green-dim border border-green-500 hover:bg-green-500/20 rounded text-green text-sm font-bold transition-colors cursor-pointer">
-                <div id="ui-bot-dot" class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
-                <span id="ui-bot-text">自动交易运行中</span>
-            </button>
+            <!-- Bot Toggle Buttons -->
+            <div class="flex items-center gap-2">
+                <button id="ui-bot-toggle-long" onclick="toggleBot('long')" class="flex items-center gap-2 px-3 py-2 bg-gray-800 border border-gray-600 hover:bg-gray-700 rounded text-gray-300 text-sm font-bold transition-colors cursor-pointer">
+                    <div id="ui-bot-dot-long" class="w-2 h-2 rounded-full bg-gray-500"></div>
+                    <span id="ui-bot-text-long">▶ 启动做多引擎</span>
+                </button>
+                <button id="ui-bot-toggle-short" onclick="toggleBot('short')" class="flex items-center gap-2 px-3 py-2 bg-gray-800 border border-gray-600 hover:bg-gray-700 rounded text-gray-300 text-sm font-bold transition-colors cursor-pointer hidden">
+                    <div id="ui-bot-dot-short" class="w-2 h-2 rounded-full bg-gray-500"></div>
+                    <span id="ui-bot-text-short">▶ 启动做空引擎</span>
+                </button>
+            </div>
         </div>
     </header>
 
@@ -287,14 +293,7 @@
                     <!-- Futures Config Section -->
                     <div id="cfg-futures-section" class="hidden">
                         <h3 class="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4 border-l-2 border-yellow-500 pl-2">永续合约专属参数</h3>
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 bg-yellow-900/10 p-4 rounded border border-yellow-900/30">
-                            <div>
-                                <label class="block text-sm text-gray-300 mb-1">交易方向 (Direction)</label>
-                                <select id="cfg-trade-direction" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white focus:outline-none focus:border-yellow-500">
-                                    <option value="long">做多 (Long)</option>
-                                    <option value="short">做空 (Short)</option>
-                                </select>
-                            </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 bg-yellow-900/10 p-4 rounded border border-yellow-900/30">
                             <div>
                                 <label class="block text-sm text-gray-300 mb-1">杠杆倍数 (Leverage)</label>
                                 <div class="flex items-center">
@@ -320,22 +319,22 @@
                         <div class="mb-5 p-3 bg-gray-800 rounded border border-gray-700 text-sm">
                             <div class="text-gray-400 mb-2 font-bold">信号触发逻辑时序：</div>
                             <div class="flex items-center gap-2 text-xs">
-                                <span class="bg-purple-900/50 text-purple-300 px-2 py-1 rounded">1. RSI曾超卖/超买</span>
+                                <span class="bg-purple-900/50 text-purple-300 px-2 py-1 rounded" id="ui-cfg-step1">1. RSI曾超卖</span>
                                 <i class="fa-solid fa-arrow-right text-gray-600"></i>
-                                <span class="bg-purple-900/50 text-purple-300 px-2 py-1 rounded">2. MACD曾金叉/死叉</span>
+                                <span class="bg-purple-900/50 text-purple-300 px-2 py-1 rounded" id="ui-cfg-step2">2. MACD曾金叉</span>
                                 <i class="fa-solid fa-arrow-right text-gray-600"></i>
                                 <span class="bg-blue-900/50 text-blue-300 px-2 py-1 rounded">3. 激活微观扳机监控</span>
                             </div>
-                            <div class="text-gray-500 mt-2 text-xs">注：大周期只需“发生过”即可进入准备状态，随后耐心等待 1m 微观扳机扣动。做空逻辑与之相反。</div>
+                            <div class="text-gray-500 mt-2 text-xs" id="ui-cfg-step-note">注：大周期只需“发生过”即可进入准备状态，随后耐心等待 1m 微观扳机扣动。</div>
                         </div>
 
                         <div class="grid grid-cols-1 gap-4">
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                                 <div>
-                                    <label class="block text-sm text-gray-300 mb-1">做多 RSI 超卖阈值</label>
+                                    <label class="block text-sm text-gray-300 mb-1" id="ui-cfg-rsi-label">RSI 超卖阈值 (14周期)</label>
                                     <input type="number" id="cfg-rsi-threshold" value="30" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500">
                                 </div>
-                                <div>
+                                <div id="cfg-rsi-short-container" class="hidden">
                                     <label class="block text-sm text-gray-300 mb-1">做空 RSI 超买阈值</label>
                                     <input type="number" id="cfg-rsi-overbought-threshold" value="70" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white focus:outline-none focus:border-red-500">
                                 </div>
@@ -344,7 +343,7 @@
                                 <label class="flex items-center cursor-pointer">
                                     <input type="checkbox" id="cfg-macd-require" checked class="hidden peer">
                                     <div class="w-10 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-purple-500 relative"></div>
-                                    <span class="ml-3 text-sm text-gray-300">强制要求曾出现 15m MACD 金叉(做多)/死叉(做空)</span>
+                                    <span class="ml-3 text-sm text-gray-300" id="ui-cfg-macd-label">强制要求曾出现 15m MACD 金叉</span>
                                 </label>
                             </div>
                             
@@ -415,7 +414,7 @@
                             <div class="text-sm font-bold text-blue-300 mb-3">基于总资金的仓位规划</div>
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                                 <div>
-                                    <label class="block text-xs text-gray-400 mb-1">现货账户总可用资金 (USDT)</label>
+                                    <label id="gen-capital-label" class="block text-xs text-gray-400 mb-1">策略总可用资金/名义本金 (USDT)</label>
                                     <input type="number" id="gen-total-capital" value="50000" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-1.5 text-sm text-white focus:border-blue-500">
                                 </div>
                                 <div>
@@ -537,9 +536,9 @@
                 <div>
                     <label class="block text-sm text-gray-300 mb-2">执行动作</label>
                     <div class="grid grid-cols-3 gap-2" id="override-tabs">
-                        <button type="button" onclick="switchOverrideTab('market-buy', this)" class="override-tab-btn bg-green-600/20 border border-green-500 text-green-500 py-2 rounded text-sm font-bold">市价买入</button>
-                        <button type="button" onclick="switchOverrideTab('limit-buy', this)" class="override-tab-btn bg-gray-800 border border-gray-700 text-gray-400 py-2 rounded text-sm hover:bg-gray-700 transition">限价买入</button>
-                        <button type="button" onclick="switchOverrideTab('market-sell', this)" class="override-tab-btn bg-gray-800 border border-gray-700 text-gray-400 py-2 rounded text-sm hover:bg-gray-700 transition">清仓止损</button>
+                        <button type="button" id="btn-override-buy-long" onclick="switchOverrideTab('market-buy', this)" class="override-tab-btn bg-green-600/20 border border-green-500 text-green-500 py-2 rounded text-sm font-bold">市价开多</button>
+                        <button type="button" id="btn-override-buy-short" onclick="switchOverrideTab('market-buy-short', this)" class="override-tab-btn bg-gray-800 border border-gray-700 text-gray-400 py-2 rounded text-sm hover:bg-gray-700 transition hidden">市价开空</button>
+                        <button type="button" id="btn-override-sell" onclick="switchOverrideTab('market-sell', this)" class="override-tab-btn bg-gray-800 border border-gray-700 text-gray-400 py-2 rounded text-sm hover:bg-gray-700 transition">清仓平仓</button>
                     </div>
                 </div>
 
@@ -585,12 +584,17 @@
         let globalVolumeProfile = new Map();
         let currentPrice = 0; // Removed mock data 64230
 
-        async function toggleBot() {
+        async function toggleBot(direction = 'long') {
             try {
-                const res = await fetch('/api/spot-dca/toggle-bot', { method: 'POST' });
+                const res = await fetch('/api/spot-dca/toggle-bot', { 
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ direction })
+                });
                 const data = await res.json();
                 if (data.ok) {
-                    currentState.isBotRunning = data.isBotRunning;
+                    currentState.isLongBotRunning = data.state.isLongBotRunning;
+                    currentState.isShortBotRunning = data.state.isShortBotRunning;
                     renderUI();
                 }
             } catch (e) {
@@ -647,14 +651,16 @@
                             rsiBar.style.width = `${rsi}%`;
                             
                             if (rsi < currentConfig.rsiThreshold) {
-                                rsiValEl.innerHTML = `${rsi} <span class="text-xs text-gray-400">(超卖)</span>`;
+                                rsiValEl.innerHTML = `${rsi} <span class="text-xs text-green">(超卖)</span>`;
                                 rsiValEl.className = 'text-sm font-mono text-green font-bold';
                                 rsiBar.className = 'bg-green-500 h-1.5 rounded progress-bar';
-                                document.getElementById('ui-rsi-label').innerHTML = `RSI (14) <span class="text-green text-xs">触发 < ${currentConfig.rsiThreshold}</span>`;
+                            } else if (currentConfig.tradeMode === 'futures' && rsi > (currentConfig.rsiOverboughtThreshold || 70)) {
+                                rsiValEl.innerHTML = `${rsi} <span class="text-xs text-red">(超买)</span>`;
+                                rsiValEl.className = 'text-sm font-mono text-red font-bold';
+                                rsiBar.className = 'bg-red-500 h-1.5 rounded progress-bar';
                             } else {
                                 rsiValEl.className = 'text-sm font-mono text-gray-400';
                                 rsiBar.className = 'bg-gray-500 h-1.5 rounded progress-bar';
-                                document.getElementById('ui-rsi-label').innerHTML = `RSI (14) <span class="text-gray-500 text-xs">阈值: < ${currentConfig.rsiThreshold}</span>`;
                             }
                         }
 
@@ -826,18 +832,39 @@
 
         function renderUI() {
             // Render Bot Toggle Status
-            const botBtn = document.getElementById('ui-bot-toggle-btn');
-            const botDot = document.getElementById('ui-bot-dot');
-            const botText = document.getElementById('ui-bot-text');
+            const btnLong = document.getElementById('ui-bot-toggle-long');
+            const dotLong = document.getElementById('ui-bot-dot-long');
+            const textLong = document.getElementById('ui-bot-text-long');
             
-            if (currentState.isBotRunning) {
-                botBtn.className = 'flex items-center gap-2 px-4 py-2 bg-green-dim border border-green-500 hover:bg-green-500/20 rounded text-green text-sm font-bold transition-colors cursor-pointer';
-                botDot.className = 'w-2 h-2 rounded-full bg-green-500 animate-pulse';
-                botText.textContent = '自动交易运行中';
+            const btnShort = document.getElementById('ui-bot-toggle-short');
+            const dotShort = document.getElementById('ui-bot-dot-short');
+            const textShort = document.getElementById('ui-bot-text-short');
+            
+            // Show/Hide Short button based on mode
+            if (currentConfig.tradeMode === 'spot') {
+                btnShort.classList.add('hidden');
+                textLong.textContent = currentState.isLongBotRunning ? '▶ 自动现货交易运行中' : '▶ 启动自动现货交易';
             } else {
-                botBtn.className = 'flex items-center gap-2 px-4 py-2 bg-red-dim border border-red-500 hover:bg-red-500/20 rounded text-red text-sm font-bold transition-colors cursor-pointer';
-                botDot.className = 'w-2 h-2 rounded-full bg-red-500';
-                botText.textContent = '自动交易已停止';
+                btnShort.classList.remove('hidden');
+                textLong.textContent = currentState.isLongBotRunning ? '▶ 自动做多运行中' : '▶ 启动做多引擎';
+            }
+            
+            if (currentState.isLongBotRunning) {
+                btnLong.className = 'flex items-center gap-2 px-3 py-2 bg-green-dim border border-green-500 hover:bg-green-500/20 rounded text-green text-sm font-bold transition-colors cursor-pointer';
+                dotLong.className = 'w-2 h-2 rounded-full bg-green-500 animate-pulse';
+            } else {
+                btnLong.className = 'flex items-center gap-2 px-3 py-2 bg-gray-800 border border-gray-600 hover:bg-gray-700 rounded text-gray-400 text-sm font-bold transition-colors cursor-pointer';
+                dotLong.className = 'w-2 h-2 rounded-full bg-gray-500';
+            }
+
+            if (currentState.isShortBotRunning) {
+                btnShort.className = 'flex items-center gap-2 px-3 py-2 bg-red-dim border border-red-500 hover:bg-red-500/20 rounded text-red text-sm font-bold transition-colors cursor-pointer';
+                dotShort.className = 'w-2 h-2 rounded-full bg-red-500 animate-pulse';
+                textShort.textContent = '▶ 自动做空运行中';
+            } else {
+                btnShort.className = 'flex items-center gap-2 px-3 py-2 bg-gray-800 border border-gray-600 hover:bg-gray-700 rounded text-gray-400 text-sm font-bold transition-colors cursor-pointer';
+                dotShort.className = 'w-2 h-2 rounded-full bg-gray-500';
+                textShort.textContent = '▶ 启动做空引擎';
             }
 
             // Render Balance
@@ -1064,16 +1091,40 @@
             const futuresSection = document.getElementById('cfg-futures-section');
             const dcaAmountSection = document.getElementById('cfg-dca-amount').closest('.grid > div');
             
+            // UI elements for short logic
+            const rsiShortContainer = document.getElementById('cfg-rsi-short-container');
+            const step1Label = document.getElementById('ui-cfg-step1');
+            const step2Label = document.getElementById('ui-cfg-step2');
+            const stepNote = document.getElementById('ui-cfg-step-note');
+            const rsiMainLabel = document.getElementById('ui-cfg-rsi-label');
+            const macdMainLabel = document.getElementById('ui-cfg-macd-label');
+            
             if (mode === 'spot') {
                 btnSpot.className = 'px-6 py-2 rounded-md text-sm font-bold transition-all bg-yellow-600 text-white shadow-lg';
                 btnFutures.className = 'px-6 py-2 rounded-md text-sm font-bold transition-all text-gray-400 hover:text-white';
                 futuresSection.classList.add('hidden');
                 dcaAmountSection.classList.remove('hidden');
+                
+                // Hide short logic in spot mode
+                rsiShortContainer.classList.add('hidden');
+                step1Label.textContent = "1. RSI曾超卖";
+                step2Label.textContent = "2. MACD曾金叉";
+                stepNote.textContent = "注：大周期只需“发生过”即可进入准备状态，随后耐心等待 1m 微观扳机扣动。";
+                rsiMainLabel.textContent = "RSI 超卖阈值 (14周期)";
+                macdMainLabel.textContent = "强制要求曾出现 15m MACD 金叉";
             } else {
                 btnFutures.className = 'px-6 py-2 rounded-md text-sm font-bold transition-all bg-yellow-600 text-white shadow-lg';
                 btnSpot.className = 'px-6 py-2 rounded-md text-sm font-bold transition-all text-gray-400 hover:text-white';
                 futuresSection.classList.remove('hidden');
                 dcaAmountSection.classList.add('hidden'); // 永续合约用百分比计算仓位，隐藏固定U数额
+                
+                // Show short logic in futures mode
+                rsiShortContainer.classList.remove('hidden');
+                step1Label.textContent = "1. RSI曾超卖/超买";
+                step2Label.textContent = "2. MACD曾金叉/死叉";
+                stepNote.textContent = "注：大周期只需“发生过”即可进入准备状态，随后耐心等待 1m 微观扳机扣动。做空逻辑与之相反。";
+                rsiMainLabel.textContent = "做多 RSI 超卖阈值";
+                macdMainLabel.textContent = "强制要求曾出现 15m MACD 金叉(做多)/死叉(做空)";
             }
         }
 
@@ -1105,10 +1156,7 @@
             document.getElementById('cfg-breakeven-sl').checked = currentConfig.breakevenSl;
             document.getElementById('cfg-auto-loop').checked = !!currentConfig.autoLoop;
             
-            // 智能策略生成器：自动填入当前现货账户真实的 USDT 余额 (向下取整)
-            if (currentState.spotBalanceUsdt) {
-                document.getElementById('gen-total-capital').value = Math.floor(currentState.spotBalanceUsdt);
-            }
+            // 智能策略生成器初始不再强制覆盖，改为在打开时动态计算
         }
 
         function closeConfig() {
@@ -1118,6 +1166,23 @@
 
         function generateStrategy() {
             document.getElementById('strategy-generator').classList.remove('hidden');
+            
+            // 自动填充资金
+            const isFutures = currentTradeMode === 'futures';
+            if (isFutures) {
+                document.getElementById('gen-capital-label').textContent = "永续合约总分配名义本金 (USDT)";
+                const lev = parseFloat(document.getElementById('cfg-leverage').value) || 100;
+                const pos = parseFloat(document.getElementById('cfg-position-size').value) || 3.0;
+                if (currentState.futuresBalanceUsdt) {
+                    const notional = currentState.futuresBalanceUsdt * (pos / 100) * lev;
+                    document.getElementById('gen-total-capital').value = Math.floor(notional);
+                }
+            } else {
+                document.getElementById('gen-capital-label').textContent = "现货账户总可用资金 (USDT)";
+                if (currentState.spotBalanceUsdt) {
+                    document.getElementById('gen-total-capital').value = Math.floor(currentState.spotBalanceUsdt);
+                }
+            }
         }
 
         function closeGenerator() {
@@ -1136,14 +1201,27 @@
             } else {
                 baseAmount = capital * (1 - multiplier) / (1 - Math.pow(multiplier, steps));
             }
-            baseAmount = Math.floor(baseAmount / 100) * 100;
-            document.getElementById('cfg-dca-amount').value = baseAmount;
+            
+            const isFutures = currentTradeMode === 'futures';
+            
+            // 现货模式向下取整百，合约模式向下取整到个位 (名义价值精度更高)
+            if (isFutures) {
+                baseAmount = Math.floor(baseAmount);
+            } else {
+                baseAmount = Math.floor(baseAmount / 100) * 100;
+                document.getElementById('cfg-dca-amount').value = baseAmount;
+            }
             
             const preview = document.getElementById('gen-result-preview');
             preview.classList.remove('hidden');
             
-            let planHtml = `<div class="font-bold text-green mb-1">计算完成！已将首仓金额设为 ${baseAmount} USDT</div>`;
-            planHtml += `<div class="mb-2">基于总资金 ${capital} U，分 ${steps} 次加仓规划：</div>`;
+            let planHtml = '';
+            if (isFutures) {
+                planHtml = `<div class="font-bold text-yellow-500 mb-1">计算完成！(合约模式后端自动计算)</div>`;
+            } else {
+                planHtml = `<div class="font-bold text-green mb-1">计算完成！已将现货首仓金额设为 ${baseAmount} USDT</div>`;
+            }
+            planHtml += `<div class="mb-2">基于总名义资金 ${capital} U，分 ${steps} 次加仓规划：</div>`;
             planHtml += `<ul class="list-disc pl-4 space-y-1">`;
             
             let currentAmount = baseAmount;
@@ -1160,7 +1238,6 @@
         }
 
         async function saveConfig() {
-            const tradeDirection = document.getElementById('cfg-trade-direction').value || 'long';
             const leverage = parseInt(document.getElementById('cfg-leverage').value) || 100;
             const positionSizePct = parseFloat(document.getElementById('cfg-position-size').value) || 3.0;
             const rsiThreshold = parseInt(document.getElementById('cfg-rsi-threshold').value);
@@ -1191,7 +1268,7 @@
             }
 
             const payload = {
-                tradeMode: currentTradeMode, tradeDirection, leverage, positionSizePct,
+                tradeMode: currentTradeMode, leverage, positionSizePct,
                 rsiThreshold, rsiOverboughtThreshold, requireMacd, triggerDelta, triggerMtf, deltaThreshold,
                 tp1, tp2, tp3, tp1Target, tp2Target, tp3Target, dcaAmount, dcaMaxSteps, martingaleMultiplier, breakevenSl, autoLoop
             };
@@ -1204,27 +1281,27 @@
                 });
                 
                 // Apply to UI
-                if (tradeDirection === 'short' && currentTradeMode === 'futures') {
-                    document.getElementById('ui-rsi-label').innerHTML = `RSI (14) <span class="text-gray-500 text-xs">曾 &gt; ${rsiOverboughtThreshold} 触发(做空)</span>`;
+                if (currentTradeMode === 'futures') {
+                    document.getElementById('ui-rsi-label').innerHTML = `RSI (14) <span class="text-gray-500 text-xs">做多 < ${rsiThreshold} | 做空 > ${rsiOverboughtThreshold}</span>`;
                     if (requireMacd) {
-                        document.getElementById('ui-macd-status').innerHTML = `<i class="fa-solid fa-arrow-trend-down mr-1"></i>曾死叉确认`;
+                        document.getElementById('ui-macd-status').innerHTML = `<i class="fa-solid fa-arrows-turn-to-dots mr-1"></i>强制要求金叉/死叉`;
                     } else {
                         document.getElementById('ui-macd-status').innerHTML = `<span class="text-gray-500 font-normal">未强制要求</span>`;
                     }
                     if (triggerDelta) {
-                        document.getElementById('ui-delta-label').innerHTML = `1m Delta 净值 <span class="text-xs">(做空阈值: < -${(deltaThreshold / 1000000).toFixed(1)}M USDT)</span>`;
+                        document.getElementById('ui-delta-label').innerHTML = `1m Delta 净值 <span class="text-xs">(阈值: ±${(deltaThreshold / 1000000).toFixed(1)}M)</span>`;
                     } else {
                         document.getElementById('ui-delta-label').innerHTML = `1m Delta 净值 <span class="text-xs text-gray-500">(已忽略此条件)</span>`;
                     }
                 } else {
-                    document.getElementById('ui-rsi-label').innerHTML = `RSI (14) <span class="text-gray-500 text-xs">曾 &lt; ${rsiThreshold} 触发(做多)</span>`;
+                    document.getElementById('ui-rsi-label').innerHTML = `RSI (14) <span class="text-gray-500 text-xs">做多触发 &lt; ${rsiThreshold}</span>`;
                     if (requireMacd) {
-                        document.getElementById('ui-macd-status').innerHTML = `<i class="fa-solid fa-arrow-trend-up mr-1"></i>曾金叉确认`;
+                        document.getElementById('ui-macd-status').innerHTML = `<i class="fa-solid fa-arrow-trend-up mr-1"></i>强制要求金叉确认`;
                     } else {
                         document.getElementById('ui-macd-status').innerHTML = `<span class="text-gray-500 font-normal">未强制要求</span>`;
                     }
                     if (triggerDelta) {
-                        document.getElementById('ui-delta-label').innerHTML = `1m Delta 净值 <span class="text-xs">(做多阈值: > ${(deltaThreshold / 1000000).toFixed(1)}M USDT)</span>`;
+                        document.getElementById('ui-delta-label').innerHTML = `1m Delta 净值 <span class="text-xs">(做多阈值: > ${(deltaThreshold / 1000000).toFixed(1)}M)</span>`;
                     } else {
                         document.getElementById('ui-delta-label').innerHTML = `1m Delta 净值 <span class="text-xs text-gray-500">(已忽略此条件)</span>`;
                     }
@@ -1251,6 +1328,14 @@
 
         function openOverrideModal() {
             document.getElementById('override-modal').classList.remove('hidden');
+            
+            const btnShort = document.getElementById('btn-override-buy-short');
+            if (currentConfig.tradeMode === 'futures') {
+                btnShort.classList.remove('hidden');
+            } else {
+                btnShort.classList.add('hidden');
+            }
+            
             document.getElementById('override-amount').value = currentConfig.dcaAmount || 3000;
             const currentPriceText = document.getElementById('current-price').textContent.replace(/,/g, '');
             document.getElementById('override-price').value = currentPriceText;
@@ -1267,21 +1352,21 @@
                 tab.className = "override-tab-btn bg-gray-800 border border-gray-700 text-gray-400 py-2 rounded text-sm hover:bg-gray-700 transition";
             });
             if (action.includes('buy')) {
-                btnElement.className = "override-tab-btn bg-green-600/20 border border-green-500 text-green-500 py-2 rounded text-sm font-bold";
+                if (action === 'market-buy-short') {
+                    btnElement.className = "override-tab-btn bg-red-600/20 border border-red-500 text-red-500 py-2 rounded text-sm font-bold";
+                } else {
+                    btnElement.className = "override-tab-btn bg-green-600/20 border border-green-500 text-green-500 py-2 rounded text-sm font-bold";
+                }
             } else {
-                btnElement.className = "override-tab-btn bg-red-600/20 border border-red-500 text-red-500 py-2 rounded text-sm font-bold";
+                btnElement.className = "override-tab-btn bg-yellow-600/20 border border-yellow-500 text-yellow-500 py-2 rounded text-sm font-bold";
             }
             
             const priceContainer = document.getElementById('override-price-container');
             const amountContainer = document.getElementById('override-amount-container');
             const closeWarning = document.getElementById('override-close-warning');
             
-            if (action === 'market-buy') {
+            if (action === 'market-buy' || action === 'market-buy-short') {
                 priceContainer.classList.add('hidden');
-                amountContainer.classList.remove('hidden');
-                closeWarning.classList.add('hidden');
-            } else if (action === 'limit-buy') {
-                priceContainer.classList.remove('hidden');
                 amountContainer.classList.remove('hidden');
                 closeWarning.classList.add('hidden');
             } else if (action === 'market-sell') {

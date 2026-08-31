@@ -64,7 +64,9 @@ let state = {
   slMoved: false,
   logs: [],
   enabled: true,
-  isBotRunning: false, // 机器人主开关
+  isLongBotRunning: false, // 做多引擎开关 (现货/合约通用)
+  isShortBotRunning: false, // 做空引擎开关 (仅合约可用)
+  positionSide: null, // 当前持仓方向: 'long' | 'short' | null
   spotBalanceUsdt: 0, // 现货 USDT 余额
   spotBalanceBtc: 0,   // 现货 BTC 余额
   futuresBalanceUsdt: 0 // 永续合约 USDT 余额
@@ -240,8 +242,15 @@ router.get('/status', (req, res) => {
 });
 
 router.post('/toggle-bot', express.json(), (req, res) => {
-  state.isBotRunning = !state.isBotRunning;
-  res.json({ ok: true, isBotRunning: state.isBotRunning });
+  const { direction } = req.body; // 'long' or 'short'
+  if (direction === 'short') {
+      state.isShortBotRunning = !state.isShortBotRunning;
+      state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动${state.isShortBotRunning ? '开启' : '关闭'}自动做空引擎`);
+  } else {
+      state.isLongBotRunning = !state.isLongBotRunning;
+      state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动${state.isLongBotRunning ? '开启' : '关闭'}自动做多引擎`);
+  }
+  res.json({ ok: true, state });
 });
 
 router.post('/custom-tp', express.json(), (req, res) => {
@@ -263,26 +272,25 @@ router.post('/override', express.json(), async (req, res) => {
   state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] ` + logMsg);
   if (state.logs.length > 20) state.logs.pop();
   
-  if (action === 'market-buy') {
+  if (action === 'market-buy' || action === 'market-buy-short') {
     try {
       let amt = parseFloat(amount);
       let executedQty = 0;
       let cumQuote = 0;
       
       if (config.tradeMode === 'futures') {
-        // override amount 为 U。但在永续中，通常 amount 代表 USDT
-        // 手动干预如果填了 3000，意思是拿 3000 保证金吗？还是合约名义价值？
-        // 假设 amount 框里填写的是“名义价值(U)”，方便和现货统一。
-        if (!amt || amt <= 0) throw new Error('无效的买入金额');
+        if (!amt || amt <= 0) throw new Error('无效的开仓金额');
         const { executeFuturesOrder } = require('./spotAutoBot');
         const currentPrice = state.averagePrice > 0 ? state.averagePrice : 60000; // 粗略 fallback
         let qtyToBuy = Math.floor((amt / currentPrice) * 1000) / 1000;
         if (qtyToBuy < 0.001) throw new Error(`数量太小: ${qtyToBuy}`);
         
-        const orderRes = await executeFuturesOrder('BUY', qtyToBuy);
+        const side = action === 'market-buy-short' ? 'SELL' : 'BUY';
+        const orderRes = await executeFuturesOrder(side, qtyToBuy);
         executedQty = parseFloat(orderRes.executedQty || qtyToBuy);
         cumQuote = orderRes.cumQuoteQty ? parseFloat(orderRes.cumQuoteQty) : executedQty * currentPrice;
       } else {
+        if (action === 'market-buy-short') throw new Error('现货模式不支持做空');
         if (!amt || amt <= 0) throw new Error('无效的买入金额');
         const { executeRealOrder } = require('./spotAutoBot');
         const orderRes = await executeRealOrder('BUY', null, amt);
@@ -290,24 +298,31 @@ router.post('/override', express.json(), async (req, res) => {
         cumQuote = parseFloat(orderRes.cummulativeQuoteQty);
       }
       
+      // 更新方向标记 (如果之前是空仓)
+      if (state.totalCoinAmount < 0.00001) {
+          state.positionSide = action === 'market-buy-short' ? 'short' : 'long';
+      }
+
       state.activeDcaCount++;
       state.totalUsdtAmount += cumQuote;
       state.totalCoinAmount += executedQty;
       state.averagePrice = state.totalUsdtAmount / state.totalCoinAmount;
-      state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动买入成功: 获 ${executedQty} BTC`);
+      const actionName = action === 'market-buy-short' ? '做空' : '买入';
+      state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动${actionName}成功: 获 ${executedQty} BTC`);
     } catch (e) {
       const errorMsg = e.response ? JSON.stringify(e.response.data) : e.message;
-      console.error('[Override Error] BUY failed:', errorMsg);
-      state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 买入失败: ${errorMsg}`);
+      console.error('[Override Error] BUY/SELL failed:', errorMsg);
+      state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 开仓失败: ${errorMsg}`);
     }
   } else if (action === 'market-sell') {
     try {
       if (state.totalCoinAmount > 0.00001) {
         if (config.tradeMode === 'futures') {
-            const sellQty = Math.floor(state.totalCoinAmount * 1000) / 1000;
+            const closeQty = Math.floor(state.totalCoinAmount * 1000) / 1000;
             const { executeFuturesOrder } = require('./spotAutoBot');
-            await executeFuturesOrder('SELL', sellQty);
-            state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动合约清仓成功: 卖出 ${sellQty} BTC`);
+            const side = state.positionSide === 'short' ? 'BUY' : 'SELL';
+            await executeFuturesOrder(side, closeQty);
+            state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动合约清仓成功: 平仓 ${closeQty} BTC`);
         } else {
             // 向下取整精度，防止卖出超额
             const sellQty = Math.floor(state.totalCoinAmount * 100000) / 100000;
@@ -323,6 +338,7 @@ router.post('/override', express.json(), async (req, res) => {
       state.tp1Fired = false;
       state.tp2Fired = false;
       state.tp3Fired = false;
+      state.positionSide = null; // 清空持仓方向
     } catch (e) {
       const errorMsg = e.response ? JSON.stringify(e.response.data) : e.message;
       console.error('[Override Error] SELL failed:', errorMsg);
