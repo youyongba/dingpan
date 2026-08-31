@@ -85,11 +85,12 @@ async function setFuturesLeverage(leverage) {
     }
 }
 
-async function executeFuturesOrder(side, quantity) {
+async function executeFuturesOrder(side, quantity, positionSide = '') {
     if (!SPOT_API_KEY || !SPOT_API_SECRET) throw new Error('Missing API Keys in .env');
     const timestamp = Date.now();
     let queryString = `symbol=BTCUSDT&side=${side}&type=MARKET&recvWindow=60000&timestamp=${timestamp}`;
     if (quantity) queryString += `&quantity=${quantity}`;
+    if (positionSide) queryString += `&positionSide=${positionSide}`;
 
     const signature = crypto.createHmac('sha256', SPOT_API_SECRET).update(queryString).digest('hex');
     const url = `https://fapi.binance.com/fapi/v1/order?${queryString}&signature=${signature}`;
@@ -241,7 +242,8 @@ function startBotLoop(getEngineConfig, getEngineState) {
                         if (qtyToBuy < 0.001) throw new Error(`仓位太小, 计算数量: ${qtyToBuy} BTC, 最小需 0.001 BTC`);
                         
                         const side = isLongTrade ? 'BUY' : 'SELL';
-                        const res = await executeFuturesOrder(side, qtyToBuy);
+                        const posSide = isLongTrade ? 'LONG' : 'SHORT';
+                        const res = await executeFuturesOrder(side, qtyToBuy, posSide);
                         executedQty = parseFloat(res.executedQty || qtyToBuy);
                         // 合约接口返回的是 cumQuoteQty 可能为空或0, 估算一下
                         cumQuote = res.cumQuoteQty ? parseFloat(res.cumQuoteQty) : executedQty * currentPrice;
@@ -319,7 +321,8 @@ function startBotLoop(getEngineConfig, getEngineState) {
                     let cumQuote = 0;
                     if (config.tradeMode === 'futures') {
                         const side = isLong ? 'SELL' : 'BUY';
-                        const res = await executeFuturesOrder(side, closeQty);
+                        const posSide = isLong ? 'LONG' : 'SHORT';
+                        const res = await executeFuturesOrder(side, closeQty, posSide);
                         cumQuote = res.cumQuoteQty ? parseFloat(res.cumQuoteQty) : closeQty * currentPrice;
                     } else {
                         const res = await executeRealOrder('SELL', closeQty, null);

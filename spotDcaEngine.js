@@ -285,7 +285,8 @@ router.post('/override', express.json(), async (req, res) => {
         if (qtyToBuy < 0.001) throw new Error(`数量太小: ${qtyToBuy}`);
         
         const side = action === 'market-buy-short' ? 'SELL' : 'BUY';
-        const orderRes = await executeFuturesOrder(side, qtyToBuy);
+        const posSide = action === 'market-buy-short' ? 'SHORT' : 'LONG';
+        const orderRes = await executeFuturesOrder(side, qtyToBuy, posSide);
         executedQty = parseFloat(orderRes.executedQty || qtyToBuy);
         cumQuote = orderRes.cumQuoteQty ? parseFloat(orderRes.cumQuoteQty) : executedQty * currentPrice;
       } else {
@@ -319,7 +320,8 @@ router.post('/override', express.json(), async (req, res) => {
         if (config.tradeMode === 'futures') {
             const closeQty = Math.floor(state.totalCoinAmount * 1000) / 1000;
             const side = state.positionSide === 'short' ? 'BUY' : 'SELL';
-            await executeFuturesOrder(side, closeQty);
+            const posSide = state.positionSide === 'short' ? 'SHORT' : 'LONG';
+            await executeFuturesOrder(side, closeQty, posSide);
             state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动合约清仓成功: 平仓 ${closeQty} BTC`);
         } else {
             // 向下取整精度，防止卖出超额
