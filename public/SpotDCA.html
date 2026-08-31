@@ -665,6 +665,11 @@
             document.getElementById('cfg-dca-amount').value = currentConfig.dcaAmount;
             document.getElementById('cfg-breakeven-sl').checked = currentConfig.breakevenSl;
             document.getElementById('cfg-auto-loop').checked = !!currentConfig.autoLoop;
+            
+            // 智能策略生成器：自动填入当前现货账户真实的 USDT 余额 (向下取整)
+            if (currentState.spotBalanceUsdt) {
+                document.getElementById('gen-total-capital').value = Math.floor(currentState.spotBalanceUsdt);
+            }
         }
 
         function closeConfig() {
