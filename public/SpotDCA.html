@@ -537,9 +537,8 @@
         // --- API Integration ---
         let currentConfig = {};
         let currentState = {};
-        
         let globalVolumeProfile = new Map();
-        let currentPrice = 64230;
+        let currentPrice = 0; // Removed mock data 64230
 
         async function toggleBot() {
             try {
@@ -592,6 +591,44 @@
                     
                     // 更新真实的指标 UI
                     if (data.realIndicators) {
+                        // 渲染 15m RSI
+                        if (data.realIndicators.rsi15m !== null && data.realIndicators.rsi15m !== undefined) {
+                            const rsi = data.realIndicators.rsi15m.toFixed(1);
+                            const rsiValEl = document.getElementById('ui-rsi-val');
+                            const rsiBar = document.getElementById('ui-rsi-bar');
+                            
+                            rsiValEl.textContent = rsi;
+                            rsiBar.style.width = `${rsi}%`;
+                            
+                            if (rsi < currentConfig.rsiThreshold) {
+                                rsiValEl.innerHTML = `${rsi} <span class="text-xs text-gray-400">(超卖)</span>`;
+                                rsiValEl.className = 'text-sm font-mono text-green font-bold';
+                                rsiBar.className = 'bg-green-500 h-1.5 rounded progress-bar';
+                                document.getElementById('ui-rsi-label').innerHTML = `RSI (14) <span class="text-green text-xs">触发 < ${currentConfig.rsiThreshold}</span>`;
+                            } else {
+                                rsiValEl.className = 'text-sm font-mono text-gray-400';
+                                rsiBar.className = 'bg-gray-500 h-1.5 rounded progress-bar';
+                                document.getElementById('ui-rsi-label').innerHTML = `RSI (14) <span class="text-gray-500 text-xs">阈值: < ${currentConfig.rsiThreshold}</span>`;
+                            }
+                        }
+
+                        // 渲染 15m MACD
+                        if (data.realIndicators.macd15m) {
+                            const macdState = data.realIndicators.macd15m;
+                            const macdStatusEl = document.getElementById('ui-macd-status');
+                            macdStatusEl.textContent = macdState;
+                            if (macdState.includes('金叉')) {
+                                macdStatusEl.className = 'text-sm text-green font-bold';
+                                macdStatusEl.innerHTML = '<i class="fa-solid fa-arrow-trend-up mr-1"></i>' + macdState;
+                            } else if (macdState.includes('死叉')) {
+                                macdStatusEl.className = 'text-sm text-red font-bold';
+                                macdStatusEl.innerHTML = '<i class="fa-solid fa-arrow-trend-down mr-1"></i>' + macdState;
+                            } else {
+                                macdStatusEl.className = 'text-sm text-gray-500 font-bold';
+                            }
+                        }
+
+                        // 渲染 1m MTF
                         if (data.realIndicators.mtf1m) {
                             const mtfState = data.realIndicators.mtf1m;
                             const mtfBox = document.getElementById('ui-mtf-box');
@@ -626,7 +663,12 @@
                 const price = parseFloat(data.p);
                 const qty = parseFloat(data.q);
                 const isSell = data.m;
-                currentPrice = price;
+                
+                // Only update and render if price actually changes or we need to init
+                if (currentPrice !== price) {
+                    currentPrice = price;
+                    renderUI(); // 触发价格在界面上的更新
+                }
 
                 const tickSize = 10;
                 const level = Math.floor(price / tickSize) * tickSize;
@@ -673,8 +715,6 @@
             document.getElementById('ui-buy-vpoc-bar').style.width = (maxBuyVol / maxVol * 100) + '%';
             document.getElementById('ui-sell-vpoc-bar').style.width = (maxSellVol / maxVol * 100) + '%';
             
-            document.getElementById('current-price').textContent = currentPrice.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-            
             // Render Dynamic Ambush Zones based on recent volume profile
             if (globalVolumeProfile.size > 5) {
                 // Find absolute max volume node as Naked vPOC
@@ -720,6 +760,15 @@
                 botBtn.className = 'flex items-center gap-2 px-4 py-2 bg-red-dim border border-red-500 hover:bg-red-500/20 rounded text-red text-sm font-bold transition-colors cursor-pointer';
                 botDot.className = 'w-2 h-2 rounded-full bg-red-500';
                 botText.textContent = '自动交易已停止';
+            }
+
+            // Render Price
+            if (currentPrice > 0) {
+                document.getElementById('current-price').textContent = currentPrice.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+                document.getElementById('current-price').className = 'font-mono text-xl text-green font-bold';
+            } else {
+                document.getElementById('current-price').textContent = '--';
+                document.getElementById('current-price').className = 'font-mono text-xl text-gray-400';
             }
 
             // Render State

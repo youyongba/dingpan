@@ -119,9 +119,13 @@ router.get('/status', (req, res) => {
   try {
     if (regimeModule && typeof regimeModule.getState === 'function') {
         const regimeState = regimeModule.getState();
-        // 尝试从 regimeState 中提取
-        if (regimeState && regimeState.lastPrice) {
-            // 这里我们尽量简化，如果没有暴露具体指标数值，就直接在前端暂时只依赖后端推送的状态位
+        if (regimeState) {
+            // 尝试从 regimeState 中提取 RSI 和 MACD (从 regimes 对象中)
+            if (regimeState.regimes && regimeState.regimes['15m']) {
+                const r15m = regimeState.regimes['15m'];
+                realIndicators.rsi15m = r15m.rsi;
+                realIndicators.macd15m = r15m.macdState;
+            }
         }
     }
     if (mtfModule && typeof mtfModule.getLatestResult === 'function') {
