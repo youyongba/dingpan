@@ -27,9 +27,11 @@ const router = express.Router();
 
 let config = {
   tradeMode: 'spot', // 'spot' or 'futures'
+  tradeDirection: 'long', // 'long' or 'short' (永续合约专属)
   leverage: 100,
   positionSizePct: 3.0,
-  rsiThreshold: 30,
+  rsiThreshold: 30, // 做多超卖阈值
+  rsiOverboughtThreshold: 70, // 做空超买阈值
   requireMacd: true,
   signalWindow: 12,
   triggerDelta: true,

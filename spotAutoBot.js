@@ -135,28 +135,46 @@ function startBotLoop(getEngineConfig, getEngineState) {
         }
 
         // --- B. 状态机时序流转 ---
-        // 1. RSI 曾超卖
-        if (rsi !== null && rsi < config.rsiThreshold) botSignalState.rsiHitTime = now;
+        const isLong = config.tradeDirection !== 'short';
+
+        // 1. RSI 曾超卖(做多) / 曾超买(做空)
+        if (rsi !== null) {
+            if (isLong && rsi < config.rsiThreshold) botSignalState.rsiHitTime = now;
+            if (!isLong && rsi > (config.rsiOverboughtThreshold || 70)) botSignalState.rsiHitTime = now;
+        }
+
         if (now - botSignalState.rsiHitTime > windowMs) {
             botSignalState.rsiHitTime = 0;
             botSignalState.macdHitTime = 0;
         }
 
-        // 2. MACD 曾金叉
-        if (botSignalState.rsiHitTime > 0 && macdState === '金叉') botSignalState.macdHitTime = now;
+        // 2. MACD 曾金叉(做多) / 曾死叉(做空)
+        if (botSignalState.rsiHitTime > 0) {
+            if (isLong && macdState === '金叉') botSignalState.macdHitTime = now;
+            if (!isLong && macdState === '死叉') botSignalState.macdHitTime = now;
+        }
 
         // 3. 判断大周期环境是否就绪
         let ready = config.requireMacd ? (botSignalState.rsiHitTime > 0 && botSignalState.macdHitTime > 0) : (botSignalState.rsiHitTime > 0);
         
-        // --- C. 微观扳机扣动 (真实买入) ---
+        // --- C. 微观扳机扣动 (真实买入/做空) ---
         if (ready && (now - botSignalState.lastDcaTime > 15 * 60 * 1000)) { // 15分钟冷却防抖
-            let triggerMtfFired = config.triggerMtf && mtfState && mtfState.includes('强多');
-            let triggerDeltaFired = config.triggerDelta && (currentMinuteDelta > 0 && Math.abs(deltaUsdt) > config.deltaThreshold);
+            let triggerMtfFired = false;
+            let triggerDeltaFired = false;
+
+            if (isLong) {
+                triggerMtfFired = config.triggerMtf && mtfState && mtfState.includes('强多');
+                triggerDeltaFired = config.triggerDelta && (currentMinuteDelta > 0 && Math.abs(deltaUsdt) > config.deltaThreshold);
+            } else {
+                triggerMtfFired = config.triggerMtf && mtfState && mtfState.includes('强空');
+                triggerDeltaFired = config.triggerDelta && (currentMinuteDelta < 0 && Math.abs(deltaUsdt) > config.deltaThreshold);
+            }
 
             if (triggerMtfFired || triggerDeltaFired) {
                 botSignalState.isExecuting = true;
                 try {
-                    const logMsg = `[AutoBot] 触发加仓! (MTF:${triggerMtfFired}, Delta:${triggerDeltaFired})`;
+                    const actionLabel = isLong ? '买入(做多)' : '卖出(做空)';
+                    const logMsg = `[AutoBot] 触发${actionLabel}! (MTF:${triggerMtfFired}, Delta:${triggerDeltaFired})`;
                     console.log(logMsg);
                     
                     // 根据模式发送请求
@@ -177,11 +195,13 @@ function startBotLoop(getEngineConfig, getEngineState) {
                         
                         if (qtyToBuy < 0.001) throw new Error(`仓位太小, 计算数量: ${qtyToBuy} BTC, 最小需 0.001 BTC`);
                         
-                        const res = await executeFuturesOrder('BUY', qtyToBuy);
+                        const side = isLong ? 'BUY' : 'SELL';
+                        const res = await executeFuturesOrder(side, qtyToBuy);
                         executedQty = parseFloat(res.executedQty || qtyToBuy);
                         // 合约接口返回的是 cumQuoteQty 可能为空或0, 估算一下
                         cumQuote = res.cumQuoteQty ? parseFloat(res.cumQuoteQty) : executedQty * currentPrice;
                     } else {
+                        if (!isLong) throw new Error('现货模式不支持做空!');
                         // 现货模式
                         const res = await executeRealOrder('BUY', null, config.dcaAmount);
                         executedQty = parseFloat(res.executedQty);
@@ -196,15 +216,15 @@ function startBotLoop(getEngineConfig, getEngineState) {
                     state.totalCoinAmount += executedQty;
                     state.averagePrice = state.totalUsdtAmount / state.totalCoinAmount;
                     
-                    state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 真实买入: ${cumQuote.toFixed(2)} USDT @ ${avgP.toFixed(2)}`);
+                    state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 真实${actionLabel}: ${cumQuote.toFixed(2)} USDT @ ${avgP.toFixed(2)}`);
                     
                     botSignalState.lastDcaTime = now;
                     botSignalState.rsiHitTime = 0; // 消耗掉大周期信号，需要重新孕育
                     botSignalState.macdHitTime = 0;
                 } catch (e) {
                     const errorMsg = e.response ? JSON.stringify(e.response.data) : e.message;
-                    console.error('[SpotAutoBot] BUY Error:', errorMsg);
-                    state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 真实买入失败: ${errorMsg}`);
+                    console.error('[SpotAutoBot] Action Error:', errorMsg);
+                    state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 真实操作失败: ${errorMsg}`);
                 } finally {
                     botSignalState.isExecuting = false;
                 }
@@ -214,9 +234,18 @@ function startBotLoop(getEngineConfig, getEngineState) {
         // --- D. 真实止盈/止损抛售 (TP / SL) ---
         if (state.totalCoinAmount > 0 && state.averagePrice > 0) {
             const avgP = state.averagePrice;
-            const tp1Price = state.customTp1Price || (avgP * (1 + (config.tp1Target || 1.5) / 100));
-            const tp2Price = state.customTp2Price || (avgP * (1 + (config.tp2Target || 3.0) / 100));
-            const tp3Price = state.customTp3Price || (avgP * (1 + (config.tp3Target || 5.0) / 100));
+            
+            let tp1Price, tp2Price, tp3Price;
+            if (isLong) {
+                tp1Price = state.customTp1Price || (avgP * (1 + (config.tp1Target || 1.5) / 100));
+                tp2Price = state.customTp2Price || (avgP * (1 + (config.tp2Target || 3.0) / 100));
+                tp3Price = state.customTp3Price || (avgP * (1 + (config.tp3Target || 5.0) / 100));
+            } else {
+                // 做空止盈：价格下跌
+                tp1Price = state.customTp1Price || (avgP * (1 - (config.tp1Target || 1.5) / 100));
+                tp2Price = state.customTp2Price || (avgP * (1 - (config.tp2Target || 3.0) / 100));
+                tp3Price = state.customTp3Price || (avgP * (1 - (config.tp3Target || 5.0) / 100));
+            }
             
             // 根据模式处理精度
             const floorVol = (vol) => {
@@ -228,21 +257,22 @@ function startBotLoop(getEngineConfig, getEngineState) {
             };
             
             // 辅助函数: 卖出特定数量，并更新状态
-            const executeSell = async (sellQty, label) => {
-                if (sellQty <= 0) return false;
+            const executeClose = async (closeQty, label) => {
+                if (closeQty <= 0) return false;
                 botSignalState.isExecuting = true;
                 try {
                     let cumQuote = 0;
                     if (config.tradeMode === 'futures') {
-                        const res = await executeFuturesOrder('SELL', sellQty);
-                        cumQuote = res.cumQuoteQty ? parseFloat(res.cumQuoteQty) : sellQty * currentPrice;
+                        const side = isLong ? 'SELL' : 'BUY';
+                        const res = await executeFuturesOrder(side, closeQty);
+                        cumQuote = res.cumQuoteQty ? parseFloat(res.cumQuoteQty) : closeQty * currentPrice;
                     } else {
-                        const res = await executeRealOrder('SELL', sellQty, null);
+                        const res = await executeRealOrder('SELL', closeQty, null);
                         cumQuote = parseFloat(res.cummulativeQuoteQty);
                     }
                     
-                    state.totalCoinAmount -= sellQty;
-                    state.totalUsdtAmount -= sellQty * avgP;
+                    state.totalCoinAmount -= closeQty;
+                    state.totalUsdtAmount -= closeQty * avgP;
                     if (state.totalCoinAmount < 0.00001) { // 极小残留视为清仓
                         state.totalCoinAmount = 0;
                         state.totalUsdtAmount = 0;
@@ -252,7 +282,8 @@ function startBotLoop(getEngineConfig, getEngineState) {
                         state.averagePrice = state.totalUsdtAmount / state.totalCoinAmount;
                     }
                     
-                    state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 真实${label}卖出: ${sellQty} BTC (获 ${cumQuote.toFixed(2)})`);
+                    const actionName = isLong ? '卖出平多' : '买入平空';
+                    state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 真实${label} ${actionName}: ${closeQty} BTC (获 ${cumQuote.toFixed(2)})`);
                     return true;
                 } catch (e) {
                     const errorMsg = e.response ? JSON.stringify(e.response.data) : e.message;
@@ -265,31 +296,33 @@ function startBotLoop(getEngineConfig, getEngineState) {
             };
 
             // TP1
-            if (!state.tp1Fired && currentPrice >= tp1Price && !botSignalState.isExecuting) {
-                const sellQty = floorVol(state.totalCoinAmount * (config.tp1 / 100));
-                if (await executeSell(sellQty, 'TP1')) state.tp1Fired = true;
+            const hitTp1 = isLong ? (currentPrice >= tp1Price) : (currentPrice <= tp1Price);
+            if (!state.tp1Fired && hitTp1 && !botSignalState.isExecuting) {
+                const closeQty = floorVol(state.totalCoinAmount * (config.tp1 / 100));
+                if (await executeClose(closeQty, 'TP1')) state.tp1Fired = true;
             }
             // TP2
-            else if (state.tp1Fired && !state.tp2Fired && currentPrice >= tp2Price && !botSignalState.isExecuting) {
-                // 因为 TP1 已经扣减了 totalCoinAmount，剩余仓位的对应比例需要重新计算。
-                // 默认 50/30/20 策略，打掉 50 后，剩 50。TP2 应该占原始的 30%，也就是当前剩下的 60% (30/50)。
+            const hitTp2 = isLong ? (currentPrice >= tp2Price) : (currentPrice <= tp2Price);
+            else if (state.tp1Fired && !state.tp2Fired && hitTp2 && !botSignalState.isExecuting) {
                 const remainingRatio = config.tp2 / (config.tp2 + config.tp3);
-                const sellQty = floorVol(state.totalCoinAmount * remainingRatio);
-                if (await executeSell(sellQty, 'TP2')) state.tp2Fired = true;
+                const closeQty = floorVol(state.totalCoinAmount * remainingRatio);
+                if (await executeClose(closeQty, 'TP2')) state.tp2Fired = true;
             }
             // TP3
-            else if (state.tp2Fired && !state.tp3Fired && currentPrice >= tp3Price && !botSignalState.isExecuting) {
-                const sellQty = floorVol(state.totalCoinAmount); // 全抛
-                if (await executeSell(sellQty, 'TP3')) {
+            const hitTp3 = isLong ? (currentPrice >= tp3Price) : (currentPrice <= tp3Price);
+            else if (state.tp2Fired && !state.tp3Fired && hitTp3 && !botSignalState.isExecuting) {
+                const closeQty = floorVol(state.totalCoinAmount); // 全抛
+                if (await executeClose(closeQty, 'TP3')) {
                     state.tp3Fired = true;
                     // 清仓重置标记
                     state.tp1Fired = false; state.tp2Fired = false; state.tp3Fired = false;
                 }
             }
-            // 保本止损 SL (仅在 TP1 触发后激活，跌破均价抛售剩余全部)
-            else if (state.tp1Fired && config.breakevenSl && currentPrice <= avgP && !botSignalState.isExecuting) {
-                const sellQty = floorVol(state.totalCoinAmount);
-                if (await executeSell(sellQty, '保本止损')) {
+            // 保本止损 SL (仅在 TP1 触发后激活)
+            const hitSl = isLong ? (currentPrice <= avgP) : (currentPrice >= avgP);
+            else if (state.tp1Fired && config.breakevenSl && hitSl && !botSignalState.isExecuting) {
+                const closeQty = floorVol(state.totalCoinAmount);
+                if (await executeClose(closeQty, '保本止损')) {
                     state.tp1Fired = false; state.tp2Fired = false; state.tp3Fired = false;
                 }
             }

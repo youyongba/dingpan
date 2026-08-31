@@ -287,7 +287,14 @@
                     <!-- Futures Config Section -->
                     <div id="cfg-futures-section" class="hidden">
                         <h3 class="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4 border-l-2 border-yellow-500 pl-2">永续合约专属参数</h3>
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 bg-yellow-900/10 p-4 rounded border border-yellow-900/30">
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 bg-yellow-900/10 p-4 rounded border border-yellow-900/30">
+                            <div>
+                                <label class="block text-sm text-gray-300 mb-1">交易方向 (Direction)</label>
+                                <select id="cfg-trade-direction" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white focus:outline-none focus:border-yellow-500">
+                                    <option value="long">做多 (Long)</option>
+                                    <option value="short">做空 (Short)</option>
+                                </select>
+                            </div>
                             <div>
                                 <label class="block text-sm text-gray-300 mb-1">杠杆倍数 (Leverage)</label>
                                 <div class="flex items-center">
@@ -313,25 +320,31 @@
                         <div class="mb-5 p-3 bg-gray-800 rounded border border-gray-700 text-sm">
                             <div class="text-gray-400 mb-2 font-bold">信号触发逻辑时序：</div>
                             <div class="flex items-center gap-2 text-xs">
-                                <span class="bg-purple-900/50 text-purple-300 px-2 py-1 rounded">1. RSI曾超卖</span>
+                                <span class="bg-purple-900/50 text-purple-300 px-2 py-1 rounded">1. RSI曾超卖/超买</span>
                                 <i class="fa-solid fa-arrow-right text-gray-600"></i>
-                                <span class="bg-purple-900/50 text-purple-300 px-2 py-1 rounded">2. MACD曾金叉</span>
+                                <span class="bg-purple-900/50 text-purple-300 px-2 py-1 rounded">2. MACD曾金叉/死叉</span>
                                 <i class="fa-solid fa-arrow-right text-gray-600"></i>
                                 <span class="bg-blue-900/50 text-blue-300 px-2 py-1 rounded">3. 激活微观扳机监控</span>
                             </div>
-                            <div class="text-gray-500 mt-2 text-xs">注：大周期只需“发生过”即可进入准备状态，随后耐心等待 1m 微观扳机扣动。</div>
+                            <div class="text-gray-500 mt-2 text-xs">注：大周期只需“发生过”即可进入准备状态，随后耐心等待 1m 微观扳机扣动。做空逻辑与之相反。</div>
                         </div>
 
                         <div class="grid grid-cols-1 gap-4">
-                            <div>
-                                <label class="block text-sm text-gray-300 mb-1">RSI 超卖阈值 (14周期)</label>
-                                <input type="number" id="cfg-rsi-threshold" value="30" class="w-full md:w-1/2 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500">
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-sm text-gray-300 mb-1">做多 RSI 超卖阈值</label>
+                                    <input type="number" id="cfg-rsi-threshold" value="30" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-sm text-gray-300 mb-1">做空 RSI 超买阈值</label>
+                                    <input type="number" id="cfg-rsi-overbought-threshold" value="70" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white focus:outline-none focus:border-red-500">
+                                </div>
                             </div>
                             <div class="flex items-center mt-2">
                                 <label class="flex items-center cursor-pointer">
                                     <input type="checkbox" id="cfg-macd-require" checked class="hidden peer">
                                     <div class="w-10 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-purple-500 relative"></div>
-                                    <span class="ml-3 text-sm text-gray-300">强制要求曾出现 15m MACD 金叉</span>
+                                    <span class="ml-3 text-sm text-gray-300">强制要求曾出现 15m MACD 金叉(做多)/死叉(做空)</span>
                                 </label>
                             </div>
                             
@@ -1067,11 +1080,13 @@
         function openConfig() {
             modal.classList.remove('hidden');
             // Populate form with currentConfig
+            if (document.getElementById('cfg-trade-direction')) document.getElementById('cfg-trade-direction').value = currentConfig.tradeDirection || 'long';
             document.getElementById('cfg-leverage').value = currentConfig.leverage || 100;
             document.getElementById('cfg-position-size').value = currentConfig.positionSizePct || 3.0;
             setTradeMode(currentConfig.tradeMode || 'spot');
             
             document.getElementById('cfg-rsi-threshold').value = currentConfig.rsiThreshold;
+            if (document.getElementById('cfg-rsi-overbought-threshold')) document.getElementById('cfg-rsi-overbought-threshold').value = currentConfig.rsiOverboughtThreshold || 70;
             document.getElementById('cfg-macd-require').checked = currentConfig.requireMacd;
             document.getElementById('cfg-trigger-delta').checked = currentConfig.triggerDelta;
             document.getElementById('cfg-trigger-mtf').checked = currentConfig.triggerMtf;
@@ -1141,9 +1156,11 @@
         }
 
         async function saveConfig() {
+            const tradeDirection = document.getElementById('cfg-trade-direction').value || 'long';
             const leverage = parseInt(document.getElementById('cfg-leverage').value) || 100;
             const positionSizePct = parseFloat(document.getElementById('cfg-position-size').value) || 3.0;
             const rsiThreshold = parseInt(document.getElementById('cfg-rsi-threshold').value);
+            const rsiOverboughtThreshold = parseInt(document.getElementById('cfg-rsi-overbought-threshold').value) || 70;
             const requireMacd = document.getElementById('cfg-macd-require').checked;
             const triggerDelta = document.getElementById('cfg-trigger-delta').checked;
             const triggerMtf = document.getElementById('cfg-trigger-mtf').checked;
@@ -1168,8 +1185,8 @@
             }
 
             const payload = {
-                tradeMode: currentTradeMode, leverage, positionSizePct,
-                rsiThreshold, requireMacd, triggerDelta, triggerMtf, deltaThreshold,
+                tradeMode: currentTradeMode, tradeDirection, leverage, positionSizePct,
+                rsiThreshold, rsiOverboughtThreshold, requireMacd, triggerDelta, triggerMtf, deltaThreshold,
                 tp1, tp2, tp3, tp1Target, tp2Target, tp3Target, dcaAmount, breakevenSl, autoLoop
             };
 
@@ -1181,16 +1198,30 @@
                 });
                 
                 // Apply to UI
-                document.getElementById('ui-rsi-label').innerHTML = `RSI (14) <span class="text-gray-500 text-xs">曾 &lt; ${rsiThreshold} 触发</span>`;
-                if (requireMacd) {
-                    document.getElementById('ui-macd-status').innerHTML = `<i class="fa-solid fa-arrow-trend-up mr-1"></i>曾金叉确认`;
+                if (tradeDirection === 'short' && currentTradeMode === 'futures') {
+                    document.getElementById('ui-rsi-label').innerHTML = `RSI (14) <span class="text-gray-500 text-xs">曾 &gt; ${rsiOverboughtThreshold} 触发(做空)</span>`;
+                    if (requireMacd) {
+                        document.getElementById('ui-macd-status').innerHTML = `<i class="fa-solid fa-arrow-trend-down mr-1"></i>曾死叉确认`;
+                    } else {
+                        document.getElementById('ui-macd-status').innerHTML = `<span class="text-gray-500 font-normal">未强制要求</span>`;
+                    }
+                    if (triggerDelta) {
+                        document.getElementById('ui-delta-label').innerHTML = `1m Delta 净值 <span class="text-xs">(做空阈值: < -${(deltaThreshold / 1000000).toFixed(1)}M USDT)</span>`;
+                    } else {
+                        document.getElementById('ui-delta-label').innerHTML = `1m Delta 净值 <span class="text-xs text-gray-500">(已忽略此条件)</span>`;
+                    }
                 } else {
-                    document.getElementById('ui-macd-status').innerHTML = `<span class="text-gray-500 font-normal">未强制要求</span>`;
-                }
-                if (triggerDelta) {
-                    document.getElementById('ui-delta-label').innerHTML = `1m Delta 净值 <span class="text-xs">(阈值: > ${(deltaThreshold / 1000000).toFixed(1)}M USDT)</span>`;
-                } else {
-                    document.getElementById('ui-delta-label').innerHTML = `1m Delta 净值 <span class="text-xs text-gray-500">(已忽略此条件)</span>`;
+                    document.getElementById('ui-rsi-label').innerHTML = `RSI (14) <span class="text-gray-500 text-xs">曾 &lt; ${rsiThreshold} 触发(做多)</span>`;
+                    if (requireMacd) {
+                        document.getElementById('ui-macd-status').innerHTML = `<i class="fa-solid fa-arrow-trend-up mr-1"></i>曾金叉确认`;
+                    } else {
+                        document.getElementById('ui-macd-status').innerHTML = `<span class="text-gray-500 font-normal">未强制要求</span>`;
+                    }
+                    if (triggerDelta) {
+                        document.getElementById('ui-delta-label').innerHTML = `1m Delta 净值 <span class="text-xs">(做多阈值: > ${(deltaThreshold / 1000000).toFixed(1)}M USDT)</span>`;
+                    } else {
+                        document.getElementById('ui-delta-label').innerHTML = `1m Delta 净值 <span class="text-xs text-gray-500">(已忽略此条件)</span>`;
+                    }
                 }
                 document.getElementById('ui-tp1-label').textContent = `TP1 (${tp1}%)`;
                 document.getElementById('ui-tp2-label').textContent = `TP2 (${tp2}%)`;
