@@ -84,9 +84,19 @@ async function fetchSpotBalance() {
       const btc = res.data.balances.find(b => b.asset === 'BTC');
       if (usdt) state.spotBalanceUsdt = parseFloat(usdt.free);
       if (btc) state.spotBalanceBtc = parseFloat(btc.free);
+      console.log(`[SpotDCA] Balance fetched successfully. USDT: ${state.spotBalanceUsdt}, BTC: ${state.spotBalanceBtc}`);
     }
   } catch (error) {
-    console.error('[SpotDCA] Failed to fetch spot balance:', error.response?.data || error.message);
+    if (error.response) {
+      // 币安服务器有响应，但返回了错误状态码 (400, 401, 403 等)
+      console.error('[SpotDCA] Binance API Error (Server Responded):', error.response.status, error.response.data);
+    } else if (error.request) {
+      // 请求发出去了，但没收到响应 (通常是网络不通、代理配置错误或超时)
+      console.error('[SpotDCA] Network/Proxy Error (No Response):', error.message);
+      console.error('[SpotDCA] Request config:', { url: error.config.url, proxy: !!error.config.httpAgent });
+    } else {
+      console.error('[SpotDCA] Unexpected Error:', error.message);
+    }
   }
 }
 
