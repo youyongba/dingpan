@@ -1204,7 +1204,7 @@
             
             const isFutures = currentTradeMode === 'futures';
             
-            // 现货模式向下取整百，合约模式向下取整到个位 (名义价值精度更高)
+            // 现货模式向下取整百，合约模式向下取整到个位
             if (isFutures) {
                 baseAmount = Math.floor(baseAmount);
             } else {
@@ -1217,11 +1217,13 @@
             
             let planHtml = '';
             if (isFutures) {
-                planHtml = `<div class="font-bold text-yellow-500 mb-1">计算完成！(合约模式后端自动计算)</div>`;
+                planHtml = `<div class="font-bold text-yellow-500 mb-1">计算完成！(合约模式后端自动分配)</div>`;
+                planHtml += `<div class="mb-2">基于总保证金 ${capital} U，分 ${steps} 次加仓规划 (展示为真实成本)：</div>`;
             } else {
                 planHtml = `<div class="font-bold text-green mb-1">计算完成！已将现货首仓金额设为 ${baseAmount} USDT</div>`;
+                planHtml += `<div class="mb-2">基于总现货资金 ${capital} U，分 ${steps} 次加仓规划：</div>`;
             }
-            planHtml += `<div class="mb-2">基于总名义资金 ${capital} U，分 ${steps} 次加仓规划：</div>`;
+            
             planHtml += `<ul class="list-disc pl-4 space-y-1">`;
             
             let currentAmount = baseAmount;
