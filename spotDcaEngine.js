@@ -5,6 +5,8 @@ const path = require('path');
 const mtfModule = require('./mtfModule');
 const regimeModule = require('./regimeModule');
 
+const { startBotLoop, executeRealOrder } = require('./spotAutoBot');
+
 // 强制使用绝对路径加载 .env，防止 PM2 工作目录 (cwd) 偏移导致找不到文件
 const envPath = path.resolve(__dirname, '.env');
 const envResult = require('dotenv').config({ path: envPath });
@@ -24,6 +26,9 @@ console.log('=====================================================\n');
 const router = express.Router();
 
 let config = {
+  tradeMode: 'spot', // 'spot' or 'futures'
+  leverage: 100,
+  positionSizePct: 3.0,
   rsiThreshold: 30,
   requireMacd: true,
   signalWindow: 12,
@@ -57,61 +62,66 @@ let state = {
   enabled: true,
   isBotRunning: false, // 机器人主开关
   spotBalanceUsdt: 0, // 现货 USDT 余额
-  spotBalanceBtc: 0   // 现货 BTC 余额
+  spotBalanceBtc: 0,   // 现货 BTC 余额
+  futuresBalanceUsdt: 0 // 永续合约 USDT 余额
 };
 
 // 币安现货 API 密钥 (需在环境变量中配置)，加入 trim() 防止不可见换行符或空格干扰
-const SPOT_API_KEY = (process.env.BINANCE_SPOT_API_KEY || '').trim();
-const SPOT_API_SECRET = (process.env.BINANCE_SPOT_API_SECRET || '').trim();
+const SPOT_API_KEY = (process.env.BINANCE_SPOT_API_KEY || process.env.BINANCE_API_KEY || '').trim();
+const SPOT_API_SECRET = (process.env.BINANCE_SPOT_API_SECRET || process.env.BINANCE_API_SECRET || '').trim();
 
 // 引入全局的代理配置 (复用主程序的代理)
 const { httpAgent, httpsAgent } = require('./lib/httpAgents');
 
-// 获取现货账户余额
-async function fetchSpotBalance() {
+// 获取账户余额 (包含现货与合约)
+async function fetchBalances() {
   if (!SPOT_API_KEY || !SPOT_API_SECRET) {
-      console.log('[SpotDCA] Missing Binance Spot API keys in .env (BINANCE_SPOT_API_KEY/BINANCE_SPOT_API_SECRET). Using mock balance.');
+      console.log('[SpotDCA] Missing Binance API keys in .env. Using mock balance.');
       state.spotBalanceUsdt = 50000;
       state.spotBalanceBtc = 0.5;
+      state.futuresBalanceUsdt = 10000;
       return;
   }
+  
+  const timestamp = Date.now();
+  const queryString = `recvWindow=60000&timestamp=${timestamp}`;
+  const signature = crypto.createHmac('sha256', SPOT_API_SECRET).update(queryString).digest('hex');
+
+  // 1. 获取现货余额
   try {
-    const timestamp = Date.now();
-    // 增加 recvWindow 放宽时间戳校验窗口到 60 秒，防止本地服务器时间与币安服务器时间有微小偏差
-    const queryString = `recvWindow=60000&timestamp=${timestamp}`;
-    const signature = crypto.createHmac('sha256', SPOT_API_SECRET).update(queryString).digest('hex');
-    const url = `https://api.binance.com/api/v3/account?${queryString}&signature=${signature}`;
-    
-    const res = await axios.get(url, {
+    const spotUrl = `https://api.binance.com/api/v3/account?${queryString}&signature=${signature}`;
+    const spotRes = await axios.get(spotUrl, {
       headers: { 'X-MBX-APIKEY': SPOT_API_KEY },
-      httpAgent, 
-      httpsAgent
+      httpAgent, httpsAgent
     });
-    
-    if (res.data && res.data.balances) {
-      const usdt = res.data.balances.find(b => b.asset === 'USDT');
-      const btc = res.data.balances.find(b => b.asset === 'BTC');
+    if (spotRes.data && spotRes.data.balances) {
+      const usdt = spotRes.data.balances.find(b => b.asset === 'USDT');
+      const btc = spotRes.data.balances.find(b => b.asset === 'BTC');
       if (usdt) state.spotBalanceUsdt = parseFloat(usdt.free);
       if (btc) state.spotBalanceBtc = parseFloat(btc.free);
-      console.log(`[SpotDCA] Balance fetched successfully. USDT: ${state.spotBalanceUsdt}, BTC: ${state.spotBalanceBtc}`);
     }
   } catch (error) {
-    if (error.response) {
-      // 币安服务器有响应，但返回了错误状态码 (400, 401, 403 等)
-      console.error('[SpotDCA] Binance API Error (Server Responded):', error.response.status, error.response.data);
-    } else if (error.request) {
-      // 请求发出去了，但没收到响应 (通常是网络不通、代理配置错误或超时)
-      console.error('[SpotDCA] Network/Proxy Error (No Response):', error.message);
-      console.error('[SpotDCA] Request config:', { url: error.config.url, proxy: !!error.config.httpAgent });
-    } else {
-      console.error('[SpotDCA] Unexpected Error:', error.message);
+    console.error('[SpotDCA] Spot Balance Error:', error.message);
+  }
+
+  // 2. 获取合约余额
+  try {
+    const futuresUrl = `https://fapi.binance.com/fapi/v2/account?${queryString}&signature=${signature}`;
+    const futuresRes = await axios.get(futuresUrl, {
+      headers: { 'X-MBX-APIKEY': SPOT_API_KEY },
+      httpAgent, httpsAgent
+    });
+    if (futuresRes.data && futuresRes.data.availableBalance) {
+      state.futuresBalanceUsdt = parseFloat(futuresRes.data.availableBalance);
     }
+  } catch (error) {
+    console.error('[SpotDCA] Futures Balance Error:', error.message);
   }
 }
 
 // 启动时和每隔一段时间拉取一次余额
-fetchSpotBalance();
-setInterval(fetchSpotBalance, 60000);
+fetchBalances();
+setInterval(fetchBalances, 60000);
 
 // 全局缓存宏观固化 vPOC 数据
 let macroVpocData = { vpoc: null, vah: null, val: null, updatedAt: 0 };
@@ -243,27 +253,77 @@ router.post('/config', express.json(), (req, res) => {
   res.json({ ok: true, config });
 });
 
-router.post('/override', express.json(), (req, res) => {
+router.post('/override', express.json(), async (req, res) => {
   const { action, amount, price } = req.body;
-  const logMsg = `[Override] ${action} ${amount || ''} ${price ? '@ ' + price : ''}`;
+  const logMsg = `[Override] 强制发起 ${action} ${amount || ''}`;
   state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] ` + logMsg);
   if (state.logs.length > 20) state.logs.pop();
   
-  if (action === 'market-buy' || action === 'limit-buy') {
-    state.activeDcaCount++;
-    const amt = parseFloat(amount);
-    const p = parseFloat(price) || 64230; // fallback mock
-    state.totalUsdtAmount += amt;
-    state.totalCoinAmount += amt / p;
-    state.averagePrice = state.totalUsdtAmount / state.totalCoinAmount;
+  if (action === 'market-buy') {
+    try {
+      let amt = parseFloat(amount);
+      let executedQty = 0;
+      let cumQuote = 0;
+      
+      if (config.tradeMode === 'futures') {
+        // override amount 为 U。但在永续中，通常 amount 代表 USDT
+        // 手动干预如果填了 3000，意思是拿 3000 保证金吗？还是合约名义价值？
+        // 假设 amount 框里填写的是“名义价值(U)”，方便和现货统一。
+        if (!amt || amt <= 0) throw new Error('无效的买入金额');
+        const { executeFuturesOrder } = require('./spotAutoBot');
+        const currentPrice = state.averagePrice > 0 ? state.averagePrice : 60000; // 粗略 fallback
+        let qtyToBuy = Math.floor((amt / currentPrice) * 1000) / 1000;
+        if (qtyToBuy < 0.001) throw new Error(`数量太小: ${qtyToBuy}`);
+        
+        const orderRes = await executeFuturesOrder('BUY', qtyToBuy);
+        executedQty = parseFloat(orderRes.executedQty || qtyToBuy);
+        cumQuote = orderRes.cumQuoteQty ? parseFloat(orderRes.cumQuoteQty) : executedQty * currentPrice;
+      } else {
+        if (!amt || amt <= 0) throw new Error('无效的买入金额');
+        const { executeRealOrder } = require('./spotAutoBot');
+        const orderRes = await executeRealOrder('BUY', null, amt);
+        executedQty = parseFloat(orderRes.executedQty);
+        cumQuote = parseFloat(orderRes.cummulativeQuoteQty);
+      }
+      
+      state.activeDcaCount++;
+      state.totalUsdtAmount += cumQuote;
+      state.totalCoinAmount += executedQty;
+      state.averagePrice = state.totalUsdtAmount / state.totalCoinAmount;
+      state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动买入成功: 获 ${executedQty} BTC`);
+    } catch (e) {
+      const errorMsg = e.response ? JSON.stringify(e.response.data) : e.message;
+      console.error('[Override Error] BUY failed:', errorMsg);
+      state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 买入失败: ${errorMsg}`);
+    }
   } else if (action === 'market-sell') {
-    state.activeDcaCount = 0;
-    state.totalUsdtAmount = 0;
-    state.totalCoinAmount = 0;
-    state.averagePrice = 0;
-    state.tp1Fired = false;
-    state.tp2Fired = false;
-    state.tp3Fired = false;
+    try {
+      if (state.totalCoinAmount > 0.00001) {
+        if (config.tradeMode === 'futures') {
+            const sellQty = Math.floor(state.totalCoinAmount * 1000) / 1000;
+            const { executeFuturesOrder } = require('./spotAutoBot');
+            await executeFuturesOrder('SELL', sellQty);
+            state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动合约清仓成功: 卖出 ${sellQty} BTC`);
+        } else {
+            // 向下取整精度，防止卖出超额
+            const sellQty = Math.floor(state.totalCoinAmount * 100000) / 100000;
+            const { executeRealOrder } = require('./spotAutoBot');
+            await executeRealOrder('SELL', sellQty, null);
+            state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动现货清仓成功: 卖出 ${sellQty} BTC`);
+        }
+      }
+      state.activeDcaCount = 0;
+      state.totalUsdtAmount = 0;
+      state.totalCoinAmount = 0;
+      state.averagePrice = 0;
+      state.tp1Fired = false;
+      state.tp2Fired = false;
+      state.tp3Fired = false;
+    } catch (e) {
+      const errorMsg = e.response ? JSON.stringify(e.response.data) : e.message;
+      console.error('[Override Error] SELL failed:', errorMsg);
+      state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 清仓失败: ${errorMsg}`);
+    }
   }
   
   res.json({ ok: true, state });
@@ -274,3 +334,6 @@ module.exports = {
   getConfig: () => config,
   getState: () => state
 };
+
+// 启动后端自动交易引擎 (传入获取状态的 getter)
+startBotLoop(module.exports.getConfig, module.exports.getState);

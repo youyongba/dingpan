@@ -274,6 +274,37 @@
             <div class="p-6 overflow-y-auto flex-1">
                 <form id="config-form" class="space-y-8">
                     
+                    <!-- Trading Mode Switcher -->
+                    <div class="flex p-1 bg-gray-900 rounded-lg border border-gray-700 w-fit mb-6">
+                        <button type="button" id="tab-mode-spot" onclick="setTradeMode('spot')" class="px-6 py-2 rounded-md text-sm font-bold transition-all bg-yellow-600 text-white shadow-lg">
+                            现货 (Spot)
+                        </button>
+                        <button type="button" id="tab-mode-futures" onclick="setTradeMode('futures')" class="px-6 py-2 rounded-md text-sm font-bold transition-all text-gray-400 hover:text-white">
+                            永续合约 (Futures)
+                        </button>
+                    </div>
+
+                    <!-- Futures Config Section -->
+                    <div id="cfg-futures-section" class="hidden">
+                        <h3 class="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4 border-l-2 border-yellow-500 pl-2">永续合约专属参数</h3>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 bg-yellow-900/10 p-4 rounded border border-yellow-900/30">
+                            <div>
+                                <label class="block text-sm text-gray-300 mb-1">杠杆倍数 (Leverage)</label>
+                                <div class="flex items-center">
+                                    <input type="number" id="cfg-leverage" value="100" min="1" max="125" class="w-full bg-gray-900 border border-gray-700 rounded-l px-3 py-2 text-white focus:outline-none focus:border-yellow-500">
+                                    <span class="bg-gray-800 border border-l-0 border-gray-700 px-3 py-2 rounded-r text-gray-400">x</span>
+                                </div>
+                            </div>
+                            <div>
+                                <label class="block text-sm text-gray-300 mb-1">单次开仓占比 (保证金 %)</label>
+                                <div class="flex items-center">
+                                    <input type="number" step="0.1" id="cfg-position-size" value="3.0" min="0.1" max="100" class="w-full bg-gray-900 border border-gray-700 rounded-l px-3 py-2 text-white focus:outline-none focus:border-yellow-500">
+                                    <span class="bg-gray-800 border border-l-0 border-gray-700 px-3 py-2 rounded-r text-gray-400">%</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- Section 1: Signal Engine -->
                     <div>
                         <h3 class="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4 border-l-2 border-purple-500 pl-2">大周期环境 (15m)</h3>
@@ -796,7 +827,19 @@
                 botText.textContent = '自动交易已停止';
             }
 
-            // Render Price
+            // Render Balance
+            const balanceEl = document.getElementById('ui-spot-balance');
+            if (currentConfig.tradeMode === 'futures') {
+                if (currentState.futuresBalanceUsdt !== undefined) {
+                    balanceEl.innerHTML = `<span class="text-gray-400 text-xs">U本位余额:</span> <span class="font-bold text-yellow-500">${currentState.futuresBalanceUsdt.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span> <span class="text-gray-500 text-xs">USDT</span>`;
+                    balanceEl.classList.remove('hidden');
+                }
+            } else {
+                if (currentState.spotBalanceUsdt !== undefined) {
+                    balanceEl.innerHTML = `<span class="text-gray-400 text-xs">现货余额:</span> <span class="font-bold text-green-500">${currentState.spotBalanceUsdt.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span> <span class="text-gray-500 text-xs">USDT</span>`;
+                    balanceEl.classList.remove('hidden');
+                }
+            }
             if (currentPrice > 0) {
                 document.getElementById('current-price').textContent = currentPrice.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
                 document.getElementById('current-price').className = 'font-mono text-xl text-green font-bold';
@@ -898,15 +941,7 @@
             // Render Balance
             const usdtBal = currentState.spotBalanceUsdt || 0;
             const btcBal = currentState.spotBalanceBtc || 0;
-            const balanceEl = document.getElementById('ui-spot-balance');
-            if (balanceEl) {
-                balanceEl.innerHTML = `
-                    <div class="flex items-center gap-4 text-xs">
-                        <div>USDT 余额: <span class="font-mono text-green">${usdtBal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span></div>
-                        <div>BTC 余额: <span class="font-mono text-blue-400">${btcBal.toFixed(4)}</span></div>
-                    </div>
-                `;
-            }
+            // Balance already rendered above based on mode.
             
             // Logs
             const logContainer = document.getElementById('ui-action-logs');
@@ -1007,9 +1042,35 @@
         // --- Configuration Logic ---
         const modal = document.getElementById('config-modal');
         
+        let currentTradeMode = 'spot';
+
+        function setTradeMode(mode) {
+            currentTradeMode = mode;
+            const btnSpot = document.getElementById('tab-mode-spot');
+            const btnFutures = document.getElementById('tab-mode-futures');
+            const futuresSection = document.getElementById('cfg-futures-section');
+            const dcaAmountSection = document.getElementById('cfg-dca-amount').closest('.grid > div');
+            
+            if (mode === 'spot') {
+                btnSpot.className = 'px-6 py-2 rounded-md text-sm font-bold transition-all bg-yellow-600 text-white shadow-lg';
+                btnFutures.className = 'px-6 py-2 rounded-md text-sm font-bold transition-all text-gray-400 hover:text-white';
+                futuresSection.classList.add('hidden');
+                dcaAmountSection.classList.remove('hidden');
+            } else {
+                btnFutures.className = 'px-6 py-2 rounded-md text-sm font-bold transition-all bg-yellow-600 text-white shadow-lg';
+                btnSpot.className = 'px-6 py-2 rounded-md text-sm font-bold transition-all text-gray-400 hover:text-white';
+                futuresSection.classList.remove('hidden');
+                dcaAmountSection.classList.add('hidden'); // 永续合约用百分比计算仓位，隐藏固定U数额
+            }
+        }
+
         function openConfig() {
             modal.classList.remove('hidden');
             // Populate form with currentConfig
+            document.getElementById('cfg-leverage').value = currentConfig.leverage || 100;
+            document.getElementById('cfg-position-size').value = currentConfig.positionSizePct || 3.0;
+            setTradeMode(currentConfig.tradeMode || 'spot');
+            
             document.getElementById('cfg-rsi-threshold').value = currentConfig.rsiThreshold;
             document.getElementById('cfg-macd-require').checked = currentConfig.requireMacd;
             document.getElementById('cfg-trigger-delta').checked = currentConfig.triggerDelta;
@@ -1080,6 +1141,8 @@
         }
 
         async function saveConfig() {
+            const leverage = parseInt(document.getElementById('cfg-leverage').value) || 100;
+            const positionSizePct = parseFloat(document.getElementById('cfg-position-size').value) || 3.0;
             const rsiThreshold = parseInt(document.getElementById('cfg-rsi-threshold').value);
             const requireMacd = document.getElementById('cfg-macd-require').checked;
             const triggerDelta = document.getElementById('cfg-trigger-delta').checked;
@@ -1105,6 +1168,7 @@
             }
 
             const payload = {
+                tradeMode: currentTradeMode, leverage, positionSizePct,
                 rsiThreshold, requireMacd, triggerDelta, triggerMtf, deltaThreshold,
                 tp1, tp2, tp3, tp1Target, tp2Target, tp3Target, dcaAmount, breakevenSl, autoLoop
             };
