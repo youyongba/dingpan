@@ -1,6 +1,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const axios = require('axios');
+require('dotenv').config(); // 确保在文件顶部显式加载 .env
 const router = express.Router();
 
 let config = {
