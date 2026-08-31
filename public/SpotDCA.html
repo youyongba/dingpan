@@ -840,21 +840,21 @@
             const dotShort = document.getElementById('ui-bot-dot-short');
             const textShort = document.getElementById('ui-bot-text-short');
             
-            // Show/Hide Short button based on mode
-            if (currentConfig.tradeMode === 'spot') {
-                btnShort.classList.add('hidden');
-                textLong.textContent = currentState.isLongBotRunning ? '▶ 自动现货交易运行中' : '▶ 启动自动现货交易';
-            } else {
-                btnShort.classList.remove('hidden');
-                textLong.textContent = currentState.isLongBotRunning ? '▶ 自动做多运行中' : '▶ 启动做多引擎';
-            }
-            
             if (currentState.isLongBotRunning) {
                 btnLong.className = 'flex items-center gap-2 px-3 py-2 bg-green-dim border border-green-500 hover:bg-green-500/20 rounded text-green text-sm font-bold transition-colors cursor-pointer';
                 dotLong.className = 'w-2 h-2 rounded-full bg-green-500 animate-pulse';
             } else {
                 btnLong.className = 'flex items-center gap-2 px-3 py-2 bg-gray-800 border border-gray-600 hover:bg-gray-700 rounded text-gray-400 text-sm font-bold transition-colors cursor-pointer';
                 dotLong.className = 'w-2 h-2 rounded-full bg-gray-500';
+            }
+
+            // Show/Hide Short button based on mode and override text for Long button
+            if (currentConfig.tradeMode === 'spot') {
+                btnShort.classList.add('hidden');
+                textLong.textContent = currentState.isLongBotRunning ? '▶ 自动现货交易运行中' : '▶ 启动自动现货交易';
+            } else {
+                btnShort.classList.remove('hidden');
+                textLong.textContent = currentState.isLongBotRunning ? '▶ 自动做多运行中' : '▶ 启动做多引擎';
             }
 
             if (currentState.isShortBotRunning) {
