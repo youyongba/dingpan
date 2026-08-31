@@ -563,8 +563,8 @@
                 </div>
 
                 <!-- Close All Warning -->
-                <div id="override-close-warning" class="hidden p-3 bg-orange-500/10 border border-orange-500/30 rounded text-sm text-orange-300 text-center">
-                    将以市价卖出当前全部 0.1500 BTC 现货仓位！
+                <div id="override-close-warning" class="hidden p-3 bg-orange-500/10 border border-orange-500/30 rounded text-sm text-orange-300 text-center font-bold">
+                    将以市价卖出当前全部仓位！
                 </div>
             </div>
 
@@ -1423,6 +1423,16 @@
                 priceContainer.classList.add('hidden');
                 amountContainer.classList.add('hidden');
                 closeWarning.classList.remove('hidden');
+                
+                const coinAmount = (currentState.totalCoinAmount || 0).toFixed(4);
+                let warningText = '';
+                if (currentConfig.tradeMode === 'futures') {
+                    const sideText = currentState.positionSide === 'short' ? '空头' : '多头';
+                    warningText = `将以市价平仓当前全部 ${coinAmount} BTC 合约${sideText}仓位！`;
+                } else {
+                    warningText = `将以市价卖出当前全部 ${coinAmount} BTC 现货仓位！`;
+                }
+                closeWarning.textContent = warningText;
             }
         }
 
