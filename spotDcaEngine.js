@@ -29,7 +29,7 @@ let config = {
   tradeMode: 'spot', // 'spot' or 'futures'
   tradeDirection: 'long', // 'long' or 'short' (永续合约专属)
   leverage: 100,
-  positionSizePct: 3.0,
+  positionSizePct: 3.0, // 最大使用资金占比 (最大亏损 3%)
   rsiThreshold: 30, // 做多超卖阈值
   rsiOverboughtThreshold: 70, // 做空超买阈值
   requireMacd: true,

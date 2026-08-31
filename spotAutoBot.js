@@ -218,22 +218,21 @@ function startBotLoop(getEngineConfig, getEngineState) {
                         // 设置杠杆
                         await setFuturesLeverage(config.leverage || 100);
                         
-                        // 计算合约可用总本金 (即真实可亏损的 USDT 上限)
+                        // 换算成总名义价值池: (当前U本位总余额 * 占比%) * 杠杆
+                        // 例如 4200U * 3% = 126U (真实最大亏损); 126U * 100倍 = 12600U 名义价值
                         const totalMarginToUse = state.futuresBalanceUsdt * ((config.positionSizePct || 3.0) / 100);
+                        const totalNotionalSize = totalMarginToUse * (config.leverage || 100);
                         
-                        // 基于马丁格尔策略智能分配首仓**保证金**
-                        let baseMargin = 0;
+                        // 基于马丁格尔策略智能分配首仓**名义价值**
+                        let baseNotional = 0;
                         if (multiplier === 1) {
-                            baseMargin = totalMarginToUse / maxSteps;
+                            baseNotional = totalNotionalSize / maxSteps;
                         } else {
-                            baseMargin = totalMarginToUse * (1 - multiplier) / (1 - Math.pow(multiplier, maxSteps));
+                            baseNotional = totalNotionalSize * (1 - multiplier) / (1 - Math.pow(multiplier, maxSteps));
                         }
                         
-                        // 当前阶梯应下保证金
-                        const currentStepMargin = baseMargin * Math.pow(multiplier, state.activeDcaCount);
-                        
-                        // 换算为名义价值和 BTC 数量 (保证金 * 杠杆 = 名义价值)
-                        const currentStepNotional = currentStepMargin * (config.leverage || 100);
+                        // 当前阶梯应下名义价值
+                        const currentStepNotional = baseNotional * Math.pow(multiplier, state.activeDcaCount);
                         let qtyToBuy = currentStepNotional / currentPrice;
                         
                         // 向下取整到 3 位小数 (BTCUSDT U本位合约 lotSize: 0.001)

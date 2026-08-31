@@ -1139,6 +1139,7 @@
             document.getElementById('cfg-rsi-threshold').value = currentConfig.rsiThreshold;
             if (document.getElementById('cfg-rsi-overbought-threshold')) document.getElementById('cfg-rsi-overbought-threshold').value = currentConfig.rsiOverboughtThreshold || 70;
             document.getElementById('cfg-macd-require').checked = currentConfig.requireMacd;
+            if (document.getElementById('cfg-signal-window')) document.getElementById('cfg-signal-window').value = currentConfig.signalWindow || 12;
             document.getElementById('cfg-trigger-delta').checked = currentConfig.triggerDelta;
             document.getElementById('cfg-trigger-mtf').checked = currentConfig.triggerMtf;
             document.getElementById('cfg-delta-threshold').value = currentConfig.deltaThreshold;
@@ -1170,12 +1171,14 @@
             // 自动填充资金
             const isFutures = currentTradeMode === 'futures';
             if (isFutures) {
-                document.getElementById('gen-capital-label').textContent = "永续合约总分配名义本金 (USDT)";
-                const lev = parseFloat(document.getElementById('cfg-leverage').value) || 100;
+                document.getElementById('gen-capital-label').textContent = "永续合约总名义本金 (自动计算: 余额 x 占比 x 杠杆)";
                 const pos = parseFloat(document.getElementById('cfg-position-size').value) || 3.0;
+                const lev = parseFloat(document.getElementById('cfg-leverage').value) || 100;
                 if (currentState.futuresBalanceUsdt) {
-                    const notional = currentState.futuresBalanceUsdt * (pos / 100) * lev;
-                    document.getElementById('gen-total-capital').value = Math.floor(notional);
+                    const margin = currentState.futuresBalanceUsdt * (pos / 100);
+                    document.getElementById('gen-total-capital').value = Math.floor(margin * lev);
+                } else {
+                    document.getElementById('gen-total-capital').value = Math.floor(4200 * (pos / 100) * lev); // Fallback for preview
                 }
             } else {
                 document.getElementById('gen-capital-label').textContent = "现货账户总可用资金 (USDT)";
@@ -1217,8 +1220,13 @@
             
             let planHtml = '';
             if (isFutures) {
-                planHtml = `<div class="font-bold text-yellow-500 mb-1">计算完成！(合约模式后端自动分配)</div>`;
-                planHtml += `<div class="mb-2">基于总保证金 ${capital} U，分 ${steps} 次加仓规划 (展示为真实成本)：</div>`;
+                const pos = parseFloat(document.getElementById('cfg-position-size').value) || 3.0;
+                const lev = parseFloat(document.getElementById('cfg-leverage').value) || 100;
+                const maxMargin = (capital / lev).toFixed(2);
+                
+                planHtml = `<div class="font-bold text-yellow-500 mb-1">计算完成！(合约模式后端自动按比例计算)</div>`;
+                planHtml += `<div class="mb-2 text-gray-300">真实最大亏损 (保证金上限) 锁定为：<span class="text-red-400 font-bold">${maxMargin} USDT</span> (总资金的 ${pos}%)</div>`;
+                planHtml += `<div class="mb-2">基于总名义本金 ${capital} U，分 ${steps} 次加仓规划 (展示为名义价值)：</div>`;
             } else {
                 planHtml = `<div class="font-bold text-green mb-1">计算完成！已将现货首仓金额设为 ${baseAmount} USDT</div>`;
                 planHtml += `<div class="mb-2">基于总现货资金 ${capital} U，分 ${steps} 次加仓规划：</div>`;
@@ -1245,6 +1253,7 @@
             const rsiThreshold = parseInt(document.getElementById('cfg-rsi-threshold').value);
             const rsiOverboughtThreshold = parseInt(document.getElementById('cfg-rsi-overbought-threshold').value) || 70;
             const requireMacd = document.getElementById('cfg-macd-require').checked;
+            const signalWindow = parseInt(document.getElementById('cfg-signal-window').value) || 12;
             const triggerDelta = document.getElementById('cfg-trigger-delta').checked;
             const triggerMtf = document.getElementById('cfg-trigger-mtf').checked;
             const deltaThreshold = parseInt(document.getElementById('cfg-delta-threshold').value);
@@ -1271,7 +1280,7 @@
 
             const payload = {
                 tradeMode: currentTradeMode, leverage, positionSizePct,
-                rsiThreshold, rsiOverboughtThreshold, requireMacd, triggerDelta, triggerMtf, deltaThreshold,
+                rsiThreshold, rsiOverboughtThreshold, requireMacd, signalWindow, triggerDelta, triggerMtf, deltaThreshold,
                 tp1, tp2, tp3, tp1Target, tp2Target, tp3Target, dcaAmount, dcaMaxSteps, martingaleMultiplier, breakevenSl, autoLoop
             };
 
