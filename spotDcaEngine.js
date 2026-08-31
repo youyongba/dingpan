@@ -5,7 +5,7 @@ const path = require('path');
 const mtfModule = require('./mtfModule');
 const regimeModule = require('./regimeModule');
 
-const { startBotLoop, executeRealOrder } = require('./spotAutoBot');
+const { startBotLoop, executeRealOrder, executeFuturesOrder } = require('./spotAutoBot');
 
 // 强制使用绝对路径加载 .env，防止 PM2 工作目录 (cwd) 偏移导致找不到文件
 const envPath = path.resolve(__dirname, '.env');
@@ -280,7 +280,6 @@ router.post('/override', express.json(), async (req, res) => {
       
       if (config.tradeMode === 'futures') {
         if (!amt || amt <= 0) throw new Error('无效的开仓金额');
-        const { executeFuturesOrder } = require('./spotAutoBot');
         const currentPrice = state.averagePrice > 0 ? state.averagePrice : 60000; // 粗略 fallback
         let qtyToBuy = Math.floor((amt / currentPrice) * 1000) / 1000;
         if (qtyToBuy < 0.001) throw new Error(`数量太小: ${qtyToBuy}`);
@@ -319,14 +318,12 @@ router.post('/override', express.json(), async (req, res) => {
       if (state.totalCoinAmount > 0.00001) {
         if (config.tradeMode === 'futures') {
             const closeQty = Math.floor(state.totalCoinAmount * 1000) / 1000;
-            const { executeFuturesOrder } = require('./spotAutoBot');
             const side = state.positionSide === 'short' ? 'BUY' : 'SELL';
             await executeFuturesOrder(side, closeQty);
             state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动合约清仓成功: 平仓 ${closeQty} BTC`);
         } else {
             // 向下取整精度，防止卖出超额
             const sellQty = Math.floor(state.totalCoinAmount * 100000) / 100000;
-            const { executeRealOrder } = require('./spotAutoBot');
             await executeRealOrder('SELL', sellQty, null);
             state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动现货清仓成功: 卖出 ${sellQty} BTC`);
         }

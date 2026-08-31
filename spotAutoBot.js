@@ -390,4 +390,4 @@ function startBotLoop(getEngineConfig, getEngineState) {
     }, 2000);
 }
 
-module.exports = { startBotLoop, executeRealOrder };
+module.exports = { startBotLoop, executeRealOrder, executeFuturesOrder };
