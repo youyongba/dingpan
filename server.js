@@ -63,6 +63,9 @@ const mtfMod = require('./mtfModule');
 app.use('/api/mtf', mtfMod.router);
 app.get('/mtf', (req, res) => res.redirect('/mtf.html'));
 
+const spotDcaEngine = require('./spotDcaEngine');
+app.use('/api/spot-dca', spotDcaEngine.router);
+
 // === 自动平仓引擎（独立模块）：WS 监控 + 风控 + 出站 webhook ===
 const autoTrade = require('./trading');
 autoTrade.attach(app);

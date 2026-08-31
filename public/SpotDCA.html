@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SmartDCA - Microstructure Pro</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #0B0E11;
+            color: #EAECEF;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        .panel {
+            background-color: #181A20;
+            border: 1px solid #2B3139;
+            border-radius: 8px;
+        }
+        .text-green { color: #0ECB81; }
+        .text-red { color: #F6465D; }
+        .bg-green-dim { background-color: rgba(14, 203, 129, 0.1); }
+        .bg-red-dim { background-color: rgba(246, 70, 93, 0.1); }
+        .progress-bar { transition: width 0.5s ease-in-out; }
+        
+        /* Custom Scrollbar for Modal */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #181A20; }
+        ::-webkit-scrollbar-thumb { background: #2B3139; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #474D57; }
+    </style>
+</head>
+<body class="h-screen flex flex-col p-4 gap-4 overflow-hidden">
+
+    <!-- Header -->
+    <header class="panel p-4 flex justify-between items-center shrink-0">
+        <div class="flex items-center gap-3">
+            <i class="fa-brands fa-bitcoin text-yellow-500 text-3xl"></i>
+            <div>
+                <h1 class="text-xl font-bold tracking-wider">SmartDCA <span class="text-gray-400 text-sm font-normal">| Microstructure Pro</span></h1>
+                <div class="text-xs text-gray-500 mt-1">只做右侧确认 · 拒绝随机游走</div>
+            </div>
+        </div>
+        
+        <div class="flex gap-6 items-center">
+            <div id="ui-spot-balance" class="bg-gray-800 px-3 py-1.5 rounded border border-gray-700 hidden md:block">
+                <!-- Balance injected here -->
+            </div>
+            <button onclick="openConfig()" class="px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-600 rounded text-sm text-gray-300 transition-colors flex items-center gap-2">
+                <i class="fa-solid fa-sliders"></i> 策略配置
+            </button>
+            <!-- UTC+8 Clock -->
+            <div class="text-right border-l border-gray-700 pl-6">
+                <div class="text-xs text-gray-400">当前时间 (UTC+8)</div>
+                <div id="utc8-clock" class="text-lg font-mono font-semibold text-blue-400">--:--:--</div>
+            </div>
+            <!-- Status -->
+            <div class="flex items-center gap-2 px-3 py-1 bg-green-dim border border-green-500 rounded text-green text-sm font-bold">
+                <div class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+                监控中
+            </div>
+        </div>
+    </header>
+
+    <!-- Discipline & Countdown Bar -->
+    <div class="grid grid-cols-2 gap-4 shrink-0">
+        <div class="panel p-4 flex justify-between items-center border-l-4 border-blue-500">
+            <div>
+                <div class="text-sm text-gray-400">1m K线收盘倒计时 (微观扳机)</div>
+                <div class="text-xs text-gray-500 mt-1">等待倒计时结束确认形态</div>
+            </div>
+            <div id="countdown-1m" class="text-3xl font-mono font-bold text-blue-400">00:00</div>
+        </div>
+        <div class="panel p-4 flex justify-between items-center border-l-4 border-purple-500">
+            <div>
+                <div class="text-sm text-gray-400">15m K线收盘倒计时 (大周期确认)</div>
+                <div class="text-xs text-gray-500 mt-1">耐心等待趋势信号定型</div>
+            </div>
+            <div id="countdown-15m" class="text-3xl font-mono font-bold text-purple-400">00:00</div>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="flex-1 grid grid-cols-1 lg:grid-cols-3 gap-4 min-h-0">
+        
+        <!-- Left: Signal Engine (15m + Zones) -->
+        <div class="panel p-4 flex flex-col overflow-y-auto">
+            <h2 class="text-lg font-bold border-b border-gray-700 pb-2 mb-4"><i class="fa-solid fa-satellite-dish mr-2"></i>大周期环境 (15m)</h2>
+            
+            <div class="space-y-4">
+                <div class="flex justify-between items-center">
+                    <span class="text-gray-400">BTC/USDT 现价</span>
+                    <span id="current-price" class="font-mono text-xl text-green">64,230.50</span>
+                </div>
+                
+                <div class="bg-gray-800 p-3 rounded">
+                    <div class="flex justify-between mb-1">
+                        <span class="text-sm" id="ui-rsi-label">RSI (14) <span class="text-gray-500 text-xs">曾 &lt; 30 触发</span></span>
+                        <span class="text-sm font-mono text-green">28.4 <span class="text-xs text-gray-400">(超卖)</span></span>
+                    </div>
+                    <div class="w-full bg-gray-700 h-1.5 rounded">
+                        <div class="bg-green-500 h-1.5 rounded progress-bar" style="width: 28.4%"></div>
+                    </div>
+                </div>
+
+                <div class="bg-gray-800 p-3 rounded flex justify-between items-center">
+                    <span class="text-sm">MACD <span class="text-gray-500 text-xs ml-1">(15m)</span></span>
+                    <span class="text-sm text-green font-bold" id="ui-macd-status"><i class="fa-solid fa-arrow-trend-up mr-1"></i>曾金叉确认</span>
+                </div>
+                
+                <div class="bg-blue-900/30 border border-blue-500/50 p-2 rounded text-center text-xs text-blue-400 font-bold">
+                    大周期条件已满足，微观扳机监控已激活
+                </div>
+            </div>
+
+            <h2 class="text-lg font-bold border-b border-gray-700 pb-2 mb-4 mt-6"><i class="fa-solid fa-crosshairs mr-2"></i>静态伏击圈</h2>
+            <div class="space-y-3">
+                <div class="flex justify-between text-sm">
+                    <span class="text-gray-400">VAH (价值区高点)</span>
+                    <span class="font-mono">65,100.00</span>
+                </div>
+                <div class="flex justify-between text-sm">
+                    <span class="text-yellow-500 font-bold">Naked vPOC</span>
+                    <span class="font-mono text-yellow-500">63,850.00</span>
+                </div>
+                <div class="flex justify-between text-sm">
+                    <span class="text-gray-400">VAL (价值区低点)</span>
+                    <span class="font-mono">63,200.00</span>
+                </div>
+                
+                <div class="mt-4 p-2 bg-red-dim border border-red-500 rounded text-center text-xs text-red">
+                    <i class="fa-solid fa-triangle-exclamation mr-1"></i> 当前价格处于 VA 内部 (随机游走区)，已屏蔽买入信号
+                </div>
+            </div>
+        </div>
+
+        <!-- Middle: Microstructure (1m) -->
+        <div class="panel p-4 flex flex-col overflow-y-auto">
+            <h2 class="text-lg font-bold border-b border-gray-700 pb-2 mb-4"><i class="fa-solid fa-microscope mr-2"></i>微观结构触发器 (1m)</h2>
+            
+            <div class="flex-1 space-y-5">
+                <!-- MTF Status -->
+                <div class="flex justify-between items-center p-3 bg-gray-800 rounded border-l-2 border-green-500">
+                    <span class="text-sm">MTF 强多信号</span>
+                    <span class="text-green text-sm font-bold"><i class="fa-solid fa-check mr-1"></i>已确认</span>
+                </div>
+
+                <!-- Delta Monitor -->
+                <div>
+                    <div class="flex justify-between text-sm mb-2">
+                        <span class="text-gray-400" id="ui-delta-label">1m Delta 净值 <span class="text-xs">(阈值: > 2.5M USDT)</span></span>
+                        <span id="delta-val" class="font-mono text-green">+2.85M USDT</span>
+                    </div>
+                    <div class="flex h-12 gap-1 items-end" id="delta-chart">
+                        <!-- Bars generated by JS -->
+                    </div>
+                    <div class="text-xs text-gray-500 mt-2 text-right">发现底部 Delta 激增</div>
+                </div>
+
+                <!-- Order Book Walls -->
+                <div>
+                    <div class="text-sm text-gray-400 mb-2">盘口微观结构</div>
+                    <div class="space-y-2">
+                        <div class="flex items-center gap-2">
+                            <span class="text-xs w-12 text-red">卖方vPOC <br><span id="ui-sell-vpoc-price" class="text-[10px]">--</span></span>
+                            <div class="flex-1 bg-gray-700 h-4 rounded overflow-hidden">
+                                <div id="ui-sell-vpoc-bar" class="bg-red-500 h-full progress-bar" style="width: 0%"></div>
+                            </div>
+                            <span id="ui-sell-vpoc-val" class="text-xs font-mono w-16 text-right">0 $</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <span class="text-xs w-12 text-green">买方vPOC <br><span id="ui-buy-vpoc-price" class="text-[10px]">--</span></span>
+                            <div class="flex-1 bg-gray-700 h-4 rounded overflow-hidden">
+                                <div id="ui-buy-vpoc-bar" class="bg-green-500 h-full progress-bar" style="width: 0%"></div>
+                            </div>
+                            <span id="ui-buy-vpoc-val" class="text-xs font-mono w-16 text-right">0 $</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Pattern Recognition -->
+                <div class="p-3 bg-gray-800 rounded text-sm">
+                    <div class="text-gray-400 mb-2">形态识别引擎</div>
+                    <div class="flex items-center gap-2 text-green">
+                        <i class="fa-solid fa-shield-halved"></i>
+                        <span>检测到冰山吸收 (空头力竭)</span>
+                    </div>
+                    <div class="text-xs text-gray-500 ml-6 mt-1">Delta 持续为负，但价格未破买方 vPOC</div>
+                </div>
+            </div>
+            
+            <button onclick="openOverrideModal()" class="w-full mt-4 py-3 bg-blue-600 hover:bg-blue-500 rounded text-white font-bold transition-colors shadow-[0_0_15px_rgba(37,99,235,0.3)]">
+                手动强制介入 (Override)
+            </button>
+        </div>
+
+        <!-- Right: Execution & Risk -->
+        <div class="panel p-4 flex flex-col overflow-y-auto">
+            <h2 class="text-lg font-bold border-b border-gray-700 pb-2 mb-4"><i class="fa-solid fa-shield-cat mr-2"></i>订单执行与资金管理</h2>
+            
+            <div class="space-y-4">
+                <!-- Current Position -->
+                <div class="p-4 bg-gray-800 rounded border border-gray-700">
+                    <div class="text-sm text-gray-400 mb-2">当前现货持仓价值 (DCA 批次 #4)</div>
+                    <div class="text-2xl font-mono font-bold mb-1"><span id="ui-dca-amount">9,315.00</span> <span class="text-sm font-normal text-gray-400">USDT</span></div>
+                    <div class="flex justify-between text-xs">
+                        <span class="text-gray-500">均价: <span class="font-mono text-gray-300">62,100.00</span> | 数量: <span class="font-mono text-gray-300" id="ui-dca-coin-amount">0.1500 BTC</span></span>
+                        <span class="text-green">+3.43%</span>
+                    </div>
+                </div>
+
+                <!-- Scaled TP -->
+                <div>
+                    <div class="text-sm text-gray-400 mb-2">分批止盈系统 (Scaled TP)</div>
+                    <div class="space-y-2">
+                        <div class="flex items-center justify-between p-2 bg-gray-800 rounded text-sm opacity-50">
+                            <span class="text-gray-400" id="ui-tp1-label">TP1 (50%)</span>
+                            <span class="font-mono line-through">64,000.00</span>
+                            <span class="text-green text-xs"><i class="fa-solid fa-check"></i> 已触发</span>
+                        </div>
+                        <div class="flex items-center justify-between p-2 bg-gray-700 border border-gray-600 rounded text-sm">
+                            <span class="font-bold" id="ui-tp2-label">TP2 (30%)</span>
+                            <span class="font-mono">66,500.00</span>
+                            <span class="text-blue-400 text-xs">等待中</span>
+                        </div>
+                        <div class="flex items-center justify-between p-2 bg-gray-800 rounded text-sm">
+                            <span class="text-gray-400" id="ui-tp3-label">TP3 (20%)</span>
+                            <span class="font-mono">69,000.00</span>
+                            <span class="text-gray-500 text-xs">等待中</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- SL -->
+                <div class="mt-4 p-3 bg-green-dim border border-green-500 rounded text-sm" id="ui-sl-box">
+                    <div class="flex justify-between items-center mb-1">
+                        <span class="text-green font-bold"><i class="fa-solid fa-shield mr-1"></i>动态保本止损已激活</span>
+                    </div>
+                    <div class="text-xs text-gray-400">TP1 已成交，剩余仓位止损线已上移至均价 62,100.00</div>
+                </div>
+
+                <!-- Action Logs -->
+                <div class="mt-4">
+                    <div class="text-sm text-gray-400 mb-2">最近执行日志</div>
+                    <div id="ui-action-logs" class="text-xs font-mono text-gray-500 space-y-1 h-24 overflow-y-auto">
+                        <!-- JS populated logs -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Configuration Modal -->
+    <div id="config-modal" class="fixed inset-0 bg-black/80 backdrop-blur-sm hidden z-50 flex items-center justify-center p-4">
+        <div class="bg-[#181A20] border border-[#2B3139] rounded-xl w-full max-w-3xl shadow-2xl flex flex-col max-h-[90vh]">
+            <!-- Modal Header -->
+            <div class="p-5 border-b border-gray-800 flex justify-between items-center shrink-0">
+                <h2 class="text-xl font-bold"><i class="fa-solid fa-sliders text-blue-500 mr-2"></i>交易策略参数配置</h2>
+                <button onclick="closeConfig()" class="text-gray-500 hover:text-white transition-colors">
+                    <i class="fa-solid fa-xmark text-xl"></i>
+                </button>
+            </div>
+            
+            <!-- Modal Body -->
+            <div class="p-6 overflow-y-auto flex-1">
+                <form id="config-form" class="space-y-8">
+                    
+                    <!-- Section 1: Signal Engine -->
+                    <div>
+                        <h3 class="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4 border-l-2 border-purple-500 pl-2">大周期环境 (15m)</h3>
+                        
+                        <!-- Timeline visual explanation -->
+                        <div class="mb-5 p-3 bg-gray-800 rounded border border-gray-700 text-sm">
+                            <div class="text-gray-400 mb-2 font-bold">信号触发逻辑时序：</div>
+                            <div class="flex items-center gap-2 text-xs">
+                                <span class="bg-purple-900/50 text-purple-300 px-2 py-1 rounded">1. RSI曾超卖</span>
+                                <i class="fa-solid fa-arrow-right text-gray-600"></i>
+                                <span class="bg-purple-900/50 text-purple-300 px-2 py-1 rounded">2. MACD曾金叉</span>
+                                <i class="fa-solid fa-arrow-right text-gray-600"></i>
+                                <span class="bg-blue-900/50 text-blue-300 px-2 py-1 rounded">3. 激活微观扳机监控</span>
+                            </div>
+                            <div class="text-gray-500 mt-2 text-xs">注：大周期只需“发生过”即可进入准备状态，随后耐心等待 1m 微观扳机扣动。</div>
+                        </div>
+
+                        <div class="grid grid-cols-1 gap-4">
+                            <div>
+                                <label class="block text-sm text-gray-300 mb-1">RSI 超卖阈值 (14周期)</label>
+                                <input type="number" id="cfg-rsi-threshold" value="30" class="w-full md:w-1/2 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500">
+                            </div>
+                            <div class="flex items-center mt-2">
+                                <label class="flex items-center cursor-pointer">
+                                    <input type="checkbox" id="cfg-macd-require" checked class="hidden peer">
+                                    <div class="w-10 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-purple-500 relative"></div>
+                                    <span class="ml-3 text-sm text-gray-300">强制要求曾出现 15m MACD 金叉</span>
+                                </label>
+                            </div>
+                            
+                            <!-- Expiration Window -->
+                            <div class="mt-2">
+                                <label class="block text-sm text-gray-300 mb-1">大周期信号有效窗口 (K线根数)</label>
+                                <div class="flex items-center gap-2">
+                                    <input type="number" id="cfg-signal-window" value="12" class="w-24 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500">
+                                    <span class="text-xs text-gray-500">根 15m K线 (约 3 小时) 内有效</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Section 2: Microstructure -->
+                    <div>
+                        <h3 class="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4 border-l-2 border-blue-500 pl-2">微观扳机 (1m)</h3>
+                        <div class="space-y-4">
+                            <!-- Delta Trigger Options -->
+                            <div>
+                                <label class="block text-sm text-gray-300 mb-2">选择触发条件 (可多选)</label>
+                                <div class="space-y-3 bg-gray-800 p-4 rounded border border-gray-700">
+                                    
+                                    <!-- Option 1: Delta Surge -->
+                                    <div class="flex items-start gap-3">
+                                        <div class="flex items-center h-5 mt-1">
+                                            <input type="checkbox" id="cfg-trigger-delta" checked class="w-4 h-4 bg-gray-900 border-gray-600 rounded text-blue-500 focus:ring-blue-500 focus:ring-2">
+                                        </div>
+                                        <div class="flex-1">
+                                            <label for="cfg-trigger-delta" class="text-sm font-bold text-white cursor-pointer block">1m Delta 异常激增</label>
+                                            <div class="text-xs text-gray-400 mt-1 mb-2">当 1 分钟内的净买入量超过设定阈值时触发。</div>
+                                            <div class="flex items-center gap-2">
+                                                <span class="text-xs text-gray-500">阈值 (USDT):</span>
+                                                <input type="number" id="cfg-delta-threshold" value="2500000" class="w-32 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-sm text-white focus:outline-none focus:border-blue-500">
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="border-t border-gray-700 my-2"></div>
+                                    
+                                    <!-- Option 2: MTF Strong Buy -->
+                                    <div class="flex items-start gap-3">
+                                        <div class="flex items-center h-5 mt-1">
+                                            <input type="checkbox" id="cfg-trigger-mtf" checked class="w-4 h-4 bg-gray-900 border-gray-600 rounded text-blue-500 focus:ring-blue-500 focus:ring-2">
+                                        </div>
+                                        <div class="flex-1">
+                                            <label for="cfg-trigger-mtf" class="text-sm font-bold text-white cursor-pointer block">MTF 1分钟强多信号</label>
+                                            <div class="text-xs text-gray-400 mt-1">依赖多时间框架 (Multiple Time Frame) 共振产生的底部反转确认信号。</div>
+                                        </div>
+                                    </div>
+
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Section 3: Risk & Execution -->
+                    <div>
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="text-sm font-bold text-gray-400 uppercase tracking-wider border-l-2 border-green-500 pl-2">资金管理与执行</h3>
+                            <button type="button" onclick="generateStrategy()" class="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 border border-blue-500/30 px-2 py-1 rounded bg-blue-500/10">
+                                <i class="fa-solid fa-wand-magic-sparkles"></i> 智能生成参考策略
+                            </button>
+                        </div>
+
+                        <!-- Strategy Generator (Hidden by default) -->
+                        <div id="strategy-generator" class="hidden mb-6 p-4 bg-blue-900/20 border border-blue-500/30 rounded-lg">
+                            <div class="text-sm font-bold text-blue-300 mb-3">基于总资金的仓位规划</div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                                <div>
+                                    <label class="block text-xs text-gray-400 mb-1">现货账户总可用资金 (USDT)</label>
+                                    <input type="number" id="gen-total-capital" value="50000" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-1.5 text-sm text-white focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs text-gray-400 mb-1">计划最大 DCA 次数 (子弹数)</label>
+                                    <input type="number" id="gen-max-steps" value="5" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-1.5 text-sm text-white focus:border-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-xs text-gray-400 mb-1">加仓资金倍数 (马丁格尔系数)</label>
+                                    <select id="gen-martingale" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-1.5 text-sm text-white focus:border-blue-500">
+                                        <option value="1">等额加仓 (1.0x)</option>
+                                        <option value="1.5">温和递增 (1.5x)</option>
+                                        <option value="2">激进递增 (2.0x)</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-xs text-gray-400 mb-1">目标整体止盈基准</label>
+                                    <select id="gen-tp-type" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-1.5 text-sm text-white focus:border-blue-500">
+                                        <option value="fixed">整体仓位收益 1.5%</option>
+                                        <option value="atr">基于 15m ATR 波动率</option>
+                                        <option value="vpoc">回归上一层 vPOC</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="flex justify-end gap-2">
+                                <button type="button" onclick="closeGenerator()" class="px-3 py-1.5 rounded text-xs text-gray-400 hover:text-white">取消</button>
+                                <button type="button" onclick="applyGeneratedStrategy()" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-xs text-white font-bold">计算并覆盖当前设置</button>
+                            </div>
+                            <div id="gen-result-preview" class="hidden mt-3 p-3 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300">
+                                <!-- JS will populate this -->
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                            <div>
+                                <label class="block text-sm text-gray-300 mb-1">首仓 (TP0) 基础买入量 (USDT)</label>
+                                <input type="number" step="100" id="cfg-dca-amount" value="3000" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500">
+                            </div>
+                            <div class="flex flex-col justify-center gap-3 mt-4">
+                                <label class="flex items-center cursor-pointer">
+                                    <input type="checkbox" id="cfg-breakeven-sl" checked class="hidden peer">
+                                    <div class="w-10 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-green-500 relative"></div>
+                                    <span class="ml-3 text-sm text-gray-300">TP1 成交后自动保本止损</span>
+                                </label>
+                                <label class="flex items-center cursor-pointer">
+                                    <input type="checkbox" id="cfg-auto-loop" class="hidden peer">
+                                    <div class="w-10 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-500 relative"></div>
+                                    <span class="ml-3 text-sm text-gray-300 font-bold text-blue-400">启用自动循环 DCA (自动交易)</span>
+                                </label>
+                            </div>
+                        </div>
+                        
+                        <div class="bg-gray-800 p-4 rounded border border-gray-700">
+                            <label class="block text-sm text-gray-300 mb-3">分批止盈比例设置 (%)</label>
+                            <div class="flex gap-4 items-center">
+                                <div class="flex-1">
+                                    <span class="text-xs text-gray-400">TP1 (基于整体均价)</span>
+                                    <input type="number" id="cfg-tp1" value="50" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-1 mt-1 text-white text-center">
+                                </div>
+                                <div class="flex-1">
+                                    <span class="text-xs text-gray-400">TP2</span>
+                                    <input type="number" id="cfg-tp2" value="30" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-1 mt-1 text-white text-center">
+                                </div>
+                                <div class="flex-1">
+                                    <span class="text-xs text-gray-400">TP3 (尾仓博弈)</span>
+                                    <input type="number" id="cfg-tp3" value="20" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-1 mt-1 text-white text-center">
+                                </div>
+                            </div>
+                            <div id="tp-error" class="text-red-500 text-xs mt-2 hidden">止盈比例总和必须为 100%</div>
+                        </div>
+                    </div>
+
+                </form>
+            </div>
+            
+            <!-- Modal Footer -->
+            <div class="p-5 border-t border-gray-800 flex justify-end gap-3 shrink-0 bg-[#181A20] rounded-b-xl">
+                <button onclick="closeConfig()" class="px-5 py-2 rounded text-sm text-gray-300 hover:bg-gray-800 transition-colors">取消</button>
+                <button onclick="saveConfig()" class="px-5 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm text-white font-bold transition-colors">保存并应用策略</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Override Modal -->
+    <div id="override-modal" class="fixed inset-0 bg-black/80 backdrop-blur-sm hidden z-50 flex items-center justify-center p-4">
+        <div class="bg-[#181A20] border border-red-900/50 rounded-xl w-full max-w-md shadow-2xl flex flex-col overflow-hidden">
+            <!-- Header -->
+            <div class="p-5 border-b border-gray-800 bg-red-900/20 flex justify-between items-center">
+                <h2 class="text-lg font-bold text-red-400"><i class="fa-solid fa-triangle-exclamation mr-2 animate-pulse"></i>手动强制介入</h2>
+                <button onclick="closeOverrideModal()" class="text-gray-500 hover:text-white transition-colors">
+                    <i class="fa-solid fa-xmark text-xl"></i>
+                </button>
+            </div>
+            
+            <!-- Body -->
+            <div class="p-6 space-y-5">
+                <div class="p-3 bg-red-500/10 border border-red-500/30 rounded text-sm text-red-300">
+                    <span class="font-bold">警告：</span>您正在绕过系统的 [大周期确认] 与 [微观结构扳机] 规则。手动交易容易受情绪影响，请确认您的决策基于客观盘面。
+                </div>
+
+                <div>
+                    <label class="block text-sm text-gray-300 mb-2">执行动作</label>
+                    <div class="grid grid-cols-3 gap-2" id="override-tabs">
+                        <button type="button" onclick="switchOverrideTab('market-buy', this)" class="override-tab-btn bg-green-600/20 border border-green-500 text-green-500 py-2 rounded text-sm font-bold">市价买入</button>
+                        <button type="button" onclick="switchOverrideTab('limit-buy', this)" class="override-tab-btn bg-gray-800 border border-gray-700 text-gray-400 py-2 rounded text-sm hover:bg-gray-700 transition">限价买入</button>
+                        <button type="button" onclick="switchOverrideTab('market-sell', this)" class="override-tab-btn bg-gray-800 border border-gray-700 text-gray-400 py-2 rounded text-sm hover:bg-gray-700 transition">清仓止损</button>
+                    </div>
+                </div>
+
+                <!-- Price Input (Hidden by default, shown for Limit Buy) -->
+                <div id="override-price-container" class="hidden">
+                    <label class="block text-sm text-gray-300 mb-1">委托价格 (USDT)</label>
+                    <div class="relative">
+                        <input type="number" id="override-price" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white focus:outline-none focus:border-red-500">
+                        <div class="absolute right-3 top-2 text-gray-500 text-sm">USDT</div>
+                    </div>
+                </div>
+
+                <!-- Amount Input -->
+                <div id="override-amount-container">
+                    <label class="block text-sm text-gray-300 mb-1">介入金额 (USDT)</label>
+                    <div class="relative">
+                        <input type="number" id="override-amount" value="3000" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white focus:outline-none focus:border-red-500">
+                        <div class="absolute right-3 top-2 text-gray-500 text-sm">USDT</div>
+                    </div>
+                </div>
+
+                <!-- Close All Warning -->
+                <div id="override-close-warning" class="hidden p-3 bg-orange-500/10 border border-orange-500/30 rounded text-sm text-orange-300 text-center">
+                    将以市价卖出当前全部 0.1500 BTC 现货仓位！
+                </div>
+            </div>
+
+            <!-- Footer -->
+            <div class="p-5 border-t border-gray-800 flex justify-end gap-3 bg-[#181A20]">
+                <button onclick="closeOverrideModal()" class="px-5 py-2 rounded text-sm text-gray-300 hover:bg-gray-800 transition-colors">取消</button>
+                <button onclick="executeOverride()" class="px-5 py-2 bg-red-600 hover:bg-red-500 rounded text-sm text-white font-bold transition-colors shadow-[0_0_10px_rgba(220,38,38,0.4)]">
+                    确认强制执行
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- API Integration ---
+        let currentConfig = {};
+        let currentState = {};
+        
+        let globalVolumeProfile = new Map();
+        let currentPrice = 64230;
+
+        async function fetchStatus() {
+            try {
+                const res = await fetch('/api/spot-dca/status');
+                const data = await res.json();
+                if (data.ok) {
+                    currentConfig = data.config;
+                    currentState = data.state;
+                    renderUI();
+                }
+            } catch (e) {
+                console.error("Failed to fetch Spot DCA status:", e);
+            }
+        }
+        
+        // --- Real-time VPOC from aggTrade ---
+        function initAggTrade() {
+            const ws = new WebSocket('wss://fstream.binance.com/ws/btcusdt@aggTrade');
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                const price = parseFloat(data.p);
+                const qty = parseFloat(data.q);
+                const isSell = data.m;
+                currentPrice = price;
+
+                const tickSize = 10;
+                const level = Math.floor(price / tickSize) * tickSize;
+                
+                if (!globalVolumeProfile.has(level)) {
+                    globalVolumeProfile.set(level, { buy: 0, sell: 0 });
+                }
+                
+                let pData = globalVolumeProfile.get(level);
+                if (isSell) pData.sell += qty;
+                else pData.buy += qty;
+            };
+        }
+        
+        function updateVpocUI() {
+            let maxBuyVol = 0, buyVpocP = 0;
+            let maxSellVol = 0, sellVpocP = 0;
+            
+            globalVolumeProfile.forEach((vData, pLevel) => {
+                if (vData.buy > maxBuyVol) {
+                    maxBuyVol = vData.buy;
+                    buyVpocP = pLevel;
+                }
+                if (vData.sell > maxSellVol) {
+                    maxSellVol = vData.sell;
+                    sellVpocP = pLevel;
+                }
+            });
+            
+            const maxVol = Math.max(maxBuyVol, maxSellVol, 1);
+            
+            const formatVol = (vol) => {
+                if (vol > 1000) return (vol / 1000).toFixed(1) + 'K BTC';
+                return vol.toFixed(2) + ' BTC';
+            };
+            
+            document.getElementById('ui-buy-vpoc-val').textContent = formatVol(maxBuyVol);
+            document.getElementById('ui-sell-vpoc-val').textContent = formatVol(maxSellVol);
+            document.getElementById('ui-buy-vpoc-price').textContent = buyVpocP || '--';
+            document.getElementById('ui-sell-vpoc-price').textContent = sellVpocP || '--';
+            
+            document.getElementById('ui-buy-vpoc-bar').style.width = (maxBuyVol / maxVol * 100) + '%';
+            document.getElementById('ui-sell-vpoc-bar').style.width = (maxSellVol / maxVol * 100) + '%';
+            
+            document.getElementById('current-price').textContent = currentPrice.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+        }
+
+        function renderUI() {
+            // Render State
+            document.getElementById('ui-dca-amount').textContent = (currentState.totalUsdtAmount || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+            document.getElementById('ui-dca-coin-amount').textContent = (currentState.totalCoinAmount || 0).toFixed(4) + ' BTC';
+            
+            // Render Balance
+            const usdtBal = currentState.spotBalanceUsdt || 0;
+            const btcBal = currentState.spotBalanceBtc || 0;
+            const balanceEl = document.getElementById('ui-spot-balance');
+            if (balanceEl) {
+                balanceEl.innerHTML = `
+                    <div class="flex items-center gap-4 text-xs">
+                        <div>USDT 余额: <span class="font-mono text-green">${usdtBal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span></div>
+                        <div>BTC 余额: <span class="font-mono text-blue-400">${btcBal.toFixed(4)}</span></div>
+                    </div>
+                `;
+            }
+            
+            // Logs
+            const logContainer = document.getElementById('ui-action-logs');
+            if (logContainer) {
+                logContainer.innerHTML = (currentState.logs || []).map(log => `<div>${log}</div>`).join('');
+            }
+        }
+
+        // --- Clock & Countdown Logic ---
+        function updateClock() {
+            const now = new Date();
+            const options = { timeZone: 'Asia/Shanghai', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' };
+            document.getElementById('utc8-clock').textContent = now.toLocaleTimeString('zh-CN', options);
+        }
+        setInterval(updateClock, 1000);
+        updateClock();
+
+        function updateCountdowns() {
+            const now = new Date();
+            const secLeft = 60 - now.getSeconds();
+            document.getElementById('countdown-1m').textContent = `00:${secLeft.toString().padStart(2, '0')}`;
+            
+            const minLeft = 14 - (now.getMinutes() % 15);
+            document.getElementById('countdown-15m').textContent = `${minLeft.toString().padStart(2, '0')}:${secLeft.toString().padStart(2, '0')}`;
+        }
+        setInterval(updateCountdowns, 1000);
+        updateCountdowns();
+
+        // --- Mock Data Simulation ---
+        const chartContainer = document.getElementById('delta-chart');
+        function renderChart() {
+            chartContainer.innerHTML = '';
+            for(let i=0; i<15; i++) {
+                const isPositive = Math.random() > 0.4;
+                const height = Math.random() * 80 + 20;
+                const bar = document.createElement('div');
+                bar.className = `flex-1 rounded-t-sm ${isPositive ? 'bg-green-500' : 'bg-red-500'}`;
+                bar.style.height = `${height}%`;
+                chartContainer.appendChild(bar);
+            }
+        }
+        renderChart();
+        setInterval(renderChart, 5000);
+        setInterval(fetchStatus, 2000);
+        setInterval(updateVpocUI, 1000);
+        fetchStatus();
+        initAggTrade();
+
+        // --- Configuration Logic ---
+        const modal = document.getElementById('config-modal');
+        
+        function openConfig() {
+            modal.classList.remove('hidden');
+            // Populate form with currentConfig
+            document.getElementById('cfg-rsi-threshold').value = currentConfig.rsiThreshold;
+            document.getElementById('cfg-macd-require').checked = currentConfig.requireMacd;
+            document.getElementById('cfg-trigger-delta').checked = currentConfig.triggerDelta;
+            document.getElementById('cfg-trigger-mtf').checked = currentConfig.triggerMtf;
+            document.getElementById('cfg-delta-threshold').value = currentConfig.deltaThreshold;
+            document.getElementById('cfg-tp1').value = currentConfig.tp1;
+            document.getElementById('cfg-tp2').value = currentConfig.tp2;
+            document.getElementById('cfg-tp3').value = currentConfig.tp3;
+            document.getElementById('cfg-dca-amount').value = currentConfig.dcaAmount;
+            document.getElementById('cfg-breakeven-sl').checked = currentConfig.breakevenSl;
+            document.getElementById('cfg-auto-loop').checked = !!currentConfig.autoLoop;
+        }
+
+        function closeConfig() {
+            modal.classList.add('hidden');
+            document.getElementById('tp-error').classList.add('hidden');
+        }
+
+        function generateStrategy() {
+            document.getElementById('strategy-generator').classList.remove('hidden');
+        }
+
+        function closeGenerator() {
+            document.getElementById('strategy-generator').classList.add('hidden');
+            document.getElementById('gen-result-preview').classList.add('hidden');
+        }
+
+        function applyGeneratedStrategy() {
+            const capital = parseFloat(document.getElementById('gen-total-capital').value);
+            const steps = parseInt(document.getElementById('gen-max-steps').value);
+            const multiplier = parseFloat(document.getElementById('gen-martingale').value);
+            
+            let baseAmount = 0;
+            if (multiplier === 1) {
+                baseAmount = capital / steps;
+            } else {
+                baseAmount = capital * (1 - multiplier) / (1 - Math.pow(multiplier, steps));
+            }
+            baseAmount = Math.floor(baseAmount / 100) * 100;
+            document.getElementById('cfg-dca-amount').value = baseAmount;
+            
+            const preview = document.getElementById('gen-result-preview');
+            preview.classList.remove('hidden');
+            
+            let planHtml = `<div class="font-bold text-green mb-1">计算完成！已将首仓金额设为 ${baseAmount} USDT</div>`;
+            planHtml += `<div class="mb-2">基于总资金 ${capital} U，分 ${steps} 次加仓规划：</div>`;
+            planHtml += `<ul class="list-disc pl-4 space-y-1">`;
+            
+            let currentAmount = baseAmount;
+            let totalUsed = 0;
+            for(let i=1; i<=steps; i++) {
+                planHtml += `<li>第 ${i} 仓: 约 ${Math.round(currentAmount)} U (累计 ${(totalUsed + currentAmount).toFixed(0)} U)</li>`;
+                totalUsed += currentAmount;
+                currentAmount *= multiplier;
+            }
+            planHtml += `</ul>`;
+            planHtml += `<div class="mt-2 text-blue-400">注意：每次加仓都会拉低整体均价，TP1 止盈线将自动基于最新整体均价计算。</div>`;
+            
+            preview.innerHTML = planHtml;
+        }
+
+        async function saveConfig() {
+            const rsiThreshold = parseInt(document.getElementById('cfg-rsi-threshold').value);
+            const requireMacd = document.getElementById('cfg-macd-require').checked;
+            const triggerDelta = document.getElementById('cfg-trigger-delta').checked;
+            const triggerMtf = document.getElementById('cfg-trigger-mtf').checked;
+            const deltaThreshold = parseInt(document.getElementById('cfg-delta-threshold').value);
+            const tp1 = parseInt(document.getElementById('cfg-tp1').value) || 0;
+            const tp2 = parseInt(document.getElementById('cfg-tp2').value) || 0;
+            const tp3 = parseInt(document.getElementById('cfg-tp3').value) || 0;
+            const dcaAmount = parseInt(document.getElementById('cfg-dca-amount').value);
+            const breakevenSl = document.getElementById('cfg-breakeven-sl').checked;
+            const autoLoop = document.getElementById('cfg-auto-loop').checked;
+
+            if (!triggerDelta && !triggerMtf) {
+                alert("请至少选择一种微观触发条件 (Delta激增 或 MTF强多)");
+                return;
+            }
+            if (tp1 + tp2 + tp3 !== 100) {
+                document.getElementById('tp-error').classList.remove('hidden');
+                return;
+            }
+
+            const payload = {
+                rsiThreshold, requireMacd, triggerDelta, triggerMtf, deltaThreshold,
+                tp1, tp2, tp3, dcaAmount, breakevenSl, autoLoop
+            };
+
+            try {
+                await fetch('/api/spot-dca/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                
+                // Apply to UI
+                document.getElementById('ui-rsi-label').innerHTML = `RSI (14) <span class="text-gray-500 text-xs">曾 &lt; ${rsiThreshold} 触发</span>`;
+                if (requireMacd) {
+                    document.getElementById('ui-macd-status').innerHTML = `<i class="fa-solid fa-arrow-trend-up mr-1"></i>曾金叉确认`;
+                } else {
+                    document.getElementById('ui-macd-status').innerHTML = `<span class="text-gray-500 font-normal">未强制要求</span>`;
+                }
+                if (triggerDelta) {
+                    document.getElementById('ui-delta-label').innerHTML = `1m Delta 净值 <span class="text-xs">(阈值: > ${(deltaThreshold / 1000000).toFixed(1)}M USDT)</span>`;
+                } else {
+                    document.getElementById('ui-delta-label').innerHTML = `1m Delta 净值 <span class="text-xs text-gray-500">(已忽略此条件)</span>`;
+                }
+                document.getElementById('ui-tp1-label').textContent = `TP1 (${tp1}%)`;
+                document.getElementById('ui-tp2-label').textContent = `TP2 (${tp2}%)`;
+                document.getElementById('ui-tp3-label').textContent = `TP3 (${tp3}%)`;
+                if (breakevenSl) {
+                    document.getElementById('ui-sl-box').classList.remove('hidden');
+                } else {
+                    document.getElementById('ui-sl-box').classList.add('hidden');
+                }
+                
+                alert("✅ 策略参数已更新并应用");
+                closeConfig();
+                fetchStatus();
+            } catch (e) {
+                alert("保存失败: " + e.message);
+            }
+        }
+        
+        // --- Override Logic ---
+        let currentOverrideAction = 'market-buy';
+
+        function openOverrideModal() {
+            document.getElementById('override-modal').classList.remove('hidden');
+            document.getElementById('override-amount').value = currentConfig.dcaAmount || 3000;
+            const currentPriceText = document.getElementById('current-price').textContent.replace(/,/g, '');
+            document.getElementById('override-price').value = currentPriceText;
+        }
+
+        function closeOverrideModal() {
+            document.getElementById('override-modal').classList.add('hidden');
+        }
+
+        function switchOverrideTab(action, btnElement) {
+            currentOverrideAction = action;
+            const tabs = document.querySelectorAll('.override-tab-btn');
+            tabs.forEach(tab => {
+                tab.className = "override-tab-btn bg-gray-800 border border-gray-700 text-gray-400 py-2 rounded text-sm hover:bg-gray-700 transition";
+            });
+            if (action.includes('buy')) {
+                btnElement.className = "override-tab-btn bg-green-600/20 border border-green-500 text-green-500 py-2 rounded text-sm font-bold";
+            } else {
+                btnElement.className = "override-tab-btn bg-red-600/20 border border-red-500 text-red-500 py-2 rounded text-sm font-bold";
+            }
+            
+            const priceContainer = document.getElementById('override-price-container');
+            const amountContainer = document.getElementById('override-amount-container');
+            const closeWarning = document.getElementById('override-close-warning');
+            
+            if (action === 'market-buy') {
+                priceContainer.classList.add('hidden');
+                amountContainer.classList.remove('hidden');
+                closeWarning.classList.add('hidden');
+            } else if (action === 'limit-buy') {
+                priceContainer.classList.remove('hidden');
+                amountContainer.classList.remove('hidden');
+                closeWarning.classList.add('hidden');
+            } else if (action === 'market-sell') {
+                priceContainer.classList.add('hidden');
+                amountContainer.classList.add('hidden');
+                closeWarning.classList.remove('hidden');
+            }
+        }
+
+        async function executeOverride() {
+            const amount = document.getElementById('override-amount').value;
+            const price = document.getElementById('override-price').value;
+            
+            try {
+                await fetch('/api/spot-dca/override', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: currentOverrideAction, amount, price })
+                });
+                alert(`✅ 强制指令已执行: [${currentOverrideAction.toUpperCase()}]`);
+                closeOverrideModal();
+                fetchStatus();
+            } catch (e) {
+                alert("执行失败: " + e.message);
+            }
+        }
+    </script>
+</body>
+</html>
