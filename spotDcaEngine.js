@@ -122,7 +122,9 @@ async function fetchBalances() {
     }
     
     // 获取合约持仓
-    const posUrl = `https://fapi.binance.com/fapi/v2/positionRisk?symbol=BTCUSDT&${queryString}&signature=${signature}`;
+    const posQueryString = `symbol=BTCUSDT&${queryString}`;
+    const posSignature = crypto.createHmac('sha256', SPOT_API_SECRET).update(posQueryString).digest('hex');
+    const posUrl = `https://fapi.binance.com/fapi/v2/positionRisk?${posQueryString}&signature=${posSignature}`;
     const posRes = await axios.get(posUrl, {
       headers: { 'X-MBX-APIKEY': SPOT_API_KEY },
       httpAgent, httpsAgent
@@ -139,7 +141,15 @@ async function fetchBalances() {
         
         // 自动纠正内存中的 DCA 状态，防止由于网络或解析导致与真实持仓脱节
         if (config.tradeMode === 'futures') {
-            const activePos = state.futuresPositions.find(p => p.positionSide === (state.positionSide === 'short' ? 'SHORT' : 'LONG'));
+            let activePos = null;
+            if (state.positionSide) {
+                activePos = state.futuresPositions.find(p => p.positionSide === (state.positionSide === 'short' ? 'SHORT' : 'LONG'));
+            } else if (state.futuresPositions.length > 0) {
+                // 如果内存没有记录方向，但交易所里有持仓，自动接管第一个持仓
+                activePos = state.futuresPositions[0];
+                state.positionSide = activePos.positionSide === 'SHORT' ? 'short' : 'long';
+            }
+            
             if (activePos) {
                 const actualAmt = Math.abs(activePos.positionAmt);
                 if (Math.abs(state.totalCoinAmount - actualAmt) > 0.001 || state.totalCoinAmount === 0) {
@@ -153,6 +163,7 @@ async function fetchBalances() {
                 state.averagePrice = 0;
                 state.totalUsdtAmount = 0;
                 state.activeDcaCount = 0;
+                state.positionSide = null;
             }
         }
     }
