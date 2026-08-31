@@ -2,6 +2,8 @@ const express = require('express');
 const crypto = require('crypto');
 const axios = require('axios');
 const path = require('path');
+const mtfModule = require('./mtfModule');
+const regimeModule = require('./regimeModule');
 
 // 强制使用绝对路径加载 .env，防止 PM2 工作目录 (cwd) 偏移导致找不到文件
 const envPath = path.resolve(__dirname, '.env');
@@ -33,7 +35,10 @@ let config = {
   autoLoop: false, // 自动循环现货 DCA
   tp1: 50,
   tp2: 30,
-  tp3: 20
+  tp3: 20,
+  tp1Target: 1.5, // TP1 目标整体收益率 (%)
+  tp2Target: 3.0,
+  tp3Target: 5.0
 };
 
 let state = {
@@ -44,9 +49,13 @@ let state = {
   tp1Fired: false,
   tp2Fired: false,
   tp3Fired: false,
+  customTp1Price: null, // 自定义 TP1 价格 (覆盖默认比例)
+  customTp2Price: null,
+  customTp3Price: null,
   slMoved: false,
   logs: [],
   enabled: true,
+  isBotRunning: false, // 机器人主开关
   spotBalanceUsdt: 0, // 现货 USDT 余额
   spotBalanceBtc: 0   // 现货 BTC 余额
 };
@@ -105,11 +114,46 @@ fetchSpotBalance();
 setInterval(fetchSpotBalance, 60000);
 
 router.get('/status', (req, res) => {
+  // 获取真实的指标状态
+  let realIndicators = { rsi15m: null, macd15m: null, mtf1m: null };
+  try {
+    if (regimeModule && typeof regimeModule.getState === 'function') {
+        const regimeState = regimeModule.getState();
+        // 尝试从 regimeState 中提取
+        if (regimeState && regimeState.lastPrice) {
+            // 这里我们尽量简化，如果没有暴露具体指标数值，就直接在前端暂时只依赖后端推送的状态位
+        }
+    }
+    if (mtfModule && typeof mtfModule.getLatestResult === 'function') {
+        const mtfResult = mtfModule.getLatestResult();
+        if (mtfResult && mtfResult.rows) {
+            const row1m = mtfResult.rows.find(r => r.key === '1');
+            if (row1m) realIndicators.mtf1m = row1m.state;
+        }
+    }
+  } catch (e) {
+      console.error('[SpotDCA] Error fetching real indicators:', e.message);
+  }
+
   res.json({
     ok: true,
     config,
-    state
+    state,
+    realIndicators
   });
+});
+
+router.post('/toggle-bot', express.json(), (req, res) => {
+  state.isBotRunning = !state.isBotRunning;
+  res.json({ ok: true, isBotRunning: state.isBotRunning });
+});
+
+router.post('/custom-tp', express.json(), (req, res) => {
+  const { level, price } = req.body;
+  if (level === 1) state.customTp1Price = price || null;
+  if (level === 2) state.customTp2Price = price || null;
+  if (level === 3) state.customTp3Price = price || null;
+  res.json({ ok: true, state });
 });
 
 router.post('/config', express.json(), (req, res) => {
