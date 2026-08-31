@@ -244,9 +244,9 @@ function startBotLoop(getEngineConfig, getEngineState) {
                         const side = isLongTrade ? 'BUY' : 'SELL';
                         const posSide = isLongTrade ? 'LONG' : 'SHORT';
                         const res = await executeFuturesOrder(side, qtyToBuy, posSide);
-                        executedQty = parseFloat(res.executedQty || qtyToBuy);
+                        executedQty = parseFloat(res.executedQty) || qtyToBuy;
                         // 合约接口返回的是 cumQuoteQty 可能为空或0, 估算一下
-                        cumQuote = res.cumQuoteQty ? parseFloat(res.cumQuoteQty) : executedQty * currentPrice;
+                        cumQuote = (res.cumQuoteQty && parseFloat(res.cumQuoteQty) > 0) ? parseFloat(res.cumQuoteQty) : (executedQty * currentPrice);
                     } else {
                         if (!isLongTrade) throw new Error('现货模式不支持做空!');
                         // 现货模式: 首仓直接取配置金额，后续乘马丁格尔
@@ -323,7 +323,7 @@ function startBotLoop(getEngineConfig, getEngineState) {
                         const side = isLong ? 'SELL' : 'BUY';
                         const posSide = isLong ? 'LONG' : 'SHORT';
                         const res = await executeFuturesOrder(side, closeQty, posSide);
-                        cumQuote = res.cumQuoteQty ? parseFloat(res.cumQuoteQty) : closeQty * currentPrice;
+                        cumQuote = (res.cumQuoteQty && parseFloat(res.cumQuoteQty) > 0) ? parseFloat(res.cumQuoteQty) : (closeQty * currentPrice);
                     } else {
                         const res = await executeRealOrder('SELL', closeQty, null);
                         cumQuote = parseFloat(res.cummulativeQuoteQty);

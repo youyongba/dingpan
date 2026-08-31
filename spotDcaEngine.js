@@ -120,6 +120,35 @@ async function fetchBalances() {
     if (futuresRes.data && futuresRes.data.availableBalance) {
       state.futuresBalanceUsdt = parseFloat(futuresRes.data.availableBalance);
     }
+    
+    if (futuresRes.data && Array.isArray(futuresRes.data.positions)) {
+        state.futuresPositions = futuresRes.data.positions.filter(p => parseFloat(p.positionAmt) !== 0).map(p => ({
+            positionAmt: parseFloat(p.positionAmt),
+            entryPrice: parseFloat(p.entryPrice),
+            unRealizedProfit: parseFloat(p.unRealizedProfit),
+            positionSide: p.positionSide,
+            leverage: p.leverage
+        }));
+        
+        // 自动纠正内存中的 DCA 状态，防止由于网络或解析导致与真实持仓脱节
+        if (config.tradeMode === 'futures') {
+            const targetSide = state.positionSide === 'short' ? 'SHORT' : 'LONG';
+            const activePos = state.futuresPositions.find(p => p.positionSide === targetSide);
+            if (activePos) {
+                const actualAmt = Math.abs(activePos.positionAmt);
+                if (Math.abs(state.totalCoinAmount - actualAmt) > 0.001) {
+                    state.totalCoinAmount = actualAmt;
+                    state.averagePrice = activePos.entryPrice;
+                    state.totalUsdtAmount = actualAmt * activePos.entryPrice;
+                }
+            } else if (state.totalCoinAmount > 0) {
+                state.totalCoinAmount = 0;
+                state.averagePrice = 0;
+                state.totalUsdtAmount = 0;
+                state.activeDcaCount = 0;
+            }
+        }
+    }
   } catch (error) {
     console.error('[SpotDCA] Futures Balance Error:', error.message);
   }
@@ -287,8 +316,8 @@ router.post('/override', express.json(), async (req, res) => {
         const side = action === 'market-buy-short' ? 'SELL' : 'BUY';
         const posSide = action === 'market-buy-short' ? 'SHORT' : 'LONG';
         const orderRes = await executeFuturesOrder(side, qtyToBuy, posSide);
-        executedQty = parseFloat(orderRes.executedQty || qtyToBuy);
-        cumQuote = orderRes.cumQuoteQty ? parseFloat(orderRes.cumQuoteQty) : executedQty * currentPrice;
+        executedQty = parseFloat(orderRes.executedQty) || qtyToBuy;
+        cumQuote = (orderRes.cumQuoteQty && parseFloat(orderRes.cumQuoteQty) > 0) ? parseFloat(orderRes.cumQuoteQty) : (executedQty * currentPrice);
       } else {
         if (action === 'market-buy-short') throw new Error('现货模式不支持做空');
         if (!amt || amt <= 0) throw new Error('无效的买入金额');
@@ -345,6 +374,8 @@ router.post('/override', express.json(), async (req, res) => {
     }
   }
   
+  // 立即刷新余额和持仓，确保 UI 状态同步
+  await fetchBalances();
   res.json({ ok: true, state });
 });
 
