@@ -171,24 +171,47 @@ function startBotLoop(getEngineConfig, getEngineState) {
             }
 
             if (triggerMtfFired || triggerDeltaFired) {
+                const maxSteps = config.dcaMaxSteps || 5;
+                if (state.activeDcaCount >= maxSteps) {
+                    botSignalState.lastDcaTime = now;
+                    botSignalState.rsiHitTime = 0;
+                    botSignalState.macdHitTime = 0;
+                    console.log(`[AutoBot] 已达到最大 DCA 次数 (${maxSteps})，本次信号被忽略`);
+                    return;
+                }
+
                 botSignalState.isExecuting = true;
                 try {
                     const actionLabel = isLong ? '买入(做多)' : '卖出(做空)';
-                    const logMsg = `[AutoBot] 触发${actionLabel}! (MTF:${triggerMtfFired}, Delta:${triggerDeltaFired})`;
+                    const logMsg = `[AutoBot] 触发${actionLabel}! (MTF:${triggerMtfFired}, Delta:${triggerDeltaFired}) - 第 ${state.activeDcaCount + 1} 仓`;
                     console.log(logMsg);
                     
                     // 根据模式发送请求
                     let executedQty = 0;
                     let cumQuote = 0;
                     
+                    // 智能分配乘数
+                    const multiplier = config.martingaleMultiplier || 1.0;
+                    
                     if (config.tradeMode === 'futures') {
                         // 设置杠杆
                         await setFuturesLeverage(config.leverage || 100);
                         
-                        // 计算合约开仓数量: (可用余额 * 仓位占比% * 杠杆) / 现价
-                        const marginToUse = state.futuresBalanceUsdt * ((config.positionSizePct || 3.0) / 100);
-                        const notionalSize = marginToUse * (config.leverage || 100);
-                        let qtyToBuy = notionalSize / currentPrice;
+                        // 计算合约开仓总名义价值: (可用余额 * 最大仓位占比% * 杠杆)
+                        const totalMarginToUse = state.futuresBalanceUsdt * ((config.positionSizePct || 3.0) / 100);
+                        const totalNotionalSize = totalMarginToUse * (config.leverage || 100);
+                        
+                        // 基于马丁格尔策略智能分配首仓名义价值
+                        let baseNotional = 0;
+                        if (multiplier === 1) {
+                            baseNotional = totalNotionalSize / maxSteps;
+                        } else {
+                            baseNotional = totalNotionalSize * (1 - multiplier) / (1 - Math.pow(multiplier, maxSteps));
+                        }
+                        
+                        // 当前阶梯应下名义价值
+                        const currentStepNotional = baseNotional * Math.pow(multiplier, state.activeDcaCount);
+                        let qtyToBuy = currentStepNotional / currentPrice;
                         
                         // 向下取整到 3 位小数 (BTCUSDT U本位合约 lotSize: 0.001)
                         qtyToBuy = Math.floor(qtyToBuy * 1000) / 1000;
@@ -202,8 +225,9 @@ function startBotLoop(getEngineConfig, getEngineState) {
                         cumQuote = res.cumQuoteQty ? parseFloat(res.cumQuoteQty) : executedQty * currentPrice;
                     } else {
                         if (!isLong) throw new Error('现货模式不支持做空!');
-                        // 现货模式
-                        const res = await executeRealOrder('BUY', null, config.dcaAmount);
+                        // 现货模式: 首仓直接取配置金额，后续乘马丁格尔
+                        const currentStepUsdt = config.dcaAmount * Math.pow(multiplier, state.activeDcaCount);
+                        const res = await executeRealOrder('BUY', null, currentStepUsdt);
                         executedQty = parseFloat(res.executedQty);
                         cumQuote = parseFloat(res.cummulativeQuoteQty);
                     }
@@ -237,12 +261,12 @@ function startBotLoop(getEngineConfig, getEngineState) {
             
             let tp1Price, tp2Price, tp3Price;
             if (isLong) {
-                tp1Price = state.customTp1Price || (avgP * (1 + (config.tp1Target || 1.5) / 100));
+                tp1Price = state.customTp1Price || (avgP * (1 + (config.tp1Target || 1.0) / 100));
                 tp2Price = state.customTp2Price || (avgP * (1 + (config.tp2Target || 3.0) / 100));
                 tp3Price = state.customTp3Price || (avgP * (1 + (config.tp3Target || 5.0) / 100));
             } else {
                 // 做空止盈：价格下跌
-                tp1Price = state.customTp1Price || (avgP * (1 - (config.tp1Target || 1.5) / 100));
+                tp1Price = state.customTp1Price || (avgP * (1 - (config.tp1Target || 1.0) / 100));
                 tp2Price = state.customTp2Price || (avgP * (1 - (config.tp2Target || 3.0) / 100));
                 tp3Price = state.customTp3Price || (avgP * (1 - (config.tp3Target || 5.0) / 100));
             }

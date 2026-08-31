@@ -38,12 +38,14 @@ let config = {
   triggerMtf: true,
   deltaThreshold: 2500000,
   dcaAmount: 3000,
+  dcaMaxSteps: 5, // 最大加仓次数
+  martingaleMultiplier: 2.0, // 马丁格尔加仓倍数
   breakevenSl: true,
   autoLoop: false, // 自动循环现货 DCA
   tp1: 50,
   tp2: 30,
   tp3: 20,
-  tp1Target: 1.5, // TP1 目标整体收益率 (%)
+  tp1Target: 1.0, // TP1 目标整体收益率 (%)
   tp2Target: 3.0,
   tp3Target: 5.0
 };

@@ -490,7 +490,7 @@
                             <div class="flex gap-4 items-center">
                                 <div class="flex-1">
                                     <span class="text-xs text-gray-400">TP1 目标收益率 (%)</span>
-                                    <input type="number" step="0.1" id="cfg-tp1-target" value="1.5" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-1 mt-1 text-white text-center">
+                                    <input type="number" step="0.1" id="cfg-tp1-target" value="1.0" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-1 mt-1 text-white text-center">
                                 </div>
                                 <div class="flex-1">
                                     <span class="text-xs text-gray-400">TP2 目标收益率 (%)</span>
@@ -879,7 +879,7 @@
                 document.getElementById('ui-dca-batch-label').textContent = `当前现货持仓价值 (DCA 批次 #${currentState.activeDcaCount})`;
                 
                 // TP Logic (Based on overall average price to ensure overall profitability)
-                const tp1Target = currentConfig.tp1Target || 1.5;
+                const tp1Target = currentConfig.tp1Target || 1.0;
                 const tp2Target = currentConfig.tp2Target || 3.0;
                 const tp3Target = currentConfig.tp3Target || 5.0;
                 
@@ -1094,10 +1094,14 @@
             document.getElementById('cfg-tp1').value = currentConfig.tp1;
             document.getElementById('cfg-tp2').value = currentConfig.tp2;
             document.getElementById('cfg-tp3').value = currentConfig.tp3;
-            document.getElementById('cfg-tp1-target').value = currentConfig.tp1Target || 1.5;
+            document.getElementById('cfg-tp1-target').value = currentConfig.tp1Target || 1.0;
             document.getElementById('cfg-tp2-target').value = currentConfig.tp2Target || 3.0;
             document.getElementById('cfg-tp3-target').value = currentConfig.tp3Target || 5.0;
             document.getElementById('cfg-dca-amount').value = currentConfig.dcaAmount;
+            
+            if (currentConfig.dcaMaxSteps) document.getElementById('gen-max-steps').value = currentConfig.dcaMaxSteps;
+            if (currentConfig.martingaleMultiplier) document.getElementById('gen-martingale').value = currentConfig.martingaleMultiplier;
+            
             document.getElementById('cfg-breakeven-sl').checked = currentConfig.breakevenSl;
             document.getElementById('cfg-auto-loop').checked = !!currentConfig.autoLoop;
             
@@ -1172,6 +1176,8 @@
             const tp2Target = parseFloat(document.getElementById('cfg-tp2-target').value) || 3.0;
             const tp3Target = parseFloat(document.getElementById('cfg-tp3-target').value) || 5.0;
             const dcaAmount = parseInt(document.getElementById('cfg-dca-amount').value);
+            const dcaMaxSteps = parseInt(document.getElementById('gen-max-steps').value) || 5;
+            const martingaleMultiplier = parseFloat(document.getElementById('gen-martingale').value) || 1.0;
             const breakevenSl = document.getElementById('cfg-breakeven-sl').checked;
             const autoLoop = document.getElementById('cfg-auto-loop').checked;
 
@@ -1187,7 +1193,7 @@
             const payload = {
                 tradeMode: currentTradeMode, tradeDirection, leverage, positionSizePct,
                 rsiThreshold, rsiOverboughtThreshold, requireMacd, triggerDelta, triggerMtf, deltaThreshold,
-                tp1, tp2, tp3, tp1Target, tp2Target, tp3Target, dcaAmount, breakevenSl, autoLoop
+                tp1, tp2, tp3, tp1Target, tp2Target, tp3Target, dcaAmount, dcaMaxSteps, martingaleMultiplier, breakevenSl, autoLoop
             };
 
             try {
