@@ -119,20 +119,22 @@ router.get('/status', (req, res) => {
   try {
     if (regimeModule && typeof regimeModule.getState === 'function') {
         const regimeState = regimeModule.getState();
-        if (regimeState) {
-            // 尝试从 regimeState 中提取 RSI 和 MACD (从 regimes 对象中)
-            if (regimeState.regimes && regimeState.regimes['15m']) {
-                const r15m = regimeState.regimes['15m'];
-                realIndicators.rsi15m = r15m.rsi;
-                realIndicators.macd15m = r15m.macdState;
+        if (regimeState && regimeState.m15) {
+            const m15 = regimeState.m15;
+            if (m15.rsi && m15.rsi.length > 0) {
+                realIndicators.rsi15m = m15.rsi[m15.rsi.length - 1];
+            }
+            if (m15.macd && m15.signal && m15.macd.length > 0) {
+                const macd = m15.macd[m15.macd.length - 1];
+                const sig = m15.signal[m15.signal.length - 1];
+                realIndicators.macd15m = macd > sig ? 'MACD 金叉 (多头)' : 'MACD 死叉 (空头)';
             }
         }
     }
-    if (mtfModule && typeof mtfModule.getLatestResult === 'function') {
-        const mtfResult = mtfModule.getLatestResult();
-        if (mtfResult && mtfResult.rows) {
-            const row1m = mtfResult.rows.find(r => r.key === '1');
-            if (row1m) realIndicators.mtf1m = row1m.state;
+    if (mtfModule && typeof mtfModule.getTimeframe === 'function') {
+        const row1m = mtfModule.getTimeframe('1');
+        if (row1m && row1m.state) {
+            realIndicators.mtf1m = row1m.state;
         }
     }
   } catch (e) {

@@ -1926,6 +1926,7 @@ module.exports = {
   setNotifier,
   setFundingProvider,
   getLatestPlan,
+  getState: () => cache,
   // 暴露纯函数给回测引擎复用 — 与生产环境用同一套指标/判定/计划逻辑,
   // 保证回测结果与未来真实信号一致.
   _internal: {

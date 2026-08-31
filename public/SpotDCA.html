@@ -657,7 +657,24 @@
         
         // --- Real-time VPOC from aggTrade ---
         function initAggTrade() {
-            const ws = new WebSocket('wss://fstream.binance.com/ws/btcusdt@aggTrade');
+            // Using spot stream for spot DCA, fallback to fstream if needed, but spot is stream.binance.com:9443
+            const ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade');
+            
+            ws.onopen = () => {
+                console.log('[SpotDCA] WebSocket Connected to Binance Spot aggTrade');
+                document.getElementById('ui-delta-msg').textContent = '数据流已连接，等待成交...';
+            };
+            
+            ws.onerror = (e) => {
+                console.error('[SpotDCA] WebSocket Error:', e);
+                document.getElementById('ui-delta-msg').textContent = 'WebSocket 连接失败';
+            };
+            
+            ws.onclose = () => {
+                console.log('[SpotDCA] WebSocket Closed. Reconnecting in 3s...');
+                setTimeout(initAggTrade, 3000);
+            };
+
             ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
                 const price = parseFloat(data.p);
