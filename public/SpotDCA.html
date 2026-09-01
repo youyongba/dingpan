@@ -222,7 +222,10 @@
 
                 <!-- Scaled TP -->
                 <div>
-                    <div class="text-sm text-gray-400 mb-2">分批止盈系统 (Scaled TP)</div>
+                    <div class="flex justify-between items-center mb-2">
+                        <div class="text-sm text-gray-400">分批止盈系统 (Scaled TP)</div>
+                        <button id="btn-refresh-atr" onclick="refreshStaticAtr()" class="hidden px-2 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded shadow transition-colors"><i class="fa-solid fa-rotate-right mr-1"></i>重新计算止盈</button>
+                    </div>
                     <div class="space-y-2">
                         <div class="flex items-center justify-between p-2 bg-gray-800 rounded text-sm" id="ui-tp1-container">
                             <span class="text-gray-400" id="ui-tp1-label">TP1 (50%)</span>
@@ -435,11 +438,10 @@
                                     </select>
                                 </div>
                                 <div>
-                                    <label class="block text-xs text-gray-400 mb-1">目标整体止盈基准</label>
+                                    <label class="block text-xs text-gray-400 mb-1">目标整体止盈基准 (TP模式)</label>
                                     <select id="gen-tp-type" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-1.5 text-sm text-white focus:border-blue-500">
-                                        <option value="fixed">整体仓位收益 1.5% (保底)</option>
-                                        <option value="atr">基于 15m ATR (且强制 > 整体均价+1%)</option>
-                                        <option value="vpoc">回归上一层 vPOC (且强制 > 整体均价+1%)</option>
+                                        <option value="percent">固定百分比 (%)</option>
+                                        <option value="atr">动态 ATR (1H周期)</option>
                                     </select>
                                 </div>
                             </div>
@@ -478,7 +480,8 @@
                                     <label class="text-xs text-gray-400">止盈模式:</label>
                                     <select id="cfg-tp-mode" class="bg-gray-900 border border-gray-600 rounded px-2 py-0.5 text-white text-xs outline-none">
                                         <option value="percent">固定百分比 (%)</option>
-                                        <option value="atr">动态 ATR (1H周期)</option>
+                                        <option value="atr_static">静态 ATR (建仓时锁定)</option>
+                                        <option value="atr_dynamic">动态 ATR (随行情浮动)</option>
                                     </select>
                                 </div>
                             </div>
@@ -514,6 +517,7 @@
                                     <input type="number" step="0.1" id="cfg-tp3-target" value="5.0" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-1 mt-1 text-white text-center">
                                 </div>
                             </div>
+                            <div id="tp-config-preview" class="mt-2 p-2 bg-gray-800 rounded border border-gray-700 text-xs text-gray-300 hidden"></div>
                             
                             <div id="tp-error" class="text-red-500 text-xs mt-3 hidden">止盈比例总和必须为 100%</div>
                         </div>
@@ -612,6 +616,27 @@
             renderUI();
         });
 
+        function updateTpConfigPreview() {
+            const mode = document.getElementById('cfg-tp-mode').value;
+            const t1 = parseFloat(document.getElementById('cfg-tp1-target').value) || 0;
+            const currentAtr = currentRealIndicators?.currentAtr || 0;
+            const previewBox = document.getElementById('tp-config-preview');
+            
+            if (currentPrice === 0) return;
+            previewBox.classList.remove('hidden');
+            if (mode === 'percent') {
+                previewBox.innerHTML = `模式: <b>固定百分比</b> | 预期 TP1 距离: <span class="text-green">±${(currentPrice * t1 / 100).toFixed(2)}</span> 刀`;
+            } else {
+                const isStatic = mode === 'atr_static';
+                previewBox.innerHTML = `当前 1H ATR: <span class="text-yellow-500">${currentAtr.toFixed(2)}</span> | 模式: <b>${isStatic ? '静态' : '动态'} ATR</b> | 预期 TP1 距离: <span class="text-green">±${(currentAtr * t1).toFixed(2)}</span> 刀`;
+            }
+        }
+
+        ['cfg-tp-mode', 'cfg-tp1-target', 'cfg-tp2-target', 'cfg-tp3-target'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.addEventListener('input', updateTpConfigPreview);
+        });
+
         // 格式化金额，支持隐藏
         const formatMoney = (val, fractionDigits = 2) => {
             if (!isDataVisible) return '******';
@@ -661,6 +686,15 @@
             } catch (e) {
                 console.error("Failed to update custom TP:", e);
                 alert("修改失败，请检查网络");
+            }
+        }
+
+        async function refreshStaticAtr() {
+            try {
+                await fetch('/api/spot-dca/refresh-atr', { method: 'POST' });
+                fetchStatus();
+            } catch (e) {
+                console.error(e);
             }
         }
 
@@ -992,7 +1026,8 @@
             
             if (avgPrice > 0 && currentPrice > 0) {
                 const tpMode = currentConfig.tpMode || 'percent';
-                const atr = currentRealIndicators?.currentAtr || 0;
+                const currentAtr = currentRealIndicators?.currentAtr || 0;
+                const activeAtr = (tpMode === 'atr_static' && currentState.lockedAtr > 0) ? currentState.lockedAtr : currentAtr;
                 
                 const tp1Target = currentConfig.tp1Target || 1.0;
                 const tp2Target = currentConfig.tp2Target || 3.0;
@@ -1004,14 +1039,15 @@
                 const isLong = (currentState.positionSide !== 'short');
                 const sign = isLong ? 1 : -1;
                 
-                if (tpMode === 'atr' && atr > 0) {
-                    tp1PriceAuto = avgPrice + sign * (atr * tp1Target);
-                    tp2PriceAuto = avgPrice + sign * (atr * tp2Target);
-                    tp3PriceAuto = avgPrice + sign * (atr * tp3Target);
+                if (tpMode.startsWith('atr') && activeAtr > 0) {
+                    tp1PriceAuto = avgPrice + sign * (activeAtr * tp1Target);
+                    tp2PriceAuto = avgPrice + sign * (activeAtr * tp2Target);
+                    tp3PriceAuto = avgPrice + sign * (activeAtr * tp3Target);
                     
-                    tp1LabelTxt = `目标 +${tp1Target}x ATR`;
-                    tp2LabelTxt = `目标 +${tp2Target}x ATR`;
-                    tp3LabelTxt = `目标 +${tp3Target}x ATR`;
+                    const modeTxt = tpMode === 'atr_static' ? `静态ATR:${activeAtr.toFixed(1)}` : `动态ATR:${activeAtr.toFixed(1)}`;
+                    tp1LabelTxt = `目标 +${tp1Target}x (${modeTxt})`;
+                    tp2LabelTxt = `目标 +${tp2Target}x (${modeTxt})`;
+                    tp3LabelTxt = `目标 +${tp3Target}x (${modeTxt})`;
                 } else {
                     tp1PriceAuto = avgPrice * (1 + sign * (tp1Target / 100));
                     tp2PriceAuto = avgPrice * (1 + sign * (tp2Target / 100));
@@ -1040,7 +1076,9 @@
                     const containerEl = document.getElementById(`ui-tp${level}-container`);
                     const editEl = document.getElementById(`ui-tp${level}-edit`);
                     
-                    if (currentPrice >= price || fired) {
+                    const isHit = isLong ? (currentPrice >= price) : (currentPrice <= price);
+                    
+                    if (isHit || fired) {
                         statusEl.innerHTML = '<i class="fa-solid fa-check"></i> 已触发';
                         statusEl.className = 'text-green text-xs';
                         priceEl.classList.add('line-through');
@@ -1059,6 +1097,15 @@
                 updateTpUI(1, tp1Price, currentState.tp1Fired);
                 updateTpUI(2, tp2Price, currentState.tp2Fired);
                 updateTpUI(3, tp3Price, currentState.tp3Fired);
+                
+                const btnRefresh = document.getElementById('btn-refresh-atr');
+                if (btnRefresh) {
+                    if (tpMode === 'atr_static') {
+                        btnRefresh.classList.remove('hidden');
+                    } else {
+                        btnRefresh.classList.add('hidden');
+                    }
+                }
                 
                 // SL logic
                 if ((currentPrice >= tp1Price || currentState.tp1Fired) && currentConfig.breakevenSl) {
@@ -1254,6 +1301,7 @@
             document.getElementById('cfg-tp1-target').value = currentConfig.tp1Target || 1.0;
             document.getElementById('cfg-tp2-target').value = currentConfig.tp2Target || 3.0;
             document.getElementById('cfg-tp3-target').value = currentConfig.tp3Target || 5.0;
+            updateTpConfigPreview();
             document.getElementById('cfg-dca-amount').value = currentConfig.dcaAmount;
             
             if (currentConfig.dcaMaxSteps) document.getElementById('gen-max-steps').value = currentConfig.dcaMaxSteps;
@@ -1320,6 +1368,9 @@
                 document.getElementById('cfg-dca-amount').value = baseAmount;
             }
             
+            const tpMode = document.getElementById('gen-tp-type').value;
+            document.getElementById('cfg-tp-mode').value = tpMode;
+            
             const preview = document.getElementById('gen-result-preview');
             preview.classList.remove('hidden');
             
@@ -1347,7 +1398,13 @@
                 currentAmount *= multiplier;
             }
             planHtml += `</ul>`;
-            planHtml += `<div class="mt-2 text-blue-400">注意：每次加仓都会拉低整体均价，TP1 止盈线将自动基于最新整体均价计算。</div>`;
+            
+            const atr = currentRealIndicators?.currentAtr || 0;
+            const tpModeDesc = document.getElementById('gen-tp-type').value === 'atr' 
+                ? `1H ATR (当前 1H ATR: ${atr.toFixed(1)} 点)` 
+                : '固定百分比 (%)';
+                
+            planHtml += `<div class="mt-2 text-blue-400">注意：每次加仓都会拉低整体均价，分批止盈线将自动基于最新整体均价和 ${tpModeDesc} 计算。</div>`;
             
             preview.innerHTML = planHtml;
         }

@@ -88,6 +88,7 @@ let state = {
   customTp1Price: null, // 自定义 TP1 价格 (覆盖默认比例)
   customTp2Price: null,
   customTp3Price: null,
+  lockedAtr: 0,
   slMoved: false,
   logs: [],
   enabled: true,
@@ -354,6 +355,21 @@ router.post('/config', express.json(), (req, res) => {
   res.json({ ok: true, config });
 });
 
+router.post('/refresh-atr', express.json(), (req, res) => {
+  try {
+      if (regimeModule && typeof regimeModule.getState === 'function') {
+          const regimeState = regimeModule.getState();
+          if (regimeState && regimeState.indicators && regimeState.indicators.atr) {
+              const atrArr = regimeState.indicators.atr;
+              state.lockedAtr = atrArr[atrArr.length - 1];
+              state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动刷新静态 ATR 为: ${state.lockedAtr.toFixed(2)}`);
+          }
+      }
+  } catch (e) {}
+  saveData();
+  res.json({ ok: true, state });
+});
+
 router.post('/override', express.json(), async (req, res) => {
   const { action, amount, price } = req.body;
   const logMsg = `[Override] 强制发起 ${action} ${amount || ''}`;
@@ -396,6 +412,16 @@ router.post('/override', express.json(), async (req, res) => {
       state.totalCoinAmount += executedQty;
       state.averagePrice = state.totalUsdtAmount / state.totalCoinAmount;
       
+      try {
+          if (regimeModule && typeof regimeModule.getState === 'function') {
+              const regimeState = regimeModule.getState();
+              if (regimeState && regimeState.indicators && regimeState.indicators.atr) {
+                  const atrArr = regimeState.indicators.atr;
+                  state.lockedAtr = atrArr[atrArr.length - 1];
+              }
+          }
+      } catch(e){}
+      
       // 手动加仓后重置止盈状态，按新均价计算
       state.tp1Fired = false;
       state.tp2Fired = false;
@@ -434,6 +460,7 @@ router.post('/override', express.json(), async (req, res) => {
       state.tp1Fired = false;
       state.tp2Fired = false;
       state.tp3Fired = false;
+      state.lockedAtr = 0;
       state.positionSide = null; // 清空持仓方向
     } catch (e) {
       const errorMsg = e.response ? JSON.stringify(e.response.data) : e.message;
