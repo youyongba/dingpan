@@ -654,9 +654,9 @@ let cache = {
   error: null,
 };
 
-async function fetchKlines(interval, limit) {
+async function fetchKlines(targetSymbol, interval, limit) {
   const { data } = await axios.get(`${BINANCE_FAPI}/fapi/v1/klines`, {
-    params: { symbol: SYMBOL, interval, limit },
+    params: { symbol: targetSymbol, interval, limit },
     timeout: TIMEOUT,
     httpAgent, httpsAgent,
   });
@@ -672,7 +672,7 @@ async function refresh() {
   if (_isRefreshing) return;
   _isRefreshing = true;
   try {
-    const klinesList = await Promise.all(TIMEFRAMES.map((tf) => fetchKlines(tf.interval, tf.limit)));
+    const klinesList = await Promise.all(TIMEFRAMES.map((tf) => fetchKlines(SYMBOL, tf.interval, tf.limit)));
     const tfRows = TIMEFRAMES.map((tf, i) => scoreTimeframe(tf, klinesList[i]));
     const tfMap = Object.fromEntries(tfRows.map((t) => [t.key, t]));
 
@@ -714,15 +714,54 @@ async function refresh() {
   }
 }
 
+async function analyzeSymbol(targetSymbol) {
+  const klinesList = await Promise.all(TIMEFRAMES.map((tf) => fetchKlines(targetSymbol, tf.interval, tf.limit)));
+  const tfRows = TIMEFRAMES.map((tf, i) => scoreTimeframe(tf, klinesList[i]));
+  const tfMap = Object.fromEntries(tfRows.map((t) => [t.key, t]));
+
+  const indicators = buildIndicators(tfMap);
+  const summary = buildSummary(tfMap, tfRows);
+
+  return {
+    ok: true,
+    updatedAt: Date.now(),
+    symbol: targetSymbol,
+    timeframes: tfRows.map(({ key, label, score, state, action, side, components, recentCross, candle }) => ({
+      key, label, score, state, action, side, components, recentCross, candle,
+    })),
+    indicators,
+    summary,
+    error: null,
+  };
+}
+
 // ---------------------- 路由 ----------------------
 
-router.get('/status', (req, res) => {
-  res.json(cache);
+router.get('/status', async (req, res) => {
+  const targetSymbol = req.query.symbol ? req.query.symbol.toUpperCase() : SYMBOL;
+  if (targetSymbol === SYMBOL) {
+    return res.json(cache);
+  }
+  try {
+    const result = await analyzeSymbol(targetSymbol);
+    res.json(result);
+  } catch(e) {
+    res.json({ ok: false, error: e.message || String(e), symbol: targetSymbol });
+  }
 });
 
 router.post('/refresh', async (req, res) => {
-  await refresh();
-  res.json({ ok: cache.ok, updatedAt: cache.updatedAt, error: cache.error });
+  const targetSymbol = req.query.symbol ? req.query.symbol.toUpperCase() : SYMBOL;
+  if (targetSymbol === SYMBOL) {
+    await refresh();
+    return res.json({ ok: cache.ok, updatedAt: cache.updatedAt, error: cache.error });
+  }
+  try {
+    const result = await analyzeSymbol(targetSymbol);
+    res.json({ ok: true, updatedAt: result.updatedAt, error: null });
+  } catch(e) {
+    res.json({ ok: false, error: e.message || String(e), symbol: targetSymbol });
+  }
 });
 
 // ---------------------- 启动 ----------------------

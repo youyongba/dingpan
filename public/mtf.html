@@ -99,7 +99,13 @@
 </head>
 <body>
 
-<h1>📊 多周期共振 · <span id="symbol">BTCUSDT</span></h1>
+<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; flex-wrap: wrap; gap: 8px;">
+  <h1 style="margin-bottom: 0;">📊 多周期共振 · <span id="symbol">BTCUSDT</span></h1>
+  <div style="display: flex; gap: 6px;">
+    <input type="text" id="symbolInput" placeholder="例如 ETHUSDT" style="background: var(--panel); border: 1px solid var(--border); color: var(--text); padding: 4px 8px; border-radius: 4px; font-size: 13px; width: 120px; outline: none; text-transform: uppercase;">
+    <button id="searchBtn" style="background: var(--accent); color: #fff; border: none; padding: 4px 12px; border-radius: 4px; font-size: 13px; cursor: pointer; font-weight: bold;">搜索</button>
+  </div>
+</div>
 <div class="meta">
   W / D / 4H / 1H / 15M / 5M / 1M 七周期评分 ·
   <span id="updatedAt">加载中...</span> ·
@@ -155,6 +161,7 @@
 <script>
 (() => {
   const REFRESH_MS = 30 * 1000;
+  let currentSymbol = '';
 
   const sideClass = (side) => side === 'bull' ? 'cell-bull' : side === 'bear' ? 'cell-bear' : 'cell-mid';
   const tendencyClass = (t) => t === '多' ? 'cell-bull' : t === '空' ? 'cell-bear' : 'cell-mid';
@@ -256,8 +263,9 @@
   async function load(manual = false) {
     const errEl = document.getElementById('err');
     try {
-      if (manual) await fetch('/api/mtf/refresh', { method: 'POST' });
-      const r = await fetch('/api/mtf/status');
+      const qs = currentSymbol ? `?symbol=${currentSymbol}` : '';
+      if (manual) await fetch(`/api/mtf/refresh${qs}`, { method: 'POST' });
+      const r = await fetch(`/api/mtf/status${qs}`);
       const d = await r.json();
       if (d.error && !d.ok) throw new Error(d.error);
       errEl.style.display = 'none';
@@ -276,6 +284,20 @@
     e.preventDefault();
     load(true);
   });
+
+  document.getElementById('searchBtn').addEventListener('click', () => {
+    const val = document.getElementById('symbolInput').value.trim().toUpperCase();
+    if (val) {
+      currentSymbol = val;
+      document.getElementById('symbol').textContent = currentSymbol + ' (加载中...)';
+      load(true);
+    }
+  });
+
+  document.getElementById('symbolInput').addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') document.getElementById('searchBtn').click();
+  });
+
   setInterval(load, REFRESH_MS);
   load();
 })();
