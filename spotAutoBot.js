@@ -110,7 +110,6 @@ function startBotLoop(getEngineConfig, getEngineState) {
         const config = getEngineConfig();
         const state = getEngineState();
         
-        if (!config.autoLoop) return;
         if (!state.isLongBotRunning && !state.isShortBotRunning) return;
         if (botSignalState.isExecuting) return;
 
@@ -269,6 +268,14 @@ function startBotLoop(getEngineConfig, getEngineState) {
                     state.totalCoinAmount += executedQty;
                     state.averagePrice = state.totalUsdtAmount / state.totalCoinAmount;
                     
+                    // 加仓后重置止盈状态和自定义价格，以便按新均价重新计算
+                    state.tp1Fired = false;
+                    state.tp2Fired = false;
+                    state.tp3Fired = false;
+                    state.customTp1Price = null;
+                    state.customTp2Price = null;
+                    state.customTp3Price = null;
+                    
                     state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 真实${actionLabel}: ${cumQuote.toFixed(2)} USDT @ ${avgP.toFixed(2)}`);
                     
                     botSignalState.lastDcaTime = now;
@@ -292,16 +299,43 @@ function startBotLoop(getEngineConfig, getEngineState) {
             const avgP = state.averagePrice;
             const isLong = state.positionSide !== 'short'; // 默认视为多头
             
+            let atrValue = 0;
+            if (config.tpMode === 'atr') {
+                try {
+                    const regimeState = regimeModule.getState();
+                    if (regimeState && regimeState.indicators && regimeState.indicators.atr) {
+                        const atrArr = regimeState.indicators.atr;
+                        atrValue = atrArr[atrArr.length - 1];
+                    }
+                } catch (e) {}
+            }
+            
+            const tp1Target = config.tp1Target || 1.0;
+            const tp2Target = config.tp2Target || 3.0;
+            const tp3Target = config.tp3Target || 5.0;
+            
             let tp1Price, tp2Price, tp3Price;
             if (isLong) {
-                tp1Price = state.customTp1Price || (avgP * (1 + (config.tp1Target || 1.0) / 100));
-                tp2Price = state.customTp2Price || (avgP * (1 + (config.tp2Target || 3.0) / 100));
-                tp3Price = state.customTp3Price || (avgP * (1 + (config.tp3Target || 5.0) / 100));
+                if (config.tpMode === 'atr' && atrValue > 0) {
+                    tp1Price = state.customTp1Price || (avgP + atrValue * tp1Target);
+                    tp2Price = state.customTp2Price || (avgP + atrValue * tp2Target);
+                    tp3Price = state.customTp3Price || (avgP + atrValue * tp3Target);
+                } else {
+                    tp1Price = state.customTp1Price || (avgP * (1 + tp1Target / 100));
+                    tp2Price = state.customTp2Price || (avgP * (1 + tp2Target / 100));
+                    tp3Price = state.customTp3Price || (avgP * (1 + tp3Target / 100));
+                }
             } else {
                 // 做空止盈：价格下跌
-                tp1Price = state.customTp1Price || (avgP * (1 - (config.tp1Target || 1.0) / 100));
-                tp2Price = state.customTp2Price || (avgP * (1 - (config.tp2Target || 3.0) / 100));
-                tp3Price = state.customTp3Price || (avgP * (1 - (config.tp3Target || 5.0) / 100));
+                if (config.tpMode === 'atr' && atrValue > 0) {
+                    tp1Price = state.customTp1Price || (avgP - atrValue * tp1Target);
+                    tp2Price = state.customTp2Price || (avgP - atrValue * tp2Target);
+                    tp3Price = state.customTp3Price || (avgP - atrValue * tp3Target);
+                } else {
+                    tp1Price = state.customTp1Price || (avgP * (1 - tp1Target / 100));
+                    tp2Price = state.customTp2Price || (avgP * (1 - tp2Target / 100));
+                    tp3Price = state.customTp3Price || (avgP * (1 - tp3Target / 100));
+                }
             }
             
             // 根据模式处理精度

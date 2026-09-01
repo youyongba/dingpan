@@ -43,6 +43,9 @@
         </div>
         
         <div class="flex gap-6 items-center">
+            <button id="ui-toggle-visibility" class="text-gray-500 hover:text-gray-300 transition-colors" title="显示/隐藏敏感信息">
+                <i class="fa-solid fa-eye" id="ui-visibility-icon"></i>
+            </button>
             <div id="ui-spot-balance" class="bg-gray-800 px-3 py-1.5 rounded border border-gray-700 hidden md:block">
                 <!-- Balance injected here -->
             </div>
@@ -469,7 +472,16 @@
                         </div>
                         
                         <div class="bg-gray-800 p-4 rounded border border-gray-700">
-                            <label class="block text-sm text-gray-300 mb-3">分批止盈参数设置 (基于整体持仓均价)</label>
+                            <div class="flex justify-between items-center mb-3">
+                                <label class="block text-sm text-gray-300">分批止盈参数设置 (基于整体持仓均价)</label>
+                                <div class="flex items-center gap-2">
+                                    <label class="text-xs text-gray-400">止盈模式:</label>
+                                    <select id="cfg-tp-mode" class="bg-gray-900 border border-gray-600 rounded px-2 py-0.5 text-white text-xs outline-none">
+                                        <option value="percent">固定百分比 (%)</option>
+                                        <option value="atr">动态 ATR (1H周期)</option>
+                                    </select>
+                                </div>
+                            </div>
                             
                             <!-- 比例设置 -->
                             <div class="flex gap-4 items-center mb-4">
@@ -490,15 +502,15 @@
                             <!-- 目标收益率设置 -->
                             <div class="flex gap-4 items-center">
                                 <div class="flex-1">
-                                    <span class="text-xs text-gray-400">TP1 目标收益率 (%)</span>
+                                    <span class="text-xs text-gray-400">TP1 目标数值 (%/ATR)</span>
                                     <input type="number" step="0.1" id="cfg-tp1-target" value="1.0" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-1 mt-1 text-white text-center">
                                 </div>
                                 <div class="flex-1">
-                                    <span class="text-xs text-gray-400">TP2 目标收益率 (%)</span>
+                                    <span class="text-xs text-gray-400">TP2 目标数值 (%/ATR)</span>
                                     <input type="number" step="0.1" id="cfg-tp2-target" value="3.0" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-1 mt-1 text-white text-center">
                                 </div>
                                 <div class="flex-1">
-                                    <span class="text-xs text-gray-400">TP3 目标收益率 (%)</span>
+                                    <span class="text-xs text-gray-400">TP3 目标数值 (%/ATR)</span>
                                     <input type="number" step="0.1" id="cfg-tp3-target" value="5.0" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-1 mt-1 text-white text-center">
                                 </div>
                             </div>
@@ -583,8 +595,28 @@
         let currentConfig = {};
         let currentState = {};
         let currentMacroVpoc = null;
+        let currentRealIndicators = {};
         let globalVolumeProfile = new Map();
         let currentPrice = 0; // Removed mock data 64230
+        let isDataVisible = true; // 控制敏感信息显示/隐藏
+
+        // Toggle visibility
+        document.getElementById('ui-toggle-visibility').addEventListener('click', () => {
+            isDataVisible = !isDataVisible;
+            const icon = document.getElementById('ui-visibility-icon');
+            if (isDataVisible) {
+                icon.className = 'fa-solid fa-eye';
+            } else {
+                icon.className = 'fa-solid fa-eye-slash';
+            }
+            renderUI();
+        });
+
+        // 格式化金额，支持隐藏
+        const formatMoney = (val, fractionDigits = 2) => {
+            if (!isDataVisible) return '******';
+            return val.toLocaleString('en-US', {minimumFractionDigits: fractionDigits, maximumFractionDigits: fractionDigits});
+        };
 
         async function toggleBot(direction = 'long') {
             try {
@@ -640,6 +672,7 @@
                     currentConfig = data.config;
                     currentState = data.state;
                     currentMacroVpoc = data.macroVpoc || null;
+                    currentRealIndicators = data.realIndicators || {};
                     
                     // 更新真实的指标 UI
                     if (data.realIndicators) {
@@ -873,12 +906,12 @@
             const balanceEl = document.getElementById('ui-spot-balance');
             if (currentConfig.tradeMode === 'futures') {
                 if (currentState.futuresBalanceUsdt !== undefined) {
-                    balanceEl.innerHTML = `<span class="text-gray-400 text-xs">U本位余额:</span> <span class="font-bold text-yellow-500">${currentState.futuresBalanceUsdt.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span> <span class="text-gray-500 text-xs">USDT</span>`;
+                    balanceEl.innerHTML = `<span class="text-gray-400 text-xs">U本位余额:</span> <span class="font-bold text-yellow-500">${formatMoney(currentState.futuresBalanceUsdt)}</span> <span class="text-gray-500 text-xs">USDT</span>`;
                     balanceEl.classList.remove('hidden');
                 }
             } else {
                 if (currentState.spotBalanceUsdt !== undefined) {
-                    balanceEl.innerHTML = `<span class="text-gray-400 text-xs">现货余额:</span> <span class="font-bold text-green-500">${currentState.spotBalanceUsdt.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span> <span class="text-gray-500 text-xs">USDT</span>`;
+                    balanceEl.innerHTML = `<span class="text-gray-400 text-xs">现货余额:</span> <span class="font-bold text-green-500">${formatMoney(currentState.spotBalanceUsdt)}</span> <span class="text-gray-500 text-xs">USDT</span>`;
                     balanceEl.classList.remove('hidden');
                 }
             }
@@ -903,13 +936,18 @@
                     const pnlUsdt = pos.unRealizedProfit;
                     const pnlPct = (pnlUsdt / (notionalUsdt / pos.leverage)) * 100 || 0;
                     
+                    const pnlDisplay = !isDataVisible ? '******' : `${pnlUsdt >= 0 ? '+' : ''}${pnlUsdt.toFixed(2)} USDT (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)`;
+                    
                     return `
                     <div class="p-4 bg-gray-800 rounded border border-gray-700">
-                        <div class="text-sm text-gray-400 mb-2">当前${modeText}持仓 (${sideText}) - 杠杆 ${pos.leverage}x</div>
-                        <div class="text-2xl font-mono font-bold mb-1"><span class="${colorClass}">${notionalUsdt.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span> <span class="text-sm font-normal text-gray-400">USDT (名义)</span></div>
+                        <div class="flex justify-between items-center mb-2">
+                            <div class="text-sm text-gray-400">当前${modeText}持仓 (${sideText}) - 杠杆 ${pos.leverage}x</div>
+                            <div class="text-xs font-bold bg-yellow-500/20 text-yellow-500 px-2 py-1 rounded">DCA 加仓: ${currentState.activeDcaCount || 0} 次</div>
+                        </div>
+                        <div class="text-2xl font-mono font-bold mb-1"><span class="${colorClass}">${formatMoney(notionalUsdt)}</span> <span class="text-sm font-normal text-gray-400">USDT (名义)</span></div>
                         <div class="flex justify-between text-xs">
-                            <span class="text-gray-500">均价: <span class="font-mono text-gray-300">${pos.entryPrice.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span> | 数量: <span class="font-mono text-gray-300">${pos.positionAmt} BTC</span></span>
-                            <span class="${pnlUsdt >= 0 ? 'text-green' : 'text-red'} font-bold">${pnlUsdt >= 0 ? '+' : ''}${pnlUsdt.toFixed(2)} USDT (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)</span>
+                            <span class="text-gray-500">均价: <span class="font-mono text-gray-300">${formatMoney(pos.entryPrice)}</span> | 数量: <span class="font-mono text-gray-300">${isDataVisible ? pos.positionAmt : '******'} BTC</span></span>
+                            <span class="${pnlUsdt >= 0 ? 'text-green' : 'text-red'} font-bold">${pnlDisplay}</span>
                         </div>
                     </div>`;
                 }).join('');
@@ -922,15 +960,19 @@
                 if (avgPrice > 0) {
                     const pnlUsdt = (currentPrice - avgPrice) * btcBal;
                     const pnlPct = ((currentPrice - avgPrice) / avgPrice) * 100;
-                    pnlHtml = `<span class="${pnlUsdt >= 0 ? 'text-green' : 'text-red'} font-bold">${pnlUsdt >= 0 ? '+' : ''}${pnlUsdt.toFixed(2)} USDT (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)</span>`;
+                    const pnlDisplay = !isDataVisible ? '******' : `${pnlUsdt >= 0 ? '+' : ''}${pnlUsdt.toFixed(2)} USDT (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)`;
+                    pnlHtml = `<span class="${pnlUsdt >= 0 ? 'text-green' : 'text-red'} font-bold">${pnlDisplay}</span>`;
                 }
                 
                 posContainer.innerHTML = `
                 <div class="p-4 bg-gray-800 rounded border border-gray-700">
-                    <div class="text-sm text-gray-400 mb-2">当前${modeText}持仓价值</div>
-                    <div class="text-2xl font-mono font-bold mb-1"><span class="text-green">${notionalUsdt.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span> <span class="text-sm font-normal text-gray-400">USDT</span></div>
+                    <div class="flex justify-between items-center mb-2">
+                        <div class="text-sm text-gray-400">当前${modeText}持仓价值</div>
+                        <div class="text-xs font-bold bg-yellow-500/20 text-yellow-500 px-2 py-1 rounded">DCA 加仓: ${currentState.activeDcaCount || 0} 次</div>
+                    </div>
+                    <div class="text-2xl font-mono font-bold mb-1"><span class="text-green">${formatMoney(notionalUsdt)}</span> <span class="text-sm font-normal text-gray-400">USDT</span></div>
                     <div class="flex justify-between text-xs">
-                        <span class="text-gray-500">均价: <span class="font-mono text-gray-300">${avgPrice > 0 ? avgPrice.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '--'}</span> | 数量: <span class="font-mono text-gray-300">${btcBal.toFixed(4)} BTC</span></span>
+                        <span class="text-gray-500">均价: <span class="font-mono text-gray-300">${avgPrice > 0 ? formatMoney(avgPrice) : '--'}</span> | 数量: <span class="font-mono text-gray-300">${isDataVisible ? btcBal.toFixed(4) : '******'} BTC</span></span>
                         ${pnlHtml}
                     </div>
                 </div>`;
@@ -949,21 +991,44 @@
             const avgPrice = currentState.averagePrice || 0;
             
             if (avgPrice > 0 && currentPrice > 0) {
+                const tpMode = currentConfig.tpMode || 'percent';
+                const atr = currentRealIndicators?.currentAtr || 0;
+                
                 const tp1Target = currentConfig.tp1Target || 1.0;
                 const tp2Target = currentConfig.tp2Target || 3.0;
                 const tp3Target = currentConfig.tp3Target || 5.0;
                 
-                const tp1PriceAuto = avgPrice * (1 + tp1Target / 100);
-                const tp2PriceAuto = avgPrice * (1 + tp2Target / 100);
-                const tp3PriceAuto = avgPrice * (1 + tp3Target / 100);
+                let tp1PriceAuto, tp2PriceAuto, tp3PriceAuto;
+                let tp1LabelTxt, tp2LabelTxt, tp3LabelTxt;
+                
+                const isLong = (currentState.positionSide !== 'short');
+                const sign = isLong ? 1 : -1;
+                
+                if (tpMode === 'atr' && atr > 0) {
+                    tp1PriceAuto = avgPrice + sign * (atr * tp1Target);
+                    tp2PriceAuto = avgPrice + sign * (atr * tp2Target);
+                    tp3PriceAuto = avgPrice + sign * (atr * tp3Target);
+                    
+                    tp1LabelTxt = `目标 +${tp1Target}x ATR`;
+                    tp2LabelTxt = `目标 +${tp2Target}x ATR`;
+                    tp3LabelTxt = `目标 +${tp3Target}x ATR`;
+                } else {
+                    tp1PriceAuto = avgPrice * (1 + sign * (tp1Target / 100));
+                    tp2PriceAuto = avgPrice * (1 + sign * (tp2Target / 100));
+                    tp3PriceAuto = avgPrice * (1 + sign * (tp3Target / 100));
+                    
+                    tp1LabelTxt = `目标 +${tp1Target}%`;
+                    tp2LabelTxt = `目标 +${tp2Target}%`;
+                    tp3LabelTxt = `目标 +${tp3Target}%`;
+                }
                 
                 const tp1Price = currentState.customTp1Price || tp1PriceAuto;
                 const tp2Price = currentState.customTp2Price || tp2PriceAuto;
                 const tp3Price = currentState.customTp3Price || tp3PriceAuto;
                 
-                document.getElementById('ui-tp1-label').textContent = currentState.customTp1Price ? `TP1 (${currentConfig.tp1 || 50}%) | 手动自定义` : `TP1 (${currentConfig.tp1 || 50}%) | 目标 +${tp1Target}%`;
-                document.getElementById('ui-tp2-label').textContent = currentState.customTp2Price ? `TP2 (${currentConfig.tp2 || 30}%) | 手动自定义` : `TP2 (${currentConfig.tp2 || 30}%) | 目标 +${tp2Target}%`;
-                document.getElementById('ui-tp3-label').textContent = currentState.customTp3Price ? `TP3 (${currentConfig.tp3 || 20}%) | 手动自定义` : `TP3 (${currentConfig.tp3 || 20}%) | 目标 +${tp3Target}%`;
+                document.getElementById('ui-tp1-label').textContent = currentState.customTp1Price ? `TP1 (${currentConfig.tp1 || 50}%) | 手动自定义` : `TP1 (${currentConfig.tp1 || 50}%) | ${tp1LabelTxt}`;
+                document.getElementById('ui-tp2-label').textContent = currentState.customTp2Price ? `TP2 (${currentConfig.tp2 || 30}%) | 手动自定义` : `TP2 (${currentConfig.tp2 || 30}%) | ${tp2LabelTxt}`;
+                document.getElementById('ui-tp3-label').textContent = currentState.customTp3Price ? `TP3 (${currentConfig.tp3 || 20}%) | 手动自定义` : `TP3 (${currentConfig.tp3 || 20}%) | ${tp3LabelTxt}`;
                 
                 document.getElementById('ui-tp1-price').textContent = tp1Price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
                 document.getElementById('ui-tp2-price').textContent = tp2Price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
@@ -1182,6 +1247,7 @@
             document.getElementById('cfg-trigger-delta').checked = currentConfig.triggerDelta;
             document.getElementById('cfg-trigger-mtf').checked = currentConfig.triggerMtf;
             document.getElementById('cfg-delta-threshold').value = currentConfig.deltaThreshold;
+            document.getElementById('cfg-tp-mode').value = currentConfig.tpMode || 'percent';
             document.getElementById('cfg-tp1').value = currentConfig.tp1;
             document.getElementById('cfg-tp2').value = currentConfig.tp2;
             document.getElementById('cfg-tp3').value = currentConfig.tp3;
@@ -1296,6 +1362,7 @@
             const triggerDelta = document.getElementById('cfg-trigger-delta').checked;
             const triggerMtf = document.getElementById('cfg-trigger-mtf').checked;
             const deltaThreshold = parseInt(document.getElementById('cfg-delta-threshold').value);
+            const tpMode = document.getElementById('cfg-tp-mode').value;
             const tp1 = parseInt(document.getElementById('cfg-tp1').value) || 0;
             const tp2 = parseInt(document.getElementById('cfg-tp2').value) || 0;
             const tp3 = parseInt(document.getElementById('cfg-tp3').value) || 0;
@@ -1320,7 +1387,7 @@
             const payload = {
                 tradeMode: currentTradeMode, leverage, positionSizePct,
                 rsiThreshold, rsiOverboughtThreshold, requireMacd, signalWindow, triggerDelta, triggerMtf, deltaThreshold,
-                tp1, tp2, tp3, tp1Target, tp2Target, tp3Target, dcaAmount, dcaMaxSteps, martingaleMultiplier, breakevenSl, autoLoop
+                tpMode, tp1, tp2, tp3, tp1Target, tp2Target, tp3Target, dcaAmount, dcaMaxSteps, martingaleMultiplier, breakevenSl, autoLoop
             };
 
             try {

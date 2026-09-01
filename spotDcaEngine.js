@@ -2,6 +2,8 @@ const express = require('express');
 const crypto = require('crypto');
 const axios = require('axios');
 const path = require('path');
+const fs = require('fs');
+const dataFile = path.join(__dirname, 'spotDcaData.json');
 const mtfModule = require('./mtfModule');
 const regimeModule = require('./regimeModule');
 
@@ -47,8 +49,33 @@ let config = {
   tp3: 20,
   tp1Target: 1.0, // TP1 目标整体收益率 (%)
   tp2Target: 3.0,
-  tp3Target: 5.0
+  tp3Target: 5.0,
+  tpMode: 'percent' // 'percent' or 'atr'
 };
+
+try {
+    if (fs.existsSync(dataFile)) {
+        const saved = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
+        if (saved.config) config = { ...config, ...saved.config };
+        if (saved.botState) {
+            state.isLongBotRunning = saved.botState.isLongBotRunning || false;
+            state.isShortBotRunning = saved.botState.isShortBotRunning || false;
+        }
+    }
+} catch (e) {
+    console.error('[SpotDCA] Load data error:', e);
+}
+
+function saveData() {
+    try {
+        fs.writeFileSync(dataFile, JSON.stringify({
+            config,
+            botState: { isLongBotRunning: state.isLongBotRunning, isShortBotRunning: state.isShortBotRunning }
+        }, null, 2));
+    } catch (e) {
+        console.error('[SpotDCA] Save data error:', e);
+    }
+}
 
 let state = {
   activeDcaCount: 0,
@@ -157,6 +184,14 @@ async function fetchBalances() {
                     state.averagePrice = activePos.entryPrice;
                     state.totalUsdtAmount = actualAmt * activePos.entryPrice;
                     if (state.activeDcaCount === 0) state.activeDcaCount = 1;
+                    
+                    // 如果发现仓位有变动(比如交易所发生了加仓)，同步重置止盈状态
+                    state.tp1Fired = false;
+                    state.tp2Fired = false;
+                    state.tp3Fired = false;
+                    state.customTp1Price = null;
+                    state.customTp2Price = null;
+                    state.customTp3Price = null;
                 }
             } else if (state.totalCoinAmount > 0) {
                 state.totalCoinAmount = 0;
@@ -253,10 +288,14 @@ setInterval(fetchMacroVpoc, 15 * 60 * 1000);
 
 router.get('/status', (req, res) => {
   // 获取真实的指标状态
-  let realIndicators = { rsi15m: null, macd15m: null, mtf1m: null };
+  let realIndicators = { rsi15m: null, macd15m: null, mtf1m: null, currentAtr: 0 };
   try {
     if (regimeModule && typeof regimeModule.getState === 'function') {
         const regimeState = regimeModule.getState();
+        if (regimeState && regimeState.indicators && regimeState.indicators.atr) {
+            const atrArr = regimeState.indicators.atr;
+            realIndicators.currentAtr = atrArr[atrArr.length - 1];
+        }
         if (regimeState && regimeState.m15) {
             const m15 = regimeState.m15;
             if (m15.rsi && m15.rsi.length > 0) {
@@ -297,6 +336,7 @@ router.post('/toggle-bot', express.json(), (req, res) => {
       state.isLongBotRunning = !state.isLongBotRunning;
       state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动${state.isLongBotRunning ? '开启' : '关闭'}自动做多引擎`);
   }
+  saveData();
   res.json({ ok: true, state });
 });
 
@@ -310,6 +350,7 @@ router.post('/custom-tp', express.json(), (req, res) => {
 
 router.post('/config', express.json(), (req, res) => {
   config = { ...config, ...req.body };
+  saveData();
   res.json({ ok: true, config });
 });
 
@@ -354,6 +395,15 @@ router.post('/override', express.json(), async (req, res) => {
       state.totalUsdtAmount += cumQuote;
       state.totalCoinAmount += executedQty;
       state.averagePrice = state.totalUsdtAmount / state.totalCoinAmount;
+      
+      // 手动加仓后重置止盈状态，按新均价计算
+      state.tp1Fired = false;
+      state.tp2Fired = false;
+      state.tp3Fired = false;
+      state.customTp1Price = null;
+      state.customTp2Price = null;
+      state.customTp3Price = null;
+      
       const actionName = action === 'market-buy-short' ? '做空' : '买入';
       state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动${actionName}成功: 获 ${executedQty} BTC`);
     } catch (e) {
