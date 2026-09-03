@@ -27,6 +27,17 @@ console.log('=====================================================\n');
 
 const router = express.Router();
 
+const CONFIG_AUTH_TOKEN = process.env.CONFIG_AUTH_TOKEN || '';
+
+function requireAdmin(req, res, next) {
+    if (!CONFIG_AUTH_TOKEN) return res.status(503).json({ ok: false, error: '服务端未设置 CONFIG_AUTH_TOKEN' });
+    const token = req.headers['x-auth-token'];
+    if (token !== CONFIG_AUTH_TOKEN) {
+        return res.status(401).json({ ok: false, error: '鉴权失败: Token 不正确' });
+    }
+    next();
+}
+
 let config = {
   tradeMode: 'spot', // 'spot' or 'futures'
   tradeDirection: 'long', // 'long' or 'short' (永续合约专属)
@@ -102,9 +113,15 @@ let state = {
   futuresBalanceUsdt: 0 // 永续合约 USDT 余额
 };
 
-// 币安现货 API 密钥 (需在环境变量中配置)，加入 trim() 防止不可见换行符或空格干扰
-const SPOT_API_KEY = (process.env.BINANCE_SPOT_API_KEY || process.env.BINANCE_API_KEY || '').trim();
-const SPOT_API_SECRET = (process.env.BINANCE_SPOT_API_SECRET || process.env.BINANCE_API_SECRET || '').trim();
+// 币安现货 API 密钥 (初始从环境变量读取，如果配置里有则优先使用)
+let SPOT_API_KEY = (process.env.BINANCE_SPOT_API_KEY || process.env.BINANCE_API_KEY || '').trim();
+let SPOT_API_SECRET = (process.env.BINANCE_SPOT_API_SECRET || process.env.BINANCE_API_SECRET || '').trim();
+
+function refreshApiKeys() {
+    if (config.apiKey) SPOT_API_KEY = config.apiKey.trim();
+    if (config.apiSecret) SPOT_API_SECRET = config.apiSecret.trim();
+}
+refreshApiKeys();
 
 // 引入全局的代理配置 (复用主程序的代理)
 const { httpAgent, httpsAgent } = require('./lib/httpAgents');
@@ -395,11 +412,29 @@ router.get('/status', (req, res) => {
     config,
     state,
     realIndicators,
-    macroVpoc: macroVpocData
+    macroVpoc: macroVpocData,
+    hasAuthToken: !!CONFIG_AUTH_TOKEN, // 告诉前端服务端是否需要鉴权
+    hasApiKeys: !!SPOT_API_KEY && !!SPOT_API_SECRET // 告诉前端是否已经配置了 API Keys
   });
 });
 
-router.post('/toggle-bot', express.json(), (req, res) => {
+router.post('/api-keys', express.json(), requireAdmin, (req, res) => {
+  const { apiKey, apiSecret } = req.body;
+  config.apiKey = apiKey || '';
+  config.apiSecret = apiSecret || '';
+  refreshApiKeys();
+  saveData();
+  
+  // 同步更新给 bot
+  const { setApiKeys } = require('./spotAutoBot');
+  if (typeof setApiKeys === 'function') {
+      setApiKeys(SPOT_API_KEY, SPOT_API_SECRET);
+  }
+  
+  res.json({ ok: true, msg: 'API Keys updated' });
+});
+
+router.post('/toggle-bot', express.json(), requireAdmin, (req, res) => {
   const { direction } = req.body; // 'long' or 'short'
   if (direction === 'short') {
       state.isShortBotRunning = !state.isShortBotRunning;
@@ -412,7 +447,7 @@ router.post('/toggle-bot', express.json(), (req, res) => {
   res.json({ ok: true, state });
 });
 
-router.post('/custom-tp', express.json(), (req, res) => {
+router.post('/custom-tp', express.json(), requireAdmin, (req, res) => {
   const { level, price } = req.body;
   if (level === 1) state.customTp1Price = price || null;
   if (level === 2) state.customTp2Price = price || null;
@@ -420,13 +455,13 @@ router.post('/custom-tp', express.json(), (req, res) => {
   res.json({ ok: true, state });
 });
 
-router.post('/config', express.json(), (req, res) => {
+router.post('/config', express.json(), requireAdmin, (req, res) => {
   config = { ...config, ...req.body };
   saveData();
   res.json({ ok: true, config });
 });
 
-router.post('/refresh-atr', express.json(), (req, res) => {
+router.post('/refresh-atr', express.json(), requireAdmin, (req, res) => {
   try {
       if (regimeModule && typeof regimeModule.getState === 'function') {
           const regimeState = regimeModule.getState();
@@ -441,7 +476,7 @@ router.post('/refresh-atr', express.json(), (req, res) => {
   res.json({ ok: true, state });
 });
 
-router.post('/override', express.json(), async (req, res) => {
+router.post('/override', express.json(), requireAdmin, async (req, res) => {
   const { action, amount, price } = req.body;
   const logMsg = `[Override] 强制发起 ${action} ${amount || ''}`;
   state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] ` + logMsg);

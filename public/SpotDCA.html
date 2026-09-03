@@ -52,6 +52,9 @@
             <button onclick="openConfig()" class="px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-600 rounded text-sm text-gray-300 transition-colors flex items-center gap-2">
                 <i class="fa-solid fa-sliders"></i> 策略配置
             </button>
+            <button onclick="openApiSettings()" class="px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-600 rounded text-sm text-gray-300 transition-colors flex items-center gap-2">
+                <i class="fa-solid fa-key"></i> 接口鉴权
+            </button>
             <!-- UTC+8 Clock -->
             <div class="text-right border-l border-gray-700 pl-6">
                 <div class="text-xs text-gray-400">当前时间 (UTC+8)</div>
@@ -269,6 +272,36 @@
                         <!-- JS populated logs -->
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Config Modal -->
+    <div id="api-modal" class="fixed inset-0 bg-black/80 hidden items-center justify-center z-50">
+        <div class="bg-gray-900 border border-gray-700 rounded-lg p-6 w-[400px]">
+            <h2 class="text-xl font-bold mb-4">系统鉴权 & 交易所接口</h2>
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">系统鉴权 Token (必须提供以修改设置/开单)</label>
+                    <input type="password" id="input-auth-token" class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-white" placeholder="输入 CONFIG_AUTH_TOKEN">
+                </div>
+                <div class="border-t border-gray-700 my-4"></div>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Binance API Key</label>
+                    <input type="text" id="input-api-key" class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-white" placeholder="仅现货/合约 API, 留空保持原样">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Binance API Secret</label>
+                    <input type="password" id="input-api-secret" class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-white" placeholder="留空保持原样">
+                </div>
+                <div class="text-xs text-gray-500 mt-2">
+                    * API Key 将被保存至服务端并持久化。<br/>
+                    * 首次使用必须在上方输入正确的系统鉴权 Token。
+                </div>
+            </div>
+            <div class="flex justify-end gap-3 mt-6">
+                <button onclick="closeApiSettings()" class="px-4 py-2 text-gray-400 hover:text-white">取消</button>
+                <button onclick="saveApiSettings()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded">保存并授权</button>
             </div>
         </div>
     </div>
@@ -642,6 +675,80 @@
             if (!isDataVisible) return '******';
             return val.toLocaleString('en-US', {minimumFractionDigits: fractionDigits, maximumFractionDigits: fractionDigits});
         };
+
+        let needsAuthToken = false;
+        let authPrompted = false;
+        
+        async function authFetch(url, options = {}) {
+            let token = localStorage.getItem('CONFIG_AUTH_TOKEN') || '';
+            if (needsAuthToken && !token && !authPrompted) {
+                authPrompted = true;
+                openApiSettings();
+                throw new Error('需要鉴权 Token');
+            }
+            
+            if (!options.headers) options.headers = {};
+            options.headers['X-Auth-Token'] = token;
+            
+            const res = await fetch(url, options);
+            if (res.status === 401 || res.status === 503) {
+                localStorage.removeItem('CONFIG_AUTH_TOKEN');
+                if (!authPrompted) {
+                    authPrompted = true;
+                    openApiSettings();
+                }
+                throw new Error('鉴权失败或服务端未就绪');
+            }
+            return res;
+        }
+
+        function openApiSettings() {
+            document.getElementById('input-auth-token').value = localStorage.getItem('CONFIG_AUTH_TOKEN') || '';
+            document.getElementById('input-api-key').value = '';
+            document.getElementById('input-api-secret').value = '';
+            document.getElementById('api-modal').classList.remove('hidden');
+            document.getElementById('api-modal').classList.add('flex');
+        }
+
+        function closeApiSettings() {
+            document.getElementById('api-modal').classList.add('hidden');
+            document.getElementById('api-modal').classList.remove('flex');
+            authPrompted = false;
+        }
+
+        async function saveApiSettings() {
+            const token = document.getElementById('input-auth-token').value.trim();
+            const apiKey = document.getElementById('input-api-key').value.trim();
+            const apiSecret = document.getElementById('input-api-secret').value.trim();
+            
+            if (token) {
+                localStorage.setItem('CONFIG_AUTH_TOKEN', token);
+            }
+            
+            if (apiKey || apiSecret) {
+                try {
+                    const res = await fetch('/api/spot-dca/api-keys', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-Auth-Token': token
+                        },
+                        body: JSON.stringify({ apiKey, apiSecret })
+                    });
+                    if (res.status === 401) {
+                        alert('鉴权 Token 错误');
+                        return;
+                    }
+                    const data = await res.json();
+                    if (!data.ok) throw new Error(data.error || 'Failed to update keys');
+                } catch (e) {
+                    alert('保存 API Keys 失败: ' + e.message);
+                    return;
+                }
+            }
+            closeApiSettings();
+            fetchStatus(); // 刷新状态
+        }
 
         async function toggleBot(direction = 'long') {
             try {
@@ -1469,7 +1576,7 @@
             };
 
             try {
-                await fetch('/api/spot-dca/config', {
+                await authFetch('/api/spot-dca/config', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
@@ -1586,7 +1693,7 @@
             const price = document.getElementById('override-price').value;
             
             try {
-                await fetch('/api/spot-dca/override', {
+                await authFetch('/api/spot-dca/override', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ action: currentOverrideAction, amount, price })

@@ -5,9 +5,14 @@ const { httpAgent, httpsAgent } = require('./lib/httpAgents');
 const regimeModule = require('./regimeModule');
 const mtfModule = require('./mtfModule');
 
-// 币安现货 API 密钥
-const SPOT_API_KEY = (process.env.BINANCE_SPOT_API_KEY || '').trim();
-const SPOT_API_SECRET = (process.env.BINANCE_SPOT_API_SECRET || '').trim();
+// 币安现货 API 密钥 (初始从环境变量读取)
+let SPOT_API_KEY = (process.env.BINANCE_SPOT_API_KEY || process.env.BINANCE_API_KEY || '').trim();
+let SPOT_API_SECRET = (process.env.BINANCE_SPOT_API_SECRET || process.env.BINANCE_API_SECRET || '').trim();
+
+function setApiKeys(key, secret) {
+    if (key) SPOT_API_KEY = key;
+    if (secret) SPOT_API_SECRET = secret;
+}
 
 let currentPrice = 0;
 let currentMinuteDelta = 0;
@@ -452,4 +457,4 @@ function startBotLoop(getEngineConfig, getEngineState) {
     }, 2000);
 }
 
-module.exports = { startBotLoop, executeRealOrder, executeFuturesOrder };
+module.exports = { startBotLoop, executeRealOrder, executeFuturesOrder, setApiKeys };
