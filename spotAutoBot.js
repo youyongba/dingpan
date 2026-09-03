@@ -28,6 +28,15 @@ let botSignalState = {
     isExecuting: false
 };
 
+// 全局指标状态追踪（用于严格判断“再次出现”的交叉事件）
+let globalMacdState = null;
+let globalMacdGoldenCrossTime = 0;
+let globalMacdDeathCrossTime = 0;
+
+let globalRsiState = null; // 'oversold', 'overbought', 'normal'
+let globalRsiOversoldTime = 0;
+let globalRsiOverboughtTime = 0;
+
 // 1. 后端实时监听微观订单流 (脱离浏览器也能运行)
 function initBackendDeltaWS() {
     const ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade');
@@ -142,46 +151,85 @@ function startBotLoop(getEngineConfig, getEngineState) {
             return; // 忽略单次读取失败
         }
 
+        // --- A2. 全局状态追踪 (严格判断“再次出现”) ---
+        if (macdState) {
+            if (globalMacdState === null) {
+                globalMacdState = macdState;
+                if (macdState === '金叉') globalMacdGoldenCrossTime = now;
+                if (macdState === '死叉') globalMacdDeathCrossTime = now;
+            } else if (macdState !== globalMacdState) {
+                globalMacdState = macdState;
+                if (macdState === '金叉') globalMacdGoldenCrossTime = now;
+                if (macdState === '死叉') globalMacdDeathCrossTime = now;
+            }
+        }
+
+        let currentRsiState = 'normal';
+        if (rsi !== null) {
+            if (rsi < config.rsiThreshold) currentRsiState = 'oversold';
+            else if (rsi > (config.rsiOverboughtThreshold || 70)) currentRsiState = 'overbought';
+
+            if (globalRsiState === null) {
+                globalRsiState = currentRsiState;
+                if (currentRsiState === 'oversold') globalRsiOversoldTime = now;
+                if (currentRsiState === 'overbought') globalRsiOverboughtTime = now;
+            } else if (currentRsiState !== globalRsiState) {
+                globalRsiState = currentRsiState;
+                if (currentRsiState === 'oversold') globalRsiOversoldTime = now;
+                if (currentRsiState === 'overbought') globalRsiOverboughtTime = now;
+            }
+        }
+
         // --- B. 状态机时序流转 ---
         
         // 如果有持仓，只允许当前方向的加仓；如果是空仓，允许配置中开启的方向
         const canLong = state.isLongBotRunning && (state.positionSide === 'long' || state.positionSide === null);
         const canShort = (config.tradeMode === 'futures') && state.isShortBotRunning && (state.positionSide === 'short' || state.positionSide === null);
 
-        // 1. RSI 曾超卖(做多) / 曾超买(做空)
+        // 1. RSI 曾超卖(做多) / 曾超买(做空) (必须是上次开仓之后新产生的穿越！)
         if (rsi !== null) {
-            if (canLong && rsi < config.rsiThreshold) botSignalState.longRsiHitTime = now;
-            if (canShort && rsi > (config.rsiOverboughtThreshold || 70)) botSignalState.shortRsiHitTime = now;
+            if (canLong && currentRsiState === 'oversold' && globalRsiOversoldTime > botSignalState.lastDcaTime) {
+                botSignalState.longRsiHitTime = now;
+            }
+            if (canShort && currentRsiState === 'overbought' && globalRsiOverboughtTime > botSignalState.lastDcaTime) {
+                botSignalState.shortRsiHitTime = now;
+            }
         }
 
-        if (now - botSignalState.longRsiHitTime > windowMs) {
-            botSignalState.longRsiHitTime = 0;
-            botSignalState.longMacdHitTime = 0;
-        }
-        if (now - botSignalState.shortRsiHitTime > windowMs) {
-            botSignalState.shortRsiHitTime = 0;
-            botSignalState.shortMacdHitTime = 0;
+        // 2. MACD 曾金叉(做多) / 曾死叉(做空) (独立判断，必须是上次开仓之后新产生的金叉/死叉！)
+        if (macdState !== null) {
+            if (canLong && macdState === '金叉' && globalMacdGoldenCrossTime > botSignalState.lastDcaTime) {
+                botSignalState.longMacdHitTime = now;
+            }
+            if (canShort && macdState === '死叉' && globalMacdDeathCrossTime > botSignalState.lastDcaTime) {
+                botSignalState.shortMacdHitTime = now;
+            }
         }
 
-        // 2. MACD 曾金叉(做多) / 曾死叉(做空)
-        if (botSignalState.longRsiHitTime > 0 && macdState === '金叉') botSignalState.longMacdHitTime = now;
-        if (botSignalState.shortRsiHitTime > 0 && macdState === '死叉') botSignalState.shortMacdHitTime = now;
+        // 独立过期检测 (防抖窗口期)
+        if (now - botSignalState.longRsiHitTime > windowMs) botSignalState.longRsiHitTime = 0;
+        if (now - botSignalState.longMacdHitTime > windowMs) botSignalState.longMacdHitTime = 0;
+        
+        if (now - botSignalState.shortRsiHitTime > windowMs) botSignalState.shortRsiHitTime = 0;
+        if (now - botSignalState.shortMacdHitTime > windowMs) botSignalState.shortMacdHitTime = 0;
 
-        // 3. 判断大周期环境是否就绪
-        let longReady = canLong && (config.requireMacd ? (botSignalState.longRsiHitTime > 0 && botSignalState.longMacdHitTime > 0) : (botSignalState.longRsiHitTime > 0));
-        let shortReady = canShort && (config.requireMacd ? (botSignalState.shortRsiHitTime > 0 && botSignalState.shortMacdHitTime > 0) : (botSignalState.shortRsiHitTime > 0));
+        // 3. 判断大周期环境是否就绪 (严格的 AND 关系: RSI 和 MACD 都必须满足)
+        let longReady = canLong && (botSignalState.longRsiHitTime > 0 && botSignalState.longMacdHitTime > 0);
+        let shortReady = canShort && (botSignalState.shortRsiHitTime > 0 && botSignalState.shortMacdHitTime > 0);
         
         // --- C. 微观扳机扣动 (真实买入/做空) ---
         if ((longReady || shortReady) && (now - botSignalState.lastDcaTime > 15 * 60 * 1000)) { // 15分钟冷却防抖
             
             let triggerMtfLong = config.triggerMtf && mtfState && mtfState.includes('强多');
             let triggerDeltaLong = config.triggerDelta && (currentMinuteDelta > 0 && Math.abs(deltaUsdt) > config.deltaThreshold);
+            
+            // 为了兼顾您可能还要用 Delta 的配置，我们要求 MTF 是必选项（或者至少是当前的主要要求）
+            // 按照您的诉求：“并且1分钟MTF强多/强空”
+            let isExecutingLong = longReady && triggerMtfLong;
 
             let triggerMtfShort = config.triggerMtf && mtfState && mtfState.includes('强空');
             let triggerDeltaShort = config.triggerDelta && (currentMinuteDelta < 0 && Math.abs(deltaUsdt) > config.deltaThreshold);
-
-            let isExecutingLong = longReady && (triggerMtfLong || triggerDeltaLong);
-            let isExecutingShort = shortReady && (triggerMtfShort || triggerDeltaShort);
+            let isExecutingShort = shortReady && triggerMtfShort;
             
             // 极小概率多空同时满足时，顺延当前仓位方向，否则偏好做多
             if (isExecutingLong && isExecutingShort) {
