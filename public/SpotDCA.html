@@ -61,15 +61,25 @@
                 <div id="utc8-clock" class="text-lg font-mono font-semibold text-blue-400">--:--:--</div>
             </div>
             <!-- Bot Toggle Buttons -->
-            <div class="flex items-center gap-2">
-                <button id="ui-bot-toggle-long" onclick="toggleBot('long')" class="flex items-center gap-2 px-3 py-2 bg-gray-800 border border-gray-600 hover:bg-gray-700 rounded text-gray-300 text-sm font-bold transition-colors cursor-pointer">
-                    <div id="ui-bot-dot-long" class="w-2 h-2 rounded-full bg-gray-500"></div>
-                    <span id="ui-bot-text-long">▶ 启动做多引擎</span>
-                </button>
-                <button id="ui-bot-toggle-short" onclick="toggleBot('short')" class="flex items-center gap-2 px-3 py-2 bg-gray-800 border border-gray-600 hover:bg-gray-700 rounded text-gray-300 text-sm font-bold transition-colors cursor-pointer hidden">
-                    <div id="ui-bot-dot-short" class="w-2 h-2 rounded-full bg-gray-500"></div>
-                    <span id="ui-bot-text-short">▶ 启动做空引擎</span>
-                </button>
+            <div class="flex flex-col gap-2 items-end">
+                <div class="flex items-center gap-2">
+                    <button id="ui-quick-buy-long" onclick="executeQuickTrade('market-buy')" class="px-2 py-1.5 bg-green-600/20 border border-green-500 hover:bg-green-600/40 rounded text-green-500 text-xs font-bold transition-colors">
+                        <i class="fa-solid fa-bolt mr-1"></i>一键做多
+                    </button>
+                    <button id="ui-bot-toggle-long" onclick="toggleBot('long')" class="flex items-center gap-2 px-3 py-2 bg-gray-800 border border-gray-600 hover:bg-gray-700 rounded text-gray-300 text-sm font-bold transition-colors cursor-pointer">
+                        <div id="ui-bot-dot-long" class="w-2 h-2 rounded-full bg-gray-500"></div>
+                        <span id="ui-bot-text-long">▶ 启动做多引擎</span>
+                    </button>
+                </div>
+                <div class="flex items-center gap-2 hidden" id="ui-short-controls">
+                    <button id="ui-quick-buy-short" onclick="executeQuickTrade('market-buy-short')" class="px-2 py-1.5 bg-red-600/20 border border-red-500 hover:bg-red-600/40 rounded text-red-500 text-xs font-bold transition-colors">
+                        <i class="fa-solid fa-bolt mr-1"></i>一键做空
+                    </button>
+                    <button id="ui-bot-toggle-short" onclick="toggleBot('short')" class="flex items-center gap-2 px-3 py-2 bg-gray-800 border border-gray-600 hover:bg-gray-700 rounded text-gray-300 text-sm font-bold transition-colors cursor-pointer">
+                        <div id="ui-bot-dot-short" class="w-2 h-2 rounded-full bg-gray-500"></div>
+                        <span id="ui-bot-text-short">▶ 启动做空引擎</span>
+                    </button>
+                </div>
             </div>
         </div>
     </header>
@@ -1049,9 +1059,15 @@
             // Show/Hide Short button based on mode and override text for Long button
             if (currentConfig.tradeMode === 'spot') {
                 btnShort.classList.add('hidden');
+                const shortControls = document.getElementById('ui-short-controls');
+                if(shortControls) shortControls.classList.add('hidden');
+                document.getElementById('ui-quick-buy-long').innerHTML = '<i class="fa-solid fa-bolt mr-1"></i>一键买入(现货)';
                 textLong.textContent = currentState.isLongBotRunning ? '▶ 自动现货交易运行中' : '▶ 启动自动现货交易';
             } else {
                 btnShort.classList.remove('hidden');
+                const shortControls = document.getElementById('ui-short-controls');
+                if(shortControls) shortControls.classList.remove('hidden');
+                document.getElementById('ui-quick-buy-long').innerHTML = '<i class="fa-solid fa-bolt mr-1"></i>一键做多';
                 textLong.textContent = currentState.isLongBotRunning ? '▶ 自动做多运行中' : '▶ 启动做多引擎';
             }
 
@@ -1725,6 +1741,28 @@
                 fetchStatus();
             } catch (e) {
                 alert("执行失败: " + e.message);
+            }
+        }
+
+        async function executeQuickTrade(action) {
+            const amount = currentConfig.dcaAmount || 3000;
+            const isSpot = currentConfig.tradeMode === 'spot';
+            const actionName = action === 'market-buy' ? (isSpot ? '买入' : '做多') : '做空';
+            
+            if (!confirm(`确定要执行【一键${actionName}】吗？\n\n系统将直接使用策略配置中的金额 (${amount} USDT) 以市价开仓！`)) {
+                return;
+            }
+            
+            try {
+                await authFetch('/api/spot-dca/override', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: action, amount: amount, price: '' })
+                });
+                alert(`✅ 快速开仓指令已成功执行: [市价${actionName}]`);
+                fetchStatus();
+            } catch (e) {
+                alert("快速开仓失败: " + e.message);
             }
         }
     </script>
