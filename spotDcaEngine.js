@@ -548,33 +548,67 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
       console.error('[Override Error] BUY/SELL failed:', errorMsg);
       state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 开仓失败: ${errorMsg}`);
     }
-  } else if (action === 'market-sell') {
+  } else if (action === 'market-sell-long' || action === 'market-sell-short' || action === 'market-sell') {
     try {
-      if (state.totalCoinAmount > 0.00001) {
-        if (config.tradeMode === 'futures') {
-            const closeQty = Math.floor(state.totalCoinAmount * 1000) / 1000;
-            const side = state.positionSide === 'short' ? 'BUY' : 'SELL';
-            const posSide = state.positionSide === 'short' ? 'SHORT' : 'LONG';
-            await executeFuturesOrder(side, closeQty, posSide);
-            state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动合约清仓成功: 平仓 ${closeQty} BTC`);
-        } else {
-            // 向下取整精度，防止卖出超额
-            const sellQty = Math.floor(state.totalCoinAmount * 100000) / 100000;
-            await executeRealOrder('SELL', sellQty, null);
-            state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动现货清仓成功: 卖出 ${sellQty} BTC`);
-        }
+      if (config.tradeMode === 'futures') {
+          const { getFuturesPosition } = require('./spotAutoBot');
+          const positionInfo = await getFuturesPosition();
+          
+          if (action === 'market-sell-long' || (action === 'market-sell' && state.positionSide !== 'short')) {
+              if (positionInfo.longAmt > 0.00001) {
+                  const closeLongQty = Math.floor(positionInfo.longAmt * 1000) / 1000;
+                  await executeFuturesOrder('SELL', closeLongQty, 'LONG');
+                  state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动平多成功: 平仓 ${closeLongQty} BTC`);
+              } else {
+                  state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动平多: 没有找到可平的多头仓位`);
+              }
+          }
+          
+          if (action === 'market-sell-short' || (action === 'market-sell' && state.positionSide === 'short')) {
+              if (positionInfo.shortAmt > 0.00001) {
+                  const closeShortQty = Math.floor(positionInfo.shortAmt * 1000) / 1000;
+                  await executeFuturesOrder('BUY', closeShortQty, 'SHORT');
+                  state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动平空成功: 平仓 ${closeShortQty} BTC`);
+              } else {
+                  state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动平空: 没有找到可平的空头仓位`);
+              }
+          }
+
+          // 如果平掉的是当前引擎追踪的方向，则重置引擎状态
+          if ((action === 'market-sell-long' && state.positionSide !== 'short') ||
+              (action === 'market-sell-short' && state.positionSide === 'short') || action === 'market-sell') {
+              state.activeDcaCount = 0;
+              state.totalUsdtAmount = 0;
+              state.totalCoinAmount = 0;
+              state.averagePrice = 0;
+              state.tp1Fired = false;
+              state.tp2Fired = false;
+              state.tp3Fired = false;
+              state.lockedAtr = 0;
+              state.positionSide = null;
+              state.entryTime = null;
+              state.totalFees = 0;
+          }
+      } else {
+          // 现货模式
+          if (action === 'market-sell-short') throw new Error('现货模式不支持平空');
+          if (state.totalCoinAmount > 0.00001) {
+              const sellQty = Math.floor(state.totalCoinAmount * 100000) / 100000;
+              await executeRealOrder('SELL', sellQty, null);
+              state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动现货清仓成功: 卖出 ${sellQty} BTC`);
+          }
+          state.activeDcaCount = 0;
+          state.totalUsdtAmount = 0;
+          state.totalCoinAmount = 0;
+          state.averagePrice = 0;
+          state.tp1Fired = false;
+          state.tp2Fired = false;
+          state.tp3Fired = false;
+          state.lockedAtr = 0;
+          state.positionSide = null;
+          state.entryTime = null;
+          state.totalFees = 0;
       }
-      state.activeDcaCount = 0;
-      state.totalUsdtAmount = 0;
-      state.totalCoinAmount = 0;
-      state.averagePrice = 0;
-      state.tp1Fired = false;
-      state.tp2Fired = false;
-      state.tp3Fired = false;
-      state.lockedAtr = 0;
-      state.positionSide = null; // 清空持仓方向
-      state.entryTime = null;
-      state.totalFees = 0;
     } catch (e) {
       const errorMsg = e.response ? JSON.stringify(e.response.data) : e.message;
       console.error('[Override Error] SELL failed:', errorMsg);
