@@ -199,25 +199,32 @@ async function fetchBalances() {
             
             if (activePos) {
                 const actualAmt = Math.abs(activePos.positionAmt);
-                if (Math.abs(state.totalCoinAmount - actualAmt) > 0.001 || state.totalCoinAmount === 0) {
-                    state.totalCoinAmount = actualAmt;
-                    state.totalUsdtAmount = actualAmt * activePos.entryPrice;
-                    if (!state.entryTime) {
-                        state.entryTime = Date.now();
-                        state.totalFees = 0;
-                    }
-                    const isLong = state.positionSide !== 'short';
-                    const adjUsdt = isLong ? (state.totalUsdtAmount + (state.totalFees || 0)) : (state.totalUsdtAmount - (state.totalFees || 0));
-                    state.averagePrice = state.totalCoinAmount > 0 ? (adjUsdt / state.totalCoinAmount) : 0;
-                    if (state.activeDcaCount === 0) state.activeDcaCount = 1;
+                // 只要持仓数量不为0，我们就需要确保 averagePrice 与交易所同步 (防漂离)
+                if (actualAmt > 0) {
+                    // 如果数量有变化，或者价格偏差过大（说明是在别处重新开了仓）
+                    const currentAvg = state.averagePrice || 0;
+                    const priceDiff = Math.abs(currentAvg - activePos.entryPrice) / activePos.entryPrice;
                     
-                    // 如果发现仓位有变动(比如交易所发生了加仓)，同步重置止盈状态
-                    state.tp1Fired = false;
-                    state.tp2Fired = false;
-                    state.tp3Fired = false;
-                    state.customTp1Price = null;
-                    state.customTp2Price = null;
-                    state.customTp3Price = null;
+                    if (Math.abs(state.totalCoinAmount - actualAmt) > 0.001 || state.totalCoinAmount === 0 || priceDiff > 0.005) {
+                        state.totalCoinAmount = actualAmt;
+                        state.totalUsdtAmount = actualAmt * activePos.entryPrice;
+                        if (!state.entryTime) {
+                            state.entryTime = Date.now();
+                            state.totalFees = 0;
+                        }
+                        const isLong = state.positionSide !== 'short';
+                        const adjUsdt = isLong ? (state.totalUsdtAmount + (state.totalFees || 0)) : (state.totalUsdtAmount - (state.totalFees || 0));
+                        state.averagePrice = state.totalCoinAmount > 0 ? (adjUsdt / state.totalCoinAmount) : 0;
+                        if (state.activeDcaCount === 0) state.activeDcaCount = 1;
+                        
+                        // 如果发现仓位有变动(比如交易所发生了加仓或换仓)，同步重置止盈状态
+                        state.tp1Fired = false;
+                        state.tp2Fired = false;
+                        state.tp3Fired = false;
+                        state.customTp1Price = null;
+                        state.customTp2Price = null;
+                        state.customTp3Price = null;
+                    }
                 }
             } else if (state.totalCoinAmount > 0) {
                 state.totalCoinAmount = 0;

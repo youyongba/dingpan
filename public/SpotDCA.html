@@ -1192,7 +1192,7 @@
                 let tp1PriceAuto, tp2PriceAuto, tp3PriceAuto;
                 let tp1LabelTxt, tp2LabelTxt, tp3LabelTxt;
                 
-                const isLong = (currentState.positionSide !== 'short');
+                const isLong = (currentState.positionSide !== 'short' && currentState.positionSide !== 'SHORT');
                 const sign = isLong ? 1 : -1;
                 
                 if (tpMode.startsWith('atr') && activeAtr > 0) {
@@ -1205,9 +1205,15 @@
                     tp2LabelTxt = `目标 +${tp2Target}x (${modeTxt})`;
                     tp3LabelTxt = `目标 +${tp3Target}x (${modeTxt})`;
                 } else {
-                    tp1PriceAuto = avgPrice * (1 + sign * (tp1Target / 100));
-                    tp2PriceAuto = avgPrice * (1 + sign * (tp2Target / 100));
-                    tp3PriceAuto = avgPrice * (1 + sign * (tp3Target / 100));
+                    if (sign === -1) {
+                        tp1PriceAuto = avgPrice * (1 - (tp1Target / 100));
+                        tp2PriceAuto = avgPrice * (1 - (tp2Target / 100));
+                        tp3PriceAuto = avgPrice * (1 - (tp3Target / 100));
+                    } else {
+                        tp1PriceAuto = avgPrice * (1 + (tp1Target / 100));
+                        tp2PriceAuto = avgPrice * (1 + (tp2Target / 100));
+                        tp3PriceAuto = avgPrice * (1 + (tp3Target / 100));
+                    }
                     
                     tp1LabelTxt = `目标 +${tp1Target}%`;
                     tp2LabelTxt = `目标 +${tp2Target}%`;
@@ -1232,9 +1238,7 @@
                     const containerEl = document.getElementById(`ui-tp${level}-container`);
                     const editEl = document.getElementById(`ui-tp${level}-edit`);
                     
-                    const isHit = isLong ? (currentPrice >= price) : (currentPrice <= price);
-                    
-                    if (isHit || fired) {
+                    if (fired) {
                         statusEl.innerHTML = '<i class="fa-solid fa-check"></i> 已触发';
                         statusEl.className = 'text-green text-xs';
                         priceEl.classList.add('line-through');
@@ -1264,11 +1268,20 @@
                 }
                 
                 // SL logic
-                if ((currentPrice >= tp1Price || currentState.tp1Fired) && currentConfig.breakevenSl) {
+                if (currentState.tp1Fired && currentConfig.breakevenSl) {
                     document.getElementById('ui-sl-title').innerHTML = '<i class="fa-solid fa-shield mr-1"></i>动态保本止损已激活';
                     document.getElementById('ui-sl-title').className = 'text-green font-bold';
                     document.getElementById('ui-sl-desc').textContent = `TP1 已成交，剩余仓位止损线已上移至均价 ${avgPrice.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
                     document.getElementById('ui-sl-box').className = 'mt-4 p-3 bg-green-dim border border-green-500 rounded text-sm';
+                    document.getElementById('ui-sl-box').classList.remove('hidden');
+                } else if (currentConfig.breakevenSl) {
+                    document.getElementById('ui-sl-title').innerHTML = '<i class="fa-solid fa-shield mr-1"></i>动态保本止损等待激活';
+                    document.getElementById('ui-sl-title').className = 'text-gray-400 font-bold';
+                    document.getElementById('ui-sl-desc').textContent = `当 TP1 成交后，剩余仓位止损线将上移至均价`;
+                    document.getElementById('ui-sl-box').className = 'mt-4 p-3 bg-gray-800 border border-gray-700 rounded text-sm';
+                    document.getElementById('ui-sl-box').classList.remove('hidden');
+                } else {
+                    document.getElementById('ui-sl-box').classList.add('hidden');
                 }
             } else {
                 ['ui-tp1', 'ui-tp2', 'ui-tp3'].forEach(id => {
