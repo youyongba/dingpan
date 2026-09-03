@@ -1745,11 +1745,38 @@
         }
 
         async function executeQuickTrade(action) {
-            const amount = currentConfig.dcaAmount || 3000;
+            let amount = 0;
+            const isFutures = currentConfig.tradeMode === 'futures';
+            
+            if (isFutures) {
+                const capital = currentState.futuresBalanceUsdt || 0;
+                const posSizePct = currentConfig.positionSizePct || 3.0;
+                const lev = currentConfig.leverage || 100;
+                const steps = currentConfig.dcaMaxSteps || 5;
+                const multiplier = currentConfig.martingaleMultiplier || 1.0;
+                
+                const totalMarginToUse = capital * (posSizePct / 100);
+                const totalNotionalSize = totalMarginToUse * lev;
+                
+                if (multiplier === 1) {
+                    amount = totalNotionalSize / steps;
+                } else {
+                    amount = totalNotionalSize * (1 - multiplier) / (1 - Math.pow(multiplier, steps));
+                }
+                amount = Math.floor(amount);
+                
+                if (amount <= 0) {
+                    alert('获取到的账户余额不足或策略配置异常，计算出的首仓名义价值为 0，无法下单。');
+                    return;
+                }
+            } else {
+                amount = currentConfig.dcaAmount || 3000;
+            }
+            
             const isSpot = currentConfig.tradeMode === 'spot';
             const actionName = action === 'market-buy' ? (isSpot ? '买入' : '做多') : '做空';
             
-            if (!confirm(`确定要执行【一键${actionName}】吗？\n\n系统将直接使用策略配置中的金额 (${amount} USDT) 以市价开仓！`)) {
+            if (!confirm(`确定要执行【一键${actionName}】吗？\n\n系统将按照您的策略资金管理规则，直接以首仓规模 (${amount} USDT名义价值) 执行市价开仓！`)) {
                 return;
             }
             
