@@ -261,12 +261,17 @@ function startBotLoop(getEngineConfig, getEngineState) {
                     // 设置持仓方向 (首仓时)
                     if (state.totalCoinAmount < 0.00001) {
                         state.positionSide = isLongTrade ? 'long' : 'short';
+                        state.entryTime = Date.now();
+                        state.totalFees = 0;
                     }
 
                     state.activeDcaCount++;
                     state.totalUsdtAmount += cumQuote;
                     state.totalCoinAmount += executedQty;
-                    state.averagePrice = state.totalUsdtAmount / state.totalCoinAmount;
+                    
+                    const isLong = state.positionSide !== 'short';
+                    const adjUsdt = isLong ? (state.totalUsdtAmount + (state.totalFees || 0)) : (state.totalUsdtAmount - (state.totalFees || 0));
+                    state.averagePrice = state.totalCoinAmount > 0 ? (adjUsdt / state.totalCoinAmount) : 0;
                     
                     try {
                         const regimeState = regimeModule.getState();
@@ -386,8 +391,12 @@ function startBotLoop(getEngineConfig, getEngineState) {
                         state.totalUsdtAmount = 0;
                         state.averagePrice = 0;
                         state.activeDcaCount = 0;
+                        state.entryTime = null;
+                        state.totalFees = 0;
                     } else {
-                        state.averagePrice = state.totalUsdtAmount / state.totalCoinAmount;
+                        const isLong = state.positionSide !== 'short';
+                        const adjUsdt = isLong ? (state.totalUsdtAmount + (state.totalFees || 0)) : (state.totalUsdtAmount - (state.totalFees || 0));
+                        state.averagePrice = adjUsdt / state.totalCoinAmount;
                     }
                     
                     const actionName = isLong ? '卖出平多' : '买入平空';

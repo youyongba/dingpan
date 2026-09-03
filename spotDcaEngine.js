@@ -82,6 +82,8 @@ let state = {
   totalCoinAmount: 0,
   totalUsdtAmount: 0,
   averagePrice: 0,
+  entryTime: null, // 持仓起始时间
+  totalFees: 0,    // 累计资金费率和手续费
   tp1Fired: false,
   tp2Fired: false,
   tp3Fired: false,
@@ -182,8 +184,14 @@ async function fetchBalances() {
                 const actualAmt = Math.abs(activePos.positionAmt);
                 if (Math.abs(state.totalCoinAmount - actualAmt) > 0.001 || state.totalCoinAmount === 0) {
                     state.totalCoinAmount = actualAmt;
-                    state.averagePrice = activePos.entryPrice;
                     state.totalUsdtAmount = actualAmt * activePos.entryPrice;
+                    if (!state.entryTime) {
+                        state.entryTime = Date.now();
+                        state.totalFees = 0;
+                    }
+                    const isLong = state.positionSide !== 'short';
+                    const adjUsdt = isLong ? (state.totalUsdtAmount + (state.totalFees || 0)) : (state.totalUsdtAmount - (state.totalFees || 0));
+                    state.averagePrice = state.totalCoinAmount > 0 ? (adjUsdt / state.totalCoinAmount) : 0;
                     if (state.activeDcaCount === 0) state.activeDcaCount = 1;
                     
                     // 如果发现仓位有变动(比如交易所发生了加仓)，同步重置止盈状态
@@ -200,6 +208,8 @@ async function fetchBalances() {
                 state.totalUsdtAmount = 0;
                 state.activeDcaCount = 0;
                 state.positionSide = null;
+                state.entryTime = null;
+                state.totalFees = 0;
             }
         }
     }
@@ -208,9 +218,70 @@ async function fetchBalances() {
   }
 }
 
-// 启动时和每隔一段时间拉取一次余额
+// 获取资金费率和手续费
+async function fetchPositionFees() {
+    if (!state.entryTime || state.totalCoinAmount === 0 || !SPOT_API_KEY || !SPOT_API_SECRET) return;
+    
+    const timestamp = Date.now();
+    const startTime = state.entryTime;
+    
+    try {
+        let totalFee = 0;
+        
+        if (config.tradeMode === 'futures') {
+            const queryString = `symbol=BTCUSDT&startTime=${startTime}&recvWindow=60000&timestamp=${timestamp}`;
+            const signature = crypto.createHmac('sha256', SPOT_API_SECRET).update(queryString).digest('hex');
+            const url = `https://fapi.binance.com/fapi/v1/income?${queryString}&signature=${signature}`;
+            
+            const res = await axios.get(url, {
+                headers: { 'X-MBX-APIKEY': SPOT_API_KEY },
+                httpAgent, httpsAgent
+            });
+            
+            if (res.data && Array.isArray(res.data)) {
+                res.data.forEach(item => {
+                    if (item.incomeType === 'COMMISSION' || item.incomeType === 'FUNDING_FEE') {
+                        totalFee -= parseFloat(item.income);
+                    }
+                });
+            }
+        } else {
+            const queryString = `symbol=BTCUSDT&startTime=${startTime}&recvWindow=60000&timestamp=${timestamp}`;
+            const signature = crypto.createHmac('sha256', SPOT_API_SECRET).update(queryString).digest('hex');
+            const url = `https://api.binance.com/api/v3/myTrades?${queryString}&signature=${signature}`;
+            
+            const res = await axios.get(url, {
+                headers: { 'X-MBX-APIKEY': SPOT_API_KEY },
+                httpAgent, httpsAgent
+            });
+            
+            if (res.data && Array.isArray(res.data)) {
+                res.data.forEach(item => {
+                    if (item.commissionAsset === 'USDT') {
+                        totalFee += parseFloat(item.commission);
+                    } else if (item.commissionAsset === 'BNB') {
+                        totalFee += parseFloat(item.commission) * 600; // 粗估 BNB 价格
+                    }
+                });
+            }
+        }
+        
+        state.totalFees = totalFee;
+        
+        if (state.totalCoinAmount > 0) {
+            const isLong = state.positionSide !== 'short';
+            const adjUsdt = isLong ? (state.totalUsdtAmount + state.totalFees) : (state.totalUsdtAmount - state.totalFees);
+            state.averagePrice = adjUsdt / state.totalCoinAmount;
+        }
+    } catch (e) {
+        console.error('[SpotDCA] Fetch Fees Error:', e.message);
+    }
+}
+
+// 启动时和每隔一段时间拉取一次余额与手续费
 fetchBalances();
 setInterval(fetchBalances, 60000);
+setInterval(fetchPositionFees, 60000);
 
 // 全局缓存宏观固化 vPOC 数据
 let macroVpocData = { vpoc: null, vah: null, val: null, updatedAt: 0 };
@@ -405,12 +476,17 @@ router.post('/override', express.json(), async (req, res) => {
       // 更新方向标记 (如果之前是空仓)
       if (state.totalCoinAmount < 0.00001) {
           state.positionSide = action === 'market-buy-short' ? 'short' : 'long';
+          state.entryTime = Date.now();
+          state.totalFees = 0;
       }
 
       state.activeDcaCount++;
       state.totalUsdtAmount += cumQuote;
       state.totalCoinAmount += executedQty;
-      state.averagePrice = state.totalUsdtAmount / state.totalCoinAmount;
+      
+      const isLong = state.positionSide !== 'short';
+      const adjUsdt = isLong ? (state.totalUsdtAmount + (state.totalFees || 0)) : (state.totalUsdtAmount - (state.totalFees || 0));
+      state.averagePrice = state.totalCoinAmount > 0 ? (adjUsdt / state.totalCoinAmount) : 0;
       
       try {
           if (regimeModule && typeof regimeModule.getState === 'function') {
@@ -462,6 +538,8 @@ router.post('/override', express.json(), async (req, res) => {
       state.tp3Fired = false;
       state.lockedAtr = 0;
       state.positionSide = null; // 清空持仓方向
+      state.entryTime = null;
+      state.totalFees = 0;
     } catch (e) {
       const errorMsg = e.response ? JSON.stringify(e.response.data) : e.message;
       console.error('[Override Error] SELL failed:', errorMsg);
