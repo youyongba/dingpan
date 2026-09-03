@@ -723,6 +723,7 @@
             
             if (token) {
                 localStorage.setItem('CONFIG_AUTH_TOKEN', token);
+                needsAuthToken = true;
             }
             
             if (apiKey || apiSecret) {
@@ -809,6 +810,16 @@
             try {
                 const res = await fetch('/api/spot-dca/status');
                 const data = await res.json();
+                
+                // 检查服务端是否要求鉴权，以及如果没设置Token则主动弹窗
+                if (data.hasAuthToken) {
+                    needsAuthToken = true;
+                    if (!localStorage.getItem('CONFIG_AUTH_TOKEN') && !authPrompted) {
+                        authPrompted = true;
+                        openApiSettings();
+                    }
+                }
+                
                 if (data.ok) {
                     currentConfig = data.config;
                     currentState = data.state;
