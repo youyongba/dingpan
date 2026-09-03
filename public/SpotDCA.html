@@ -752,7 +752,7 @@
 
         async function toggleBot(direction = 'long') {
             try {
-                const res = await fetch('/api/spot-dca/toggle-bot', { 
+                const res = await authFetch('/api/spot-dca/toggle-bot', { 
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ direction })
@@ -780,7 +780,7 @@
             }
             
             try {
-                const res = await fetch('/api/spot-dca/custom-tp', {
+                const res = await authFetch('/api/spot-dca/custom-tp', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ level, price: price === 0 || isNaN(price) ? null : price })
@@ -798,7 +798,7 @@
 
         async function refreshStaticAtr() {
             try {
-                await fetch('/api/spot-dca/refresh-atr', { method: 'POST' });
+                await authFetch('/api/spot-dca/refresh-atr', { method: 'POST' });
                 fetchStatus();
             } catch (e) {
                 console.error(e);
