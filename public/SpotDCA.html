@@ -233,46 +233,9 @@
                     </div>
                 </div>
 
-                <!-- Scaled TP -->
-                <div>
-                    <div class="flex justify-between items-center mb-2">
-                        <div class="text-sm text-gray-400">分批止盈系统 (Scaled TP)</div>
-                        <button id="btn-refresh-atr" onclick="refreshStaticAtr()" class="hidden px-2 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded shadow transition-colors"><i class="fa-solid fa-rotate-right mr-1"></i>重新计算止盈</button>
-                    </div>
-                    <div class="space-y-2">
-                        <div class="flex items-center justify-between p-2 bg-gray-800 rounded text-sm" id="ui-tp1-container">
-                            <span class="text-gray-400" id="ui-tp1-label">TP1 (50%)</span>
-                            <div class="flex items-center">
-                                <span class="font-mono" id="ui-tp1-price">--</span>
-                                <i class="fa-solid fa-pen-to-square ml-2 text-gray-600 hover:text-blue-400 cursor-pointer hidden" id="ui-tp1-edit"></i>
-                            </div>
-                            <span class="text-gray-500 text-xs" id="ui-tp1-status">等待建仓</span>
-                        </div>
-                        <div class="flex items-center justify-between p-2 bg-gray-800 rounded text-sm" id="ui-tp2-container">
-                            <span class="text-gray-400" id="ui-tp2-label">TP2 (30%)</span>
-                            <div class="flex items-center">
-                                <span class="font-mono" id="ui-tp2-price">--</span>
-                                <i class="fa-solid fa-pen-to-square ml-2 text-gray-600 hover:text-blue-400 cursor-pointer hidden" id="ui-tp2-edit"></i>
-                            </div>
-                            <span class="text-gray-500 text-xs" id="ui-tp2-status">等待建仓</span>
-                        </div>
-                        <div class="flex items-center justify-between p-2 bg-gray-800 rounded text-sm" id="ui-tp3-container">
-                            <span class="text-gray-400" id="ui-tp3-label">TP3 (20%)</span>
-                            <div class="flex items-center">
-                                <span class="font-mono" id="ui-tp3-price">--</span>
-                                <i class="fa-solid fa-pen-to-square ml-2 text-gray-600 hover:text-blue-400 cursor-pointer hidden" id="ui-tp3-edit"></i>
-                            </div>
-                            <span class="text-gray-500 text-xs" id="ui-tp3-status">等待建仓</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- SL -->
-                <div class="mt-4 p-3 bg-gray-800 border border-gray-700 rounded text-sm" id="ui-sl-box">
-                    <div class="flex justify-between items-center mb-1">
-                        <span class="text-gray-500 font-bold" id="ui-sl-title"><i class="fa-solid fa-shield mr-1"></i>动态保本止损未激活</span>
-                    </div>
-                    <div class="text-xs text-gray-500" id="ui-sl-desc">需等待 TP1 成交后激活</div>
+                <!-- Scaled TP and SL Wrapper -->
+                <div id="ui-scaled-tp-wrapper" class="space-y-4 mb-4">
+                    <!-- JS populated TP panels -->
                 </div>
 
                 <!-- Action Logs -->
@@ -1188,13 +1151,12 @@
             
             const avgPrice = currentState.averagePrice || 0;
             
-            // 为了在有双向持仓时能正常显示止盈列表，判断逻辑不再简单粗暴要求 hasPosition
-            const hasPosition = avgPrice > 0 && ((currentState.totalCoinAmount > 0) || (currentConfig.tradeMode === 'futures' && currentState.futuresPositions && currentState.futuresPositions.length > 0 && renderedPosition));
+            let tpPanelsHtml = '';
             
-            if (hasPosition && currentPrice > 0) {
+            const renderSingleTpPanel = (posSide, entryPrice, isTracked) => {
                 const tpMode = currentConfig.tpMode || 'percent';
                 const currentAtr = currentRealIndicators?.currentAtr || 0;
-                const activeAtr = (tpMode === 'atr_static' && currentState.lockedAtr > 0) ? currentState.lockedAtr : currentAtr;
+                const activeAtr = (tpMode === 'atr_static' && isTracked && currentState.lockedAtr > 0) ? currentState.lockedAtr : currentAtr;
                 
                 const tp1Target = currentConfig.tp1Target || 1.0;
                 const tp2Target = currentConfig.tp2Target || 3.0;
@@ -1203,13 +1165,13 @@
                 let tp1PriceAuto, tp2PriceAuto, tp3PriceAuto;
                 let tp1LabelTxt, tp2LabelTxt, tp3LabelTxt;
                 
-                const isLong = (currentState.positionSide !== 'short' && currentState.positionSide !== 'SHORT');
+                const isLong = (posSide === 'long' || posSide === 'LONG');
                 const sign = isLong ? 1 : -1;
                 
                 if (tpMode.startsWith('atr') && activeAtr > 0) {
-                    tp1PriceAuto = avgPrice + sign * (activeAtr * tp1Target);
-                    tp2PriceAuto = avgPrice + sign * (activeAtr * tp2Target);
-                    tp3PriceAuto = avgPrice + sign * (activeAtr * tp3Target);
+                    tp1PriceAuto = entryPrice + sign * (activeAtr * tp1Target);
+                    tp2PriceAuto = entryPrice + sign * (activeAtr * tp2Target);
+                    tp3PriceAuto = entryPrice + sign * (activeAtr * tp3Target);
                     
                     const modeTxt = tpMode === 'atr_static' ? `静态ATR:${activeAtr.toFixed(1)}` : `动态ATR:${activeAtr.toFixed(1)}`;
                     tp1LabelTxt = `目标 +${tp1Target}x (${modeTxt})`;
@@ -1217,13 +1179,13 @@
                     tp3LabelTxt = `目标 +${tp3Target}x (${modeTxt})`;
                 } else {
                     if (sign === -1) {
-                        tp1PriceAuto = avgPrice * (1 - (tp1Target / 100));
-                        tp2PriceAuto = avgPrice * (1 - (tp2Target / 100));
-                        tp3PriceAuto = avgPrice * (1 - (tp3Target / 100));
+                        tp1PriceAuto = entryPrice * (1 - (tp1Target / 100));
+                        tp2PriceAuto = entryPrice * (1 - (tp2Target / 100));
+                        tp3PriceAuto = entryPrice * (1 - (tp3Target / 100));
                     } else {
-                        tp1PriceAuto = avgPrice * (1 + (tp1Target / 100));
-                        tp2PriceAuto = avgPrice * (1 + (tp2Target / 100));
-                        tp3PriceAuto = avgPrice * (1 + (tp3Target / 100));
+                        tp1PriceAuto = entryPrice * (1 + (tp1Target / 100));
+                        tp2PriceAuto = entryPrice * (1 + (tp2Target / 100));
+                        tp3PriceAuto = entryPrice * (1 + (tp3Target / 100));
                     }
                     
                     tp1LabelTxt = `目标 +${tp1Target}%`;
@@ -1231,83 +1193,103 @@
                     tp3LabelTxt = `目标 +${tp3Target}%`;
                 }
                 
-                const tp1Price = currentState.customTp1Price || tp1PriceAuto;
-                const tp2Price = currentState.customTp2Price || tp2PriceAuto;
-                const tp3Price = currentState.customTp3Price || tp3PriceAuto;
+                const tp1Price = (isTracked && currentState.customTp1Price) ? currentState.customTp1Price : tp1PriceAuto;
+                const tp2Price = (isTracked && currentState.customTp2Price) ? currentState.customTp2Price : tp2PriceAuto;
+                const tp3Price = (isTracked && currentState.customTp3Price) ? currentState.customTp3Price : tp3PriceAuto;
                 
-                document.getElementById('ui-tp1-label').textContent = currentState.customTp1Price ? `TP1 (${currentConfig.tp1 || 50}%) | 手动自定义` : `TP1 (${currentConfig.tp1 || 50}%) | ${tp1LabelTxt}`;
-                document.getElementById('ui-tp2-label').textContent = currentState.customTp2Price ? `TP2 (${currentConfig.tp2 || 30}%) | 手动自定义` : `TP2 (${currentConfig.tp2 || 30}%) | ${tp2LabelTxt}`;
-                document.getElementById('ui-tp3-label').textContent = currentState.customTp3Price ? `TP3 (${currentConfig.tp3 || 20}%) | 手动自定义` : `TP3 (${currentConfig.tp3 || 20}%) | ${tp3LabelTxt}`;
+                const label1 = (isTracked && currentState.customTp1Price) ? `TP1 (${currentConfig.tp1 || 50}%) | 手动自定义` : `TP1 (${currentConfig.tp1 || 50}%) | ${tp1LabelTxt}`;
+                const label2 = (isTracked && currentState.customTp2Price) ? `TP2 (${currentConfig.tp2 || 30}%) | 手动自定义` : `TP2 (${currentConfig.tp2 || 30}%) | ${tp2LabelTxt}`;
+                const label3 = (isTracked && currentState.customTp3Price) ? `TP3 (${currentConfig.tp3 || 20}%) | 手动自定义` : `TP3 (${currentConfig.tp3 || 20}%) | ${tp3LabelTxt}`;
                 
-                document.getElementById('ui-tp1-price').textContent = tp1Price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-                document.getElementById('ui-tp2-price').textContent = tp2Price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-                document.getElementById('ui-tp3-price').textContent = tp3Price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-                
-                const updateTpUI = (level, price, fired) => {
-                    const statusEl = document.getElementById(`ui-tp${level}-status`);
-                    const priceEl = document.getElementById(`ui-tp${level}-price`);
-                    const containerEl = document.getElementById(`ui-tp${level}-container`);
-                    const editEl = document.getElementById(`ui-tp${level}-edit`);
-                    
+                const getTpRowHtml = (level, label, price, fired) => {
                     if (fired) {
-                        statusEl.innerHTML = '<i class="fa-solid fa-check"></i> 已触发';
-                        statusEl.className = 'text-green text-xs';
-                        priceEl.classList.add('line-through');
-                        containerEl.classList.add('opacity-50');
-                        editEl.classList.add('hidden');
+                        return `<div class="flex items-center justify-between p-2 bg-gray-800 rounded text-sm opacity-50">
+                            <span class="text-gray-400">${label}</span>
+                            <div class="flex items-center">
+                                <span class="font-mono line-through">${price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
+                            </div>
+                            <span class="text-green text-xs"><i class="fa-solid fa-check"></i> 已触发</span>
+                        </div>`;
                     } else {
-                        statusEl.textContent = '等待中';
-                        statusEl.className = 'text-blue-400 text-xs';
-                        priceEl.classList.remove('line-through');
-                        containerEl.classList.remove('opacity-50');
-                        editEl.classList.remove('hidden');
-                        editEl.onclick = () => editTpPrice(level, price);
+                        const editIconHtml = isTracked ? `<i class="fa-solid fa-pen-to-square ml-2 text-gray-600 hover:text-blue-400 cursor-pointer" onclick="editTpPrice(${level}, ${price})"></i>` : '';
+                        return `<div class="flex items-center justify-between p-2 bg-gray-800 rounded text-sm">
+                            <span class="text-gray-400">${label}</span>
+                            <div class="flex items-center">
+                                <span class="font-mono">${price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
+                                ${editIconHtml}
+                            </div>
+                            <span class="text-blue-400 text-xs">${isTracked ? '等待中' : '<span class="text-yellow-500/70">静态监控</span>'}</span>
+                        </div>`;
                     }
                 };
+
+                const refreshBtnHtml = (isTracked && tpMode === 'atr_static') ? `<button onclick="refreshStaticAtr()" class="px-2 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded shadow transition-colors"><i class="fa-solid fa-rotate-right mr-1"></i>重新计算止盈</button>` : '';
                 
-                updateTpUI(1, tp1Price, currentState.tp1Fired);
-                updateTpUI(2, tp2Price, currentState.tp2Fired);
-                updateTpUI(3, tp3Price, currentState.tp3Fired);
-                
-                const btnRefresh = document.getElementById('btn-refresh-atr');
-                if (btnRefresh) {
-                    if (tpMode === 'atr_static') {
-                        btnRefresh.classList.remove('hidden');
-                    } else {
-                        btnRefresh.classList.add('hidden');
+                let slHtml = '';
+                if (isTracked) {
+                    if (currentState.tp1Fired && currentConfig.breakevenSl) {
+                        slHtml = `<div class="mt-4 p-3 bg-green-dim border border-green-500 rounded text-sm">
+                            <div class="flex justify-between items-center mb-1">
+                                <span class="text-green font-bold"><i class="fa-solid fa-shield mr-1"></i>动态保本止损已激活</span>
+                            </div>
+                            <div class="text-xs text-green-400">TP1 已成交，剩余仓位止损线已上移至均价 ${entryPrice.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</div>
+                        </div>`;
+                    } else if (currentConfig.breakevenSl) {
+                        slHtml = `<div class="mt-4 p-3 bg-gray-800 border border-gray-700 rounded text-sm">
+                            <div class="flex justify-between items-center mb-1">
+                                <span class="text-gray-400 font-bold"><i class="fa-solid fa-shield mr-1"></i>动态保本止损等待激活</span>
+                            </div>
+                            <div class="text-xs text-gray-500">当 TP1 成交后，剩余仓位止损线将上移至均价</div>
+                        </div>`;
                     }
                 }
-                
-                // SL logic
-                if (currentState.tp1Fired && currentConfig.breakevenSl) {
-                    document.getElementById('ui-sl-title').innerHTML = '<i class="fa-solid fa-shield mr-1"></i>动态保本止损已激活';
-                    document.getElementById('ui-sl-title').className = 'text-green font-bold';
-                    document.getElementById('ui-sl-desc').textContent = `TP1 已成交，剩余仓位止损线已上移至均价 ${avgPrice.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
-                    document.getElementById('ui-sl-box').className = 'mt-4 p-3 bg-green-dim border border-green-500 rounded text-sm';
-                    document.getElementById('ui-sl-box').classList.remove('hidden');
-                } else if (currentConfig.breakevenSl) {
-                    document.getElementById('ui-sl-title').innerHTML = '<i class="fa-solid fa-shield mr-1"></i>动态保本止损等待激活';
-                    document.getElementById('ui-sl-title').className = 'text-gray-400 font-bold';
-                    document.getElementById('ui-sl-desc').textContent = `当 TP1 成交后，剩余仓位止损线将上移至均价`;
-                    document.getElementById('ui-sl-box').className = 'mt-4 p-3 bg-gray-800 border border-gray-700 rounded text-sm';
-                    document.getElementById('ui-sl-box').classList.remove('hidden');
-                } else {
-                    document.getElementById('ui-sl-box').classList.add('hidden');
-                }
-            } else {
-                ['ui-tp1', 'ui-tp2', 'ui-tp3'].forEach(id => {
-                    document.getElementById(`${id}-price`).textContent = '--';
-                    document.getElementById(`${id}-price`).classList.remove('line-through');
-                    document.getElementById(`${id}-status`).textContent = '等待建仓';
-                    document.getElementById(`${id}-status`).className = 'text-gray-500 text-xs';
-                    document.getElementById(`${id}-container`).classList.remove('opacity-50');
+
+                return `
+                <div class="mb-4">
+                    <div class="flex justify-between items-center mb-2">
+                        <div class="text-sm text-gray-400">分批止盈系统 (${isLong ? '多头' : '空头'})${!isTracked ? ' <span class="text-xs text-yellow-500 font-bold ml-1 px-1 bg-yellow-500/20 rounded">未托管 (不会自动卖出)</span>' : ''}</div>
+                        ${refreshBtnHtml}
+                    </div>
+                    <div class="space-y-2">
+                        ${getTpRowHtml(1, label1, tp1Price, isTracked && currentState.tp1Fired)}
+                        ${getTpRowHtml(2, label2, tp2Price, isTracked && currentState.tp2Fired)}
+                        ${getTpRowHtml(3, label3, tp3Price, isTracked && currentState.tp3Fired)}
+                    </div>
+                    ${slHtml}
+                </div>`;
+            };
+
+            if (currentConfig.tradeMode === 'futures' && currentState.futuresPositions && currentState.futuresPositions.length > 0) {
+                currentState.futuresPositions.forEach(pos => {
+                    const isLong = pos.positionAmt > 0 || pos.positionSide === 'LONG';
+                    const posSide = isLong ? 'long' : 'short';
+                    const isTracked = (posSide === currentState.positionSide);
+                    tpPanelsHtml += renderSingleTpPanel(posSide, pos.entryPrice, isTracked);
                 });
-                
-                document.getElementById('ui-sl-title').innerHTML = '<i class="fa-solid fa-shield mr-1"></i>动态保本止损未激活';
-                document.getElementById('ui-sl-title').className = 'text-gray-500 font-bold';
-                document.getElementById('ui-sl-desc').textContent = '需等待 TP1 成交后激活';
-                document.getElementById('ui-sl-box').className = 'mt-4 p-3 bg-gray-800 border border-gray-700 rounded text-sm';
+            } else if (currentConfig.tradeMode === 'spot' && currentState.spotBalanceBtc > 0) {
+                tpPanelsHtml += renderSingleTpPanel('long', currentState.averagePrice || currentPrice, true);
+            } else {
+                tpPanelsHtml = `
+                <div class="mb-4">
+                    <div class="flex justify-between items-center mb-2">
+                        <div class="text-sm text-gray-400">分批止盈系统 (Scaled TP)</div>
+                    </div>
+                    <div class="space-y-2">
+                        <div class="flex items-center justify-between p-2 bg-gray-800 rounded text-sm opacity-50">
+                            <span class="text-gray-400">TP1 (50%)</span><span class="font-mono">--</span><span class="text-gray-500 text-xs">等待建仓</span>
+                        </div>
+                        <div class="flex items-center justify-between p-2 bg-gray-800 rounded text-sm opacity-50">
+                            <span class="text-gray-400">TP2 (30%)</span><span class="font-mono">--</span><span class="text-gray-500 text-xs">等待建仓</span>
+                        </div>
+                        <div class="flex items-center justify-between p-2 bg-gray-800 rounded text-sm opacity-50">
+                            <span class="text-gray-400">TP3 (20%)</span><span class="font-mono">--</span><span class="text-gray-500 text-xs">等待建仓</span>
+                        </div>
+                    </div>
+                </div>`;
             }
+            
+            const wrapper = document.getElementById('ui-scaled-tp-wrapper');
+            if (wrapper) wrapper.innerHTML = tpPanelsHtml;
             
             // Render Balance
             const usdtBal = currentState.spotBalanceUsdt || 0;
