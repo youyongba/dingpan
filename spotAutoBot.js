@@ -470,4 +470,4 @@ function startBotLoop(getEngineConfig, getEngineState) {
     }, 2000);
 }
 
-module.exports = { startBotLoop, executeRealOrder, executeFuturesOrder, setApiKeys };
+module.exports = { startBotLoop, executeRealOrder, executeFuturesOrder, setApiKeys, getCurrentPrice: () => currentPrice };

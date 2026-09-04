@@ -496,7 +496,8 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
       
       if (config.tradeMode === 'futures') {
         if (!amt || amt <= 0) throw new Error('无效的开仓金额');
-        const currentPrice = state.averagePrice > 0 ? state.averagePrice : 60000; // 粗略 fallback
+        const { getCurrentPrice } = require('./spotAutoBot');
+        const currentPrice = getCurrentPrice() || 70000; // 使用真实的实时价格
         let qtyToBuy = Math.floor((amt / currentPrice) * 1000) / 1000;
         if (qtyToBuy < 0.001) throw new Error(`数量太小: ${qtyToBuy}`);
         
