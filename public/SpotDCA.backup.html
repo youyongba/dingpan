@@ -1073,13 +1073,16 @@
                     
                     const pnlDisplay = !isDataVisible ? '******' : `${pnlUsdt >= 0 ? '+' : ''}${pnlUsdt.toFixed(2)} USDT (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)`;
                     
-                    const stateObj = isLong ? currentState.long : currentState.short;
-                    
+                    // 如果这个仓位正好是机器人当前追踪的方向，我们记录下来，用于后续渲染止盈
+                    if ((isLong && currentState.positionSide === 'long') || (!isLong && currentState.positionSide === 'short')) {
+                        renderedPosition = true;
+                    }
+
                     return `
                     <div class="p-4 bg-gray-800 rounded border border-gray-700">
                         <div class="flex justify-between items-center mb-2">
                             <div class="text-sm text-gray-400">当前${modeText}持仓 (${sideText}) - 杠杆 ${pos.leverage}x</div>
-                            <div class="text-xs font-bold bg-yellow-500/20 text-yellow-500 px-2 py-1 rounded">DCA 加仓: ${stateObj?.activeDcaCount || 0} 次</div>
+                            <div class="text-xs font-bold bg-yellow-500/20 text-yellow-500 px-2 py-1 rounded">DCA 加仓: ${currentState.activeDcaCount || 0} 次</div>
                         </div>
                         <div class="text-2xl font-mono font-bold mb-1"><span class="${colorClass}">${formatMoney(notionalUsdt)}</span> <span class="text-sm font-normal text-gray-400">USDT (名义)</span></div>
                         <div class="flex justify-between text-xs">
@@ -1091,8 +1094,8 @@
             } else if (currentConfig.tradeMode === 'spot' && currentState.spotBalanceBtc > 0) {
                 const btcBal = currentState.spotBalanceBtc;
                 const notionalUsdt = btcBal * currentPrice;
-                const stateObj = currentState.long || {};
-                const avgPrice = stateObj.averagePrice || 0;
+                // For spot, we might not have a reliable entry price from Binance API easily in this scope, we fallback to internal state avgPrice if available, else 0
+                const avgPrice = currentState.averagePrice || 0;
                 let pnlHtml = '<span class="text-gray-500">0.00%</span>';
                 if (avgPrice > 0) {
                     const pnlUsdt = (currentPrice - avgPrice) * btcBal;
@@ -1102,8 +1105,8 @@
                 }
                 
                 let holdingTimeStr = '--';
-                if (stateObj.entryTime) {
-                    const diffMs = Date.now() - stateObj.entryTime;
+                if (currentState.entryTime) {
+                    const diffMs = Date.now() - currentState.entryTime;
                     const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
                     const diffMins = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
                     if (diffHours >= 24) {
@@ -1112,13 +1115,13 @@
                         holdingTimeStr = `${diffHours}时 ${diffMins}分`;
                     }
                 }
-                const fees = stateObj.totalFees || 0;
+                const fees = currentState.totalFees || 0;
                 
                 posContainer.innerHTML = `
                 <div class="p-4 bg-gray-800 rounded border border-gray-700">
                     <div class="flex justify-between items-center mb-2">
                         <div class="text-sm text-gray-400">当前${modeText}持仓价值</div>
-                        <div class="text-xs font-bold bg-yellow-500/20 text-yellow-500 px-2 py-1 rounded">DCA 加仓: ${stateObj.activeDcaCount || 0} 次</div>
+                        <div class="text-xs font-bold bg-yellow-500/20 text-yellow-500 px-2 py-1 rounded">DCA 加仓: ${currentState.activeDcaCount || 0} 次</div>
                     </div>
                     <div class="text-2xl font-mono font-bold mb-1"><span class="text-green">${formatMoney(notionalUsdt)}</span> <span class="text-sm font-normal text-gray-400">USDT</span></div>
                     <div class="flex justify-between text-xs">
@@ -1150,10 +1153,10 @@
             
             let tpPanelsHtml = '';
             
-            const renderSingleTpPanel = (posSide, entryPrice, isTracked, stateObj) => {
+            const renderSingleTpPanel = (posSide, entryPrice, isTracked) => {
                 const tpMode = currentConfig.tpMode || 'percent';
                 const currentAtr = currentRealIndicators?.currentAtr || 0;
-                const activeAtr = (tpMode === 'atr_static' && isTracked && stateObj?.lockedAtr > 0) ? stateObj.lockedAtr : currentAtr;
+                const activeAtr = (tpMode === 'atr_static' && isTracked && currentState.lockedAtr > 0) ? currentState.lockedAtr : currentAtr;
                 
                 const tp1Target = currentConfig.tp1Target || 1.0;
                 const tp2Target = currentConfig.tp2Target || 3.0;
@@ -1190,13 +1193,13 @@
                     tp3LabelTxt = `目标 +${tp3Target}%`;
                 }
                 
-                const tp1Price = (isTracked && stateObj?.customTp1Price) ? stateObj.customTp1Price : tp1PriceAuto;
-                const tp2Price = (isTracked && stateObj?.customTp2Price) ? stateObj.customTp2Price : tp2PriceAuto;
-                const tp3Price = (isTracked && stateObj?.customTp3Price) ? stateObj.customTp3Price : tp3PriceAuto;
+                const tp1Price = (isTracked && currentState.customTp1Price) ? currentState.customTp1Price : tp1PriceAuto;
+                const tp2Price = (isTracked && currentState.customTp2Price) ? currentState.customTp2Price : tp2PriceAuto;
+                const tp3Price = (isTracked && currentState.customTp3Price) ? currentState.customTp3Price : tp3PriceAuto;
                 
-                const label1 = (isTracked && stateObj?.customTp1Price) ? `TP1 (${currentConfig.tp1 || 50}%) | 手动自定义` : `TP1 (${currentConfig.tp1 || 50}%) | ${tp1LabelTxt}`;
-                const label2 = (isTracked && stateObj?.customTp2Price) ? `TP2 (${currentConfig.tp2 || 30}%) | 手动自定义` : `TP2 (${currentConfig.tp2 || 30}%) | ${tp2LabelTxt}`;
-                const label3 = (isTracked && stateObj?.customTp3Price) ? `TP3 (${currentConfig.tp3 || 20}%) | 手动自定义` : `TP3 (${currentConfig.tp3 || 20}%) | ${tp3LabelTxt}`;
+                const label1 = (isTracked && currentState.customTp1Price) ? `TP1 (${currentConfig.tp1 || 50}%) | 手动自定义` : `TP1 (${currentConfig.tp1 || 50}%) | ${tp1LabelTxt}`;
+                const label2 = (isTracked && currentState.customTp2Price) ? `TP2 (${currentConfig.tp2 || 30}%) | 手动自定义` : `TP2 (${currentConfig.tp2 || 30}%) | ${tp2LabelTxt}`;
+                const label3 = (isTracked && currentState.customTp3Price) ? `TP3 (${currentConfig.tp3 || 20}%) | 手动自定义` : `TP3 (${currentConfig.tp3 || 20}%) | ${tp3LabelTxt}`;
                 
                 const getTpRowHtml = (level, label, price, fired) => {
                     if (fired) {
@@ -1208,7 +1211,7 @@
                             <span class="text-green text-xs"><i class="fa-solid fa-check"></i> 已触发</span>
                         </div>`;
                     } else {
-                        const editIconHtml = isTracked ? `<i class="fa-solid fa-pen-to-square ml-2 text-gray-600 hover:text-blue-400 cursor-pointer" onclick="editTpPrice(${level}, ${price}, '${posSide}')"></i>` : '';
+                        const editIconHtml = isTracked ? `<i class="fa-solid fa-pen-to-square ml-2 text-gray-600 hover:text-blue-400 cursor-pointer" onclick="editTpPrice(${level}, ${price})"></i>` : '';
                         return `<div class="flex items-center justify-between p-2 bg-gray-800 rounded text-sm">
                             <span class="text-gray-400">${label}</span>
                             <div class="flex items-center">
@@ -1224,7 +1227,7 @@
                 
                 let slHtml = '';
                 if (isTracked) {
-                    if (stateObj?.tp1Fired && currentConfig.breakevenSl) {
+                    if (currentState.tp1Fired && currentConfig.breakevenSl) {
                         slHtml = `<div class="mt-4 p-3 bg-green-dim border border-green-500 rounded text-sm">
                             <div class="flex justify-between items-center mb-1">
                                 <span class="text-green font-bold"><i class="fa-solid fa-shield mr-1"></i>动态保本止损已激活</span>
@@ -1248,9 +1251,9 @@
                         ${refreshBtnHtml}
                     </div>
                     <div class="space-y-2">
-                        ${getTpRowHtml(1, label1, tp1Price, isTracked && stateObj?.tp1Fired)}
-                        ${getTpRowHtml(2, label2, tp2Price, isTracked && stateObj?.tp2Fired)}
-                        ${getTpRowHtml(3, label3, tp3Price, isTracked && stateObj?.tp3Fired)}
+                        ${getTpRowHtml(1, label1, tp1Price, isTracked && currentState.tp1Fired)}
+                        ${getTpRowHtml(2, label2, tp2Price, isTracked && currentState.tp2Fired)}
+                        ${getTpRowHtml(3, label3, tp3Price, isTracked && currentState.tp3Fired)}
                     </div>
                     ${slHtml}
                 </div>`;
@@ -1260,13 +1263,11 @@
                 currentState.futuresPositions.forEach(pos => {
                     const isLong = pos.positionAmt > 0 || pos.positionSide === 'LONG';
                     const posSide = isLong ? 'long' : 'short';
-                    const stateObj = isLong ? currentState.long : currentState.short;
-                    // 如果引擎开启，则托管该方向
-                    const isTracked = isLong ? currentState.isLongBotRunning : currentState.isShortBotRunning;
-                    tpPanelsHtml += renderSingleTpPanel(posSide, pos.entryPrice, isTracked, stateObj);
+                    const isTracked = (posSide === currentState.positionSide);
+                    tpPanelsHtml += renderSingleTpPanel(posSide, pos.entryPrice, isTracked);
                 });
             } else if (currentConfig.tradeMode === 'spot' && currentState.spotBalanceBtc > 0) {
-                tpPanelsHtml += renderSingleTpPanel('long', currentState.long?.averagePrice || currentPrice, currentState.isLongBotRunning, currentState.long);
+                tpPanelsHtml += renderSingleTpPanel('long', currentState.averagePrice || currentPrice, true);
             } else {
                 tpPanelsHtml = `
                 <div class="mb-4">

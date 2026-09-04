@@ -1,187 +1,27 @@
-const crypto = require('crypto');
-const axios = require('axios');
-const WebSocket = require('ws');
-const { httpAgent, httpsAgent } = require('./lib/httpAgents');
-const regimeModule = require('./regimeModule');
-const mtfModule = require('./mtfModule');
+import re
 
-// 币安现货 API 密钥 (初始从环境变量读取)
-let SPOT_API_KEY = (process.env.BINANCE_SPOT_API_KEY || process.env.BINANCE_API_KEY || '').trim();
-let SPOT_API_SECRET = (process.env.BINANCE_SPOT_API_SECRET || process.env.BINANCE_API_SECRET || '').trim();
+def process_autobot():
+    with open('spotAutoBot.js', 'r') as f:
+        content = f.read()
 
-function setApiKeys(key, secret) {
-    if (key) SPOT_API_KEY = key;
-    if (secret) SPOT_API_SECRET = secret;
-}
-
-let currentPrice = 0;
-let currentMinuteDelta = 0;
-let lastMinuteStamp = 0;
-let deltaUsdt = 0;
-
-let botSignalState = {
-    longRsiHitTime: 0,
-    longMacdHitTime: 0,
-    shortRsiHitTime: 0,
-    shortMacdHitTime: 0,
-    lastDcaTimeLong: 0,
-    lastDcaTimeShort: 0,
-    isExecuting: false
-};
-
-// 全局指标状态追踪（用于严格判断“再次出现”的交叉事件）
-let globalMacdState = null;
-let globalMacdGoldenCrossTime = 0;
-let globalMacdDeathCrossTime = 0;
-
-let globalRsiState = null; // 'oversold', 'overbought', 'normal'
-let globalRsiOversoldTime = 0;
-let globalRsiOverboughtTime = 0;
-
-// 1. 后端实时监听微观订单流 (脱离浏览器也能运行)
-function initBackendDeltaWS() {
-    const ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade');
-    ws.on('open', () => console.log('[SpotAutoBot] WS Connected for Backend Delta tracking'));
-    ws.on('message', (data) => {
-        const parsed = JSON.parse(data);
-        const price = parseFloat(parsed.p);
-        const qty = parseFloat(parsed.q);
-        const isSell = parsed.m;
-        currentPrice = price;
-
-        const now = new Date();
-        const currentMinute = now.getMinutes();
-        if (currentMinute !== lastMinuteStamp) {
-            currentMinuteDelta = 0;
-            lastMinuteStamp = currentMinute;
-        }
-        currentMinuteDelta += isSell ? -qty : qty;
-        deltaUsdt = currentMinuteDelta * currentPrice;
-    });
-    ws.on('error', (e) => console.error('[SpotAutoBot] WS Error:', e.message));
-    ws.on('close', () => setTimeout(initBackendDeltaWS, 3000));
-}
-
-// 2. 真实现货下单 API
-async function executeRealOrder(side, quantity, quoteOrderQty) {
-    if (!SPOT_API_KEY || !SPOT_API_SECRET) throw new Error('Missing API Keys in .env');
+    # 1. Update botSignalState
+    content = content.replace("lastDcaTime: 0,", "lastDcaTimeLong: 0,\n    lastDcaTimeShort: 0,")
     
-    const timestamp = Date.now();
-    let queryString = `symbol=BTCUSDT&side=${side}&type=MARKET&recvWindow=60000&timestamp=${timestamp}`;
-    if (quantity) queryString += `&quantity=${quantity}`;
-    if (quoteOrderQty) queryString += `&quoteOrderQty=${quoteOrderQty}`;
-
-    const signature = crypto.createHmac('sha256', SPOT_API_SECRET).update(queryString).digest('hex');
-    const url = `https://api.binance.com/api/v3/order?${queryString}&signature=${signature}`;
-
-    const res = await axios.post(url, null, {
-        headers: { 'X-MBX-APIKEY': SPOT_API_KEY },
-        httpAgent, httpsAgent
-    });
-    return res.data;
-}
-
-// 2.5 真实合约下单 API 与杠杆设置
-async function setFuturesLeverage(leverage) {
-    if (!SPOT_API_KEY || !SPOT_API_SECRET) return;
-    const timestamp = Date.now();
-    const queryString = `symbol=BTCUSDT&leverage=${leverage}&recvWindow=60000&timestamp=${timestamp}`;
-    const signature = crypto.createHmac('sha256', SPOT_API_SECRET).update(queryString).digest('hex');
-    const url = `https://fapi.binance.com/fapi/v1/leverage?${queryString}&signature=${signature}`;
+    # 2. Extract B, C, D into a loop
+    # We need to replace from `// --- B. 状态机时序流转 ---` to `if (state.logs.length > 20) state.logs.length = 20;`
     
-    try {
-        await axios.post(url, null, {
-            headers: { 'X-MBX-APIKEY': SPOT_API_KEY },
-            httpAgent, httpsAgent
-        });
-        console.log(`[SpotAutoBot] Set Futures Leverage to ${leverage}x`);
-    } catch (e) {
-        console.error('[SpotAutoBot] Set Leverage Error:', e.response ? e.response.data : e.message);
-    }
-}
-
-async function executeFuturesOrder(side, quantity, positionSide = '') {
-    if (!SPOT_API_KEY || !SPOT_API_SECRET) throw new Error('Missing API Keys in .env');
-    const timestamp = Date.now();
-    let queryString = `symbol=BTCUSDT&side=${side}&type=MARKET&recvWindow=60000&timestamp=${timestamp}`;
-    if (quantity) queryString += `&quantity=${quantity}`;
-    if (positionSide) queryString += `&positionSide=${positionSide}`;
-
-    const signature = crypto.createHmac('sha256', SPOT_API_SECRET).update(queryString).digest('hex');
-    const url = `https://fapi.binance.com/fapi/v1/order?${queryString}&signature=${signature}`;
-
-    const res = await axios.post(url, null, {
-        headers: { 'X-MBX-APIKEY': SPOT_API_KEY },
-        httpAgent, httpsAgent
-    });
-    return res.data;
-}
-
-// 3. 核心策略状态机轮询
-function startBotLoop(getEngineConfig, getEngineState) {
-    initBackendDeltaWS();
+    # Let's find the start and end of this block
+    start_marker = "// --- B. 状态机时序流转 ---"
+    end_marker = "if (state.logs.length > 20) state.logs.length = 20;"
     
-    setInterval(async () => {
-        const config = getEngineConfig();
-        const state = getEngineState();
+    start_idx = content.find(start_marker)
+    end_idx = content.find(end_marker) + len(end_marker)
+    
+    if start_idx == -1 or end_idx == -1:
+        print("Markers not found!")
+        return
         
-        if (!state.isLongBotRunning && !state.isShortBotRunning) return;
-        if (botSignalState.isExecuting) return;
-
-        const now = Date.now();
-        const windowMs = (config.signalWindow || 12) * 15 * 60 * 1000;
-
-        // --- A. 获取宏观指标状态 ---
-        let rsi = null, macdState = null, mtfState = null;
-        try {
-            if (regimeModule && typeof regimeModule.getState === 'function') {
-                const regimeState = regimeModule.getState();
-                if (regimeState && regimeState.m15) {
-                    const m15 = regimeState.m15;
-                    if (m15.rsi && m15.rsi.length > 0) rsi = m15.rsi[m15.rsi.length - 1];
-                    if (m15.macd && m15.signal && m15.macd.length > 0) {
-                        macdState = m15.macd[m15.macd.length - 1] > m15.signal[m15.signal.length - 1] ? '金叉' : '死叉';
-                    }
-                }
-            }
-            if (mtfModule && typeof mtfModule.getTimeframe === 'function') {
-                const row1m = mtfModule.getTimeframe('1');
-                if (row1m && row1m.state) mtfState = row1m.state;
-            }
-        } catch (e) {
-            return; // 忽略单次读取失败
-        }
-
-        // --- A2. 全局状态追踪 (严格判断“再次出现”) ---
-        if (macdState) {
-            if (globalMacdState === null) {
-                globalMacdState = macdState;
-                if (macdState === '金叉') globalMacdGoldenCrossTime = now;
-                if (macdState === '死叉') globalMacdDeathCrossTime = now;
-            } else if (macdState !== globalMacdState) {
-                globalMacdState = macdState;
-                if (macdState === '金叉') globalMacdGoldenCrossTime = now;
-                if (macdState === '死叉') globalMacdDeathCrossTime = now;
-            }
-        }
-
-        let currentRsiState = 'normal';
-        if (rsi !== null) {
-            if (rsi < config.rsiThreshold) currentRsiState = 'oversold';
-            else if (rsi > (config.rsiOverboughtThreshold || 70)) currentRsiState = 'overbought';
-
-            if (globalRsiState === null) {
-                globalRsiState = currentRsiState;
-                if (currentRsiState === 'oversold') globalRsiOversoldTime = now;
-                if (currentRsiState === 'overbought') globalRsiOverboughtTime = now;
-            } else if (currentRsiState !== globalRsiState) {
-                globalRsiState = currentRsiState;
-                if (currentRsiState === 'oversold') globalRsiOversoldTime = now;
-                if (currentRsiState === 'overbought') globalRsiOverboughtTime = now;
-            }
-        }
-
-        // --- B. 状态机时序流转 (双向并行处理) ---
+    new_block = """// --- B. 状态机时序流转 (双向并行处理) ---
         const processDirection = async (isLongTrade, targetState, isBotRunning) => {
             if (!isBotRunning) return;
             
@@ -465,9 +305,11 @@ function startBotLoop(getEngineConfig, getEngineState) {
             await processDirection(false, state.short, state.isShortBotRunning);
         }
         
-        if (state.logs.length > 20) state.logs.length = 20;
+        if (state.logs.length > 20) state.logs.length = 20;"""
 
-    }, 2000);
-}
+    content = content[:start_idx] + new_block + content[end_idx:]
+    
+    with open('spotAutoBot.js', 'w') as f:
+        f.write(content)
 
-module.exports = { startBotLoop, executeRealOrder, executeFuturesOrder, setApiKeys };
+process_autobot()

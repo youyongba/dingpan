@@ -88,29 +88,35 @@ function saveData() {
     }
 }
 
-let state = {
+const createPosState = () => ({
   activeDcaCount: 0,
   totalCoinAmount: 0,
   totalUsdtAmount: 0,
   averagePrice: 0,
-  entryTime: null, // 持仓起始时间
-  totalFees: 0,    // 累计资金费率和手续费
+  entryTime: null,
+  totalFees: 0,
   tp1Fired: false,
   tp2Fired: false,
   tp3Fired: false,
-  customTp1Price: null, // 自定义 TP1 价格 (覆盖默认比例)
+  customTp1Price: null,
   customTp2Price: null,
   customTp3Price: null,
   lockedAtr: 0,
-  slMoved: false,
+  slMoved: false
+});
+
+let state = {
+  long: createPosState(),
+  short: createPosState(),
   logs: [],
   enabled: true,
-  isLongBotRunning: false, // 做多引擎开关 (现货/合约通用)
-  isShortBotRunning: false, // 做空引擎开关 (仅合约可用)
-  positionSide: null, // 当前持仓方向: 'long' | 'short' | null
-  spotBalanceUsdt: 0, // 现货 USDT 余额
-  spotBalanceBtc: 0,   // 现货 BTC 余额
-  futuresBalanceUsdt: 0 // 永续合约 USDT 余额
+  isLongBotRunning: false,
+  isShortBotRunning: false,
+  positionSide: null, // Legacy, kept for fallback
+  spotBalanceUsdt: 0,
+  spotBalanceBtc: 0,
+  futuresBalanceUsdt: 0,
+  futuresPositions: []
 };
 
 // 币安现货 API 密钥 (初始从环境变量读取，如果配置里有则优先使用)
@@ -244,10 +250,12 @@ async function fetchBalances() {
 
 // 获取资金费率和手续费
 async function fetchPositionFees() {
-    if (!state.entryTime || state.totalCoinAmount === 0 || !SPOT_API_KEY || !SPOT_API_SECRET) return;
+    if (!SPOT_API_KEY || !SPOT_API_SECRET) return;
     
-    const timestamp = Date.now();
-    const startTime = state.entryTime;
+    const fetchFeeForState = async (stateObj, isShort) => {
+        if (!stateObj.entryTime || stateObj.totalCoinAmount === 0) return;
+        const timestamp = Date.now();
+        const startTime = stateObj.entryTime;
     
     try {
         let totalFee = 0;
@@ -290,16 +298,17 @@ async function fetchPositionFees() {
             }
         }
         
-        state.totalFees = totalFee;
-        
-        if (state.totalCoinAmount > 0) {
-            const isLong = state.positionSide !== 'short';
-            const adjUsdt = isLong ? (state.totalUsdtAmount + state.totalFees) : (state.totalUsdtAmount - state.totalFees);
-            state.averagePrice = adjUsdt / state.totalCoinAmount;
+        stateObj.totalFees = totalFee;
+        if (stateObj.totalCoinAmount > 0) {
+            const adjUsdt = !isShort ? (stateObj.totalUsdtAmount + stateObj.totalFees) : (stateObj.totalUsdtAmount - stateObj.totalFees);
+            stateObj.averagePrice = adjUsdt / stateObj.totalCoinAmount;
         }
     } catch (e) {
         console.error('[SpotDCA] Fetch Fees Error:', e.message);
     }
+  };
+  await fetchFeeForState(state.long, false);
+  await fetchFeeForState(state.short, true);
 }
 
 // 启动时和每隔一段时间拉取一次余额与手续费
@@ -515,38 +524,37 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
         cumQuote = parseFloat(orderRes.cummulativeQuoteQty);
       }
       
-      // 更新方向标记 (如果之前是空仓)
-      if (state.totalCoinAmount < 0.00001) {
-          state.positionSide = action === 'market-buy-short' ? 'short' : 'long';
-          state.entryTime = Date.now();
-          state.totalFees = 0;
+      const isShort = action === 'market-buy-short';
+      const targetState = isShort ? state.short : state.long;
+
+      if (targetState.totalCoinAmount < 0.00001) {
+          targetState.entryTime = Date.now();
+          targetState.totalFees = 0;
       }
 
-      state.activeDcaCount++;
-      state.totalUsdtAmount += cumQuote;
-      state.totalCoinAmount += executedQty;
+      targetState.activeDcaCount++;
+      targetState.totalUsdtAmount += cumQuote;
+      targetState.totalCoinAmount += executedQty;
       
-      const isLong = state.positionSide !== 'short';
-      const adjUsdt = isLong ? (state.totalUsdtAmount + (state.totalFees || 0)) : (state.totalUsdtAmount - (state.totalFees || 0));
-      state.averagePrice = state.totalCoinAmount > 0 ? (adjUsdt / state.totalCoinAmount) : 0;
+      const adjUsdt = !isShort ? (targetState.totalUsdtAmount + (targetState.totalFees || 0)) : (targetState.totalUsdtAmount - (targetState.totalFees || 0));
+      targetState.averagePrice = targetState.totalCoinAmount > 0 ? (adjUsdt / targetState.totalCoinAmount) : 0;
       
       try {
           if (regimeModule && typeof regimeModule.getState === 'function') {
               const regimeState = regimeModule.getState();
               if (regimeState && regimeState.indicators && regimeState.indicators.atr) {
                   const atrArr = regimeState.indicators.atr;
-                  state.lockedAtr = atrArr[atrArr.length - 1];
+                  targetState.lockedAtr = atrArr[atrArr.length - 1];
               }
           }
       } catch(e){}
       
-      // 手动加仓后重置止盈状态，按新均价计算
-      state.tp1Fired = false;
-      state.tp2Fired = false;
-      state.tp3Fired = false;
-      state.customTp1Price = null;
-      state.customTp2Price = null;
-      state.customTp3Price = null;
+      targetState.tp1Fired = false;
+      targetState.tp2Fired = false;
+      targetState.tp3Fired = false;
+      targetState.customTp1Price = null;
+      targetState.customTp2Price = null;
+      targetState.customTp3Price = null;
       
       const actionName = action === 'market-buy-short' ? '做空' : '买入';
       state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动${actionName}成功: 获 ${executedQty} BTC`);
@@ -591,7 +599,7 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
               state.tp1Fired = false;
               state.tp2Fired = false;
               state.tp3Fired = false;
-              state.lockedAtr = 0;
+              state.long.lockedAtr = 0; state.short.lockedAtr = 0;
               state.positionSide = null;
               state.entryTime = null;
               state.totalFees = 0;
@@ -611,7 +619,7 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
           state.tp1Fired = false;
           state.tp2Fired = false;
           state.tp3Fired = false;
-          state.lockedAtr = 0;
+          state.long.lockedAtr = 0; state.short.lockedAtr = 0;
           state.positionSide = null;
           state.entryTime = null;
           state.totalFees = 0;
