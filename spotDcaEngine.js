@@ -192,55 +192,45 @@ async function fetchBalances() {
             leverage: p.leverage
         }));
         
-        // 自动纠正内存中的 DCA 状态，防止由于网络或解析导致与真实持仓脱节
+        // 自动纠正内存中的 DCA 状态 (双向隔离同步)
         if (config.tradeMode === 'futures') {
-            let activePos = null;
-            if (state.positionSide) {
-                activePos = state.futuresPositions.find(p => p.positionSide === (state.positionSide === 'short' ? 'SHORT' : 'LONG'));
-            } else if (state.futuresPositions.length > 0) {
-                // 如果内存没有记录方向，但交易所里有持仓，自动接管第一个持仓
-                activePos = state.futuresPositions[0];
-                state.positionSide = activePos.positionSide === 'SHORT' ? 'short' : 'long';
-            }
-            
-            if (activePos) {
-                const actualAmt = Math.abs(activePos.positionAmt);
-                // 只要持仓数量不为0，我们就需要确保 averagePrice 与交易所同步 (防漂离)
-                if (actualAmt > 0) {
-                    // 如果数量有变化，或者价格偏差过大（说明是在别处重新开了仓）
-                    const currentAvg = state.averagePrice || 0;
-                    const priceDiff = Math.abs(currentAvg - activePos.entryPrice) / activePos.entryPrice;
+            const syncSide = (posSideStr, stateObj) => {
+                const active = state.futuresPositions.find(p => p.positionSide === posSideStr);
+                if (active) {
+                    const apiAvgPrice = active.entryPrice;
+                    const apiAmt = Math.abs(active.positionAmt);
+                    const localAvgPrice = stateObj.averagePrice || 0;
+                    const localAmt = stateObj.totalCoinAmount || 0;
                     
-                    if (Math.abs(state.totalCoinAmount - actualAmt) > 0.001 || state.totalCoinAmount === 0 || priceDiff > 0.005) {
-                        state.totalCoinAmount = actualAmt;
-                        state.totalUsdtAmount = actualAmt * activePos.entryPrice;
-                        if (!state.entryTime) {
-                            state.entryTime = Date.now();
-                            state.totalFees = 0;
-                        }
-                        const isLong = state.positionSide !== 'short';
-                        const adjUsdt = isLong ? (state.totalUsdtAmount + (state.totalFees || 0)) : (state.totalUsdtAmount - (state.totalFees || 0));
-                        state.averagePrice = state.totalCoinAmount > 0 ? (adjUsdt / state.totalCoinAmount) : 0;
-                        if (state.activeDcaCount === 0) state.activeDcaCount = 1;
-                        
-                        // 如果发现仓位有变动(比如交易所发生了加仓或换仓)，同步重置止盈状态
-                        state.tp1Fired = false;
-                        state.tp2Fired = false;
-                        state.tp3Fired = false;
-                        state.customTp1Price = null;
-                        state.customTp2Price = null;
-                        state.customTp3Price = null;
+                    if (localAmt < 0.00001 && apiAmt > 0) {
+                        stateObj.totalCoinAmount = apiAmt;
+                        stateObj.averagePrice = apiAvgPrice;
+                        stateObj.entryTime = stateObj.entryTime || Date.now();
+                        state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 自动接管(${posSideStr})持仓: ${apiAmt} BTC`);
+                    } else if (localAvgPrice > 0 && apiAvgPrice > 0 && Math.abs(apiAvgPrice - localAvgPrice) / localAvgPrice > 0.0005) {
+                        stateObj.averagePrice = apiAvgPrice;
+                        stateObj.totalCoinAmount = apiAmt;
+                        state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 均价漂移修正(${posSideStr}): 同步至 ${apiAvgPrice.toFixed(2)}`);
+                    } else if (localAmt > 0 && apiAmt > 0 && Math.abs(apiAmt - localAmt) > 0.0001) {
+                        stateObj.totalCoinAmount = apiAmt;
+                        state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 仓位数量修正(${posSideStr}): 同步至 ${apiAmt} BTC`);
                     }
+                } else if (stateObj.totalCoinAmount > 0.00001) {
+                    stateObj.totalCoinAmount = 0;
+                    stateObj.averagePrice = 0;
+                    stateObj.totalUsdtAmount = 0;
+                    stateObj.activeDcaCount = 0;
+                    stateObj.entryTime = null;
+                    stateObj.totalFees = 0;
+                    stateObj.tp1Fired = false;
+                    stateObj.tp2Fired = false;
+                    stateObj.tp3Fired = false;
+                    stateObj.lockedAtr = 0;
+                    state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 远端无持仓，自动清空(${posSideStr})本地状态`);
                 }
-            } else if (state.totalCoinAmount > 0) {
-                state.totalCoinAmount = 0;
-                state.averagePrice = 0;
-                state.totalUsdtAmount = 0;
-                state.activeDcaCount = 0;
-                state.positionSide = null;
-                state.entryTime = null;
-                state.totalFees = 0;
-            }
+            };
+            syncSide('LONG', state.long);
+            syncSide('SHORT', state.short);
         }
     }
   } catch (error) {
