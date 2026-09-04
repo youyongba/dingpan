@@ -1096,6 +1096,9 @@
             const modeText = currentConfig.tradeMode === 'futures' ? '合约' : '现货';
             const posContainer = document.getElementById('ui-positions-container');
             
+            // 为了处理双向持仓显示止盈的情况，记录当前是否有被追踪的仓位
+            let renderedPosition = false;
+
             if (currentConfig.tradeMode === 'futures' && currentState.futuresPositions && currentState.futuresPositions.length > 0) {
                 posContainer.innerHTML = currentState.futuresPositions.map(pos => {
                     const isLong = pos.positionAmt > 0 || pos.positionSide === 'LONG';
@@ -1107,6 +1110,11 @@
                     
                     const pnlDisplay = !isDataVisible ? '******' : `${pnlUsdt >= 0 ? '+' : ''}${pnlUsdt.toFixed(2)} USDT (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)`;
                     
+                    // 如果这个仓位正好是机器人当前追踪的方向，我们记录下来，用于后续渲染止盈
+                    if ((isLong && currentState.positionSide === 'long') || (!isLong && currentState.positionSide === 'short')) {
+                        renderedPosition = true;
+                    }
+
                     return `
                     <div class="p-4 bg-gray-800 rounded border border-gray-700">
                         <div class="flex justify-between items-center mb-2">
@@ -1180,7 +1188,10 @@
             
             const avgPrice = currentState.averagePrice || 0;
             
-            if (avgPrice > 0 && currentPrice > 0) {
+            // 为了在有双向持仓时能正常显示止盈列表，判断逻辑不再简单粗暴要求 hasPosition
+            const hasPosition = avgPrice > 0 && ((currentState.totalCoinAmount > 0) || (currentConfig.tradeMode === 'futures' && currentState.futuresPositions && currentState.futuresPositions.length > 0 && renderedPosition));
+            
+            if (hasPosition && currentPrice > 0) {
                 const tpMode = currentConfig.tpMode || 'percent';
                 const currentAtr = currentRealIndicators?.currentAtr || 0;
                 const activeAtr = (tpMode === 'atr_static' && currentState.lockedAtr > 0) ? currentState.lockedAtr : currentAtr;
