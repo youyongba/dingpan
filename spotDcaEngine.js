@@ -473,8 +473,10 @@ router.post('/refresh-atr', express.json(), requireAdmin, (req, res) => {
           const regimeState = regimeModule.getState();
           if (regimeState && regimeState.indicators && regimeState.indicators.atr) {
               const atrArr = regimeState.indicators.atr;
-              state.lockedAtr = atrArr[atrArr.length - 1];
-              state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动刷新静态 ATR 为: ${state.lockedAtr.toFixed(2)}`);
+              const currentAtr = atrArr[atrArr.length - 1];
+              if (state.long) state.long.lockedAtr = currentAtr;
+              if (state.short) state.short.lockedAtr = currentAtr;
+              state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动双向刷新静态 ATR 为: ${currentAtr.toFixed(2)}`);
           }
       }
   } catch (e) {}
