@@ -432,7 +432,11 @@ function startBotLoop(getEngineConfig, getEngineState) {
                 const hitTp1 = isLongTrade ? (currentPrice >= tp1Price) : (currentPrice <= tp1Price);
                 const hitTp2 = isLongTrade ? (currentPrice >= tp2Price) : (currentPrice <= tp2Price);
                 const hitTp3 = isLongTrade ? (currentPrice >= tp3Price) : (currentPrice <= tp3Price);
-                const hitSl = isLongTrade ? (currentPrice <= avgP) : (currentPrice >= avgP);
+                
+                // 保本止损容差 (滑点与手续费补偿): 0.05%
+                const slBuffer = avgP * 0.0005; 
+                const slTriggerPrice = isLongTrade ? (avgP + slBuffer) : (avgP - slBuffer);
+                const hitSl = isLongTrade ? (currentPrice <= slTriggerPrice) : (currentPrice >= slTriggerPrice);
 
                 if (!targetState.tp1Fired && hitTp1 && !botSignalState.isExecuting) {
                     const closeQty = floorVol(targetState.totalCoinAmount * (config.tp1 / 100));
@@ -452,7 +456,19 @@ function startBotLoop(getEngineConfig, getEngineState) {
                 }
                 else if (targetState.tp1Fired && config.breakevenSl && hitSl && !botSignalState.isExecuting) {
                     const closeQty = floorVol(targetState.totalCoinAmount);
-                    if (await executeClose(closeQty, '保本止损')) {
+                    let success = await executeClose(closeQty, '保本止损');
+                    
+                    // 重试机制：如果由于极小仓位被币安拒绝，尝试强制清零本地状态以防止僵尸仓位
+                    if (!success && closeQty < 0.002) {
+                        state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 警告: 仓位极小无法平仓，强制回收本地状态以自愈。`);
+                        targetState.totalCoinAmount = 0;
+                        targetState.totalUsdtAmount = 0;
+                        targetState.averagePrice = 0;
+                        targetState.activeDcaCount = 0;
+                        success = true; 
+                    }
+
+                    if (success) {
                         targetState.tp1Fired = false; targetState.tp2Fired = false; targetState.tp3Fired = false;
                     }
                 }
