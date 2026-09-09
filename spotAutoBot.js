@@ -138,9 +138,10 @@ function startBotLoop(getEngineConfig, getEngineState) {
                 const regimeState = regimeModule.getState();
                 if (regimeState && regimeState.m15) {
                     const m15 = regimeState.m15;
-                    if (m15.rsi && m15.rsi.length > 0) rsi = m15.rsi[m15.rsi.length - 1];
-                    if (m15.macd && m15.signal && m15.macd.length > 0) {
-                        macdState = m15.macd[m15.macd.length - 1] > m15.signal[m15.signal.length - 1] ? '金叉' : '死叉';
+                    // 强制使用 length - 2 获取上一根“已收盘”的 15m K线状态，过滤盘中未收线时的假穿越/假超买超卖
+                    if (m15.rsi && m15.rsi.length > 1) rsi = m15.rsi[m15.rsi.length - 2];
+                    if (m15.macd && m15.signal && m15.macd.length > 1) {
+                        macdState = m15.macd[m15.macd.length - 2] > m15.signal[m15.signal.length - 2] ? '金叉' : '死叉';
                     }
                 }
             }
@@ -187,7 +188,7 @@ function startBotLoop(getEngineConfig, getEngineState) {
             
             const lastDcaTime = isLongTrade ? botSignalState.lastDcaTimeLong : botSignalState.lastDcaTimeShort;
             
-            // 1. RSI 曾超卖(做多) / 曾超买(做空) (必须是上次开仓之后新产生的穿越！)
+            // 1. 15m已收盘 RSI 曾超卖(做多) / 曾超买(做空) (必须是上次开仓之后新产生的穿越！)
             if (rsi !== null) {
                 if (isLongTrade && currentRsiState === 'oversold' && globalRsiOversoldTime > lastDcaTime) {
                     botSignalState.longRsiHitTime = now;
@@ -197,7 +198,7 @@ function startBotLoop(getEngineConfig, getEngineState) {
                 }
             }
 
-            // 2. MACD 曾金叉(做多) / 曾死叉(做空)
+            // 2. 15m已收盘 MACD 曾金叉(做多) / 曾死叉(做空)
             if (macdState !== null) {
                 if (isLongTrade && macdState === '金叉' && globalMacdGoldenCrossTime > lastDcaTime) {
                     botSignalState.longMacdHitTime = now;
