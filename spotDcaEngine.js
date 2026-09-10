@@ -205,14 +205,29 @@ async function fetchBalances() {
                     if (localAmt < 0.00001 && apiAmt > 0) {
                         stateObj.totalCoinAmount = apiAmt;
                         stateObj.averagePrice = apiAvgPrice;
+                        stateObj.totalUsdtAmount = apiAmt * apiAvgPrice; // 致命 Bug 修复：必须同步总价值，否则资金费率重算时会导致均价归零
                         stateObj.entryTime = stateObj.entryTime || Date.now();
+                        
+                        // 自动接管时，如果使用 atr_static，必须给一个初始标尺，防止 spotAutoBot 用当前极端的 ATR 误算止盈
+                        if (config.tpMode === 'atr_static' && !stateObj.lockedAtr) {
+                             try {
+                                 const regimeState = require('./regimeModule').getState();
+                                 if (regimeState && regimeState.indicators && regimeState.indicators.atr) {
+                                     const atrArr = regimeState.indicators.atr;
+                                     stateObj.lockedAtr = atrArr[atrArr.length - 1];
+                                 }
+                             } catch(e) {}
+                        }
+                        
                         state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 自动接管(${posSideStr})持仓: ${apiAmt} BTC`);
                     } else if (localAvgPrice > 0 && apiAvgPrice > 0 && Math.abs(apiAvgPrice - localAvgPrice) / localAvgPrice > 0.0005) {
                         stateObj.averagePrice = apiAvgPrice;
                         stateObj.totalCoinAmount = apiAmt;
+                        stateObj.totalUsdtAmount = apiAmt * apiAvgPrice; // 致命 Bug 修复
                         state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 均价漂移修正(${posSideStr}): 同步至 ${apiAvgPrice.toFixed(2)}`);
                     } else if (localAmt > 0 && apiAmt > 0 && Math.abs(apiAmt - localAmt) > 0.0001) {
                         stateObj.totalCoinAmount = apiAmt;
+                        stateObj.totalUsdtAmount = apiAmt * stateObj.averagePrice; // 致命 Bug 修复
                         state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 仓位数量修正(${posSideStr}): 同步至 ${apiAmt} BTC`);
                     }
                 } else if (stateObj.totalCoinAmount > 0.00001) {
