@@ -157,8 +157,7 @@ function startBotLoop(getEngineConfig, getEngineState) {
         if (macdState) {
             if (globalMacdState === null) {
                 globalMacdState = macdState;
-                if (macdState === '金叉') globalMacdGoldenCrossTime = now;
-                if (macdState === '死叉') globalMacdDeathCrossTime = now;
+                // 启动时不记录时间戳，只记录当前处于什么状态，防止把历史残留当成新信号
             } else if (macdState !== globalMacdState) {
                 globalMacdState = macdState;
                 if (macdState === '金叉') globalMacdGoldenCrossTime = now;
@@ -173,9 +172,9 @@ function startBotLoop(getEngineConfig, getEngineState) {
 
             if (globalRsiState === null) {
                 globalRsiState = currentRsiState;
-                if (currentRsiState === 'oversold') globalRsiOversoldTime = now;
-                if (currentRsiState === 'overbought') globalRsiOverboughtTime = now;
+                // 启动时不记录时间戳，只记录当前处于什么状态，防止把历史残留当成新信号
             } else if (currentRsiState !== globalRsiState) {
+                // 只有在运行期间真实发生状态跨越（比如从 normal 变成 overbought），才记录时间戳
                 globalRsiState = currentRsiState;
                 if (currentRsiState === 'oversold') globalRsiOversoldTime = now;
                 if (currentRsiState === 'overbought') globalRsiOverboughtTime = now;
