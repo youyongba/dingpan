@@ -190,24 +190,24 @@ function startBotLoop(getEngineConfig, getEngineState) {
             // 1. 15m已收盘 RSI 曾超卖(做多) / 曾超买(做空) (必须是上次开仓之后新产生的穿越！)
             if (rsi !== null) {
                 if (isLongTrade && currentRsiState === 'oversold' && globalRsiOversoldTime > lastDcaTime) {
-                    botSignalState.longRsiHitTime = now;
+                    botSignalState.longRsiHitTime = globalRsiOversoldTime;
                 }
                 if (!isLongTrade && currentRsiState === 'overbought' && globalRsiOverboughtTime > lastDcaTime) {
-                    botSignalState.shortRsiHitTime = now;
+                    botSignalState.shortRsiHitTime = globalRsiOverboughtTime;
                 }
             }
 
             // 2. 15m已收盘 MACD 曾金叉(做多) / 曾死叉(做空)
             if (macdState !== null) {
                 if (isLongTrade && macdState === '金叉' && globalMacdGoldenCrossTime > lastDcaTime) {
-                    botSignalState.longMacdHitTime = now;
+                    botSignalState.longMacdHitTime = globalMacdGoldenCrossTime;
                 }
                 if (!isLongTrade && macdState === '死叉' && globalMacdDeathCrossTime > lastDcaTime) {
-                    botSignalState.shortMacdHitTime = now;
+                    botSignalState.shortMacdHitTime = globalMacdDeathCrossTime;
                 }
             }
 
-            // 独立过期检测 (防抖窗口期)
+            // 独立过期检测 (恢复合理的 3 小时防抖窗口期，解决指标滞后开不了仓的问题)
             if (isLongTrade) {
                 if (now - botSignalState.longRsiHitTime > windowMs) botSignalState.longRsiHitTime = 0;
                 if (now - botSignalState.longMacdHitTime > windowMs) botSignalState.longMacdHitTime = 0;
@@ -240,9 +240,11 @@ function startBotLoop(getEngineConfig, getEngineState) {
                         if (isLongTrade) {
                             botSignalState.lastDcaTimeLong = now;
                             botSignalState.longRsiHitTime = 0; botSignalState.longMacdHitTime = 0;
+                            globalRsiOversoldTime = 0; globalMacdGoldenCrossTime = 0; // 同步清空
                         } else {
                             botSignalState.lastDcaTimeShort = now;
                             botSignalState.shortRsiHitTime = 0; botSignalState.shortMacdHitTime = 0;
+                            globalRsiOverboughtTime = 0; globalMacdDeathCrossTime = 0; // 同步清空
                         }
                         console.log(`[AutoBot] 已达到最大 DCA 次数 (${maxSteps})，本次信号被忽略`);
                         return;
@@ -322,9 +324,15 @@ function startBotLoop(getEngineConfig, getEngineState) {
                         if (isLongTrade) {
                             botSignalState.lastDcaTimeLong = now;
                             botSignalState.longRsiHitTime = 0; botSignalState.longMacdHitTime = 0;
+                            // 暴力斩断：强行清空全局追踪记忆，必须等待下一次真正的跨越才能开启新一轮等待
+                            globalRsiOversoldTime = 0;
+                            globalMacdGoldenCrossTime = 0;
                         } else {
                             botSignalState.lastDcaTimeShort = now;
                             botSignalState.shortRsiHitTime = 0; botSignalState.shortMacdHitTime = 0;
+                            // 暴力斩断：强行清空全局追踪记忆，必须等待下一次真正的跨越才能开启新一轮等待
+                            globalRsiOverboughtTime = 0;
+                            globalMacdDeathCrossTime = 0;
                         }
                     } catch (e) {
                         const errorMsg = e.response ? JSON.stringify(e.response.data) : e.message;
