@@ -205,8 +205,11 @@ async function fetchBalances() {
                     if (localAmt < 0.00001 && apiAmt > 0) {
                         stateObj.totalCoinAmount = apiAmt;
                         stateObj.averagePrice = apiAvgPrice;
-                        stateObj.totalUsdtAmount = apiAmt * apiAvgPrice; // 致命 Bug 修复：必须同步总价值，否则资金费率重算时会导致均价归零
+                        stateObj.totalUsdtAmount = apiAmt * apiAvgPrice; 
+                        if (!Number.isFinite(stateObj.totalUsdtAmount)) stateObj.totalUsdtAmount = 0; // 防 NaN
+                        
                         stateObj.entryTime = stateObj.entryTime || Date.now();
+                        if (stateObj.activeDcaCount === 0) stateObj.activeDcaCount = 1; 
                         
                         // 自动接管时，如果使用 atr_static，必须给一个初始标尺，防止 spotAutoBot 用当前极端的 ATR 误算止盈
                         if (config.tpMode === 'atr_static' && !stateObj.lockedAtr) {
@@ -303,10 +306,17 @@ async function fetchPositionFees() {
             }
         }
         
-        stateObj.totalFees = totalFee;
+        stateObj.totalFees = Number.isFinite(totalFee) ? totalFee : 0;
         if (stateObj.totalCoinAmount > 0) {
-            const adjUsdt = !isShort ? (stateObj.totalUsdtAmount + stateObj.totalFees) : (stateObj.totalUsdtAmount - stateObj.totalFees);
-            stateObj.averagePrice = adjUsdt / stateObj.totalCoinAmount;
+            const safeUsdt = Number.isFinite(stateObj.totalUsdtAmount) ? stateObj.totalUsdtAmount : 0;
+            const safeFees = Number.isFinite(stateObj.totalFees) ? stateObj.totalFees : 0;
+            
+            const adjUsdt = !isShort ? (safeUsdt + safeFees) : (safeUsdt - safeFees);
+            const newAvgPrice = adjUsdt / stateObj.totalCoinAmount;
+            
+            if (Number.isFinite(newAvgPrice) && newAvgPrice > 0) {
+                stateObj.averagePrice = newAvgPrice;
+            }
         }
     } catch (e) {
         console.error('[SpotDCA] Fetch Fees Error:', e.message);

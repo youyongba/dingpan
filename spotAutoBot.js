@@ -252,6 +252,11 @@ function startBotLoop(getEngineConfig, getEngineState) {
 
                     botSignalState.isExecuting = true;
                     try {
+                        // 防 NaN 校验：确保 currentPrice 合法
+                        if (!Number.isFinite(currentPrice) || currentPrice <= 0) {
+                            throw new Error(`当前价格非法: ${currentPrice}`);
+                        }
+
                         const actionLabel = isLongTrade ? '买入(做多)' : '卖出(做空)';
                         const logMsg = `[AutoBot] 触发${actionLabel}! (MTF:${triggerMtf}, Delta:${triggerDelta}) - 第 ${targetState.activeDcaCount + 1} 仓`;
                         console.log(logMsg);
@@ -412,8 +417,17 @@ function startBotLoop(getEngineConfig, getEngineState) {
                         }
                         
                         // 致命Bug修复：按比例扣除名义价值，防止部分止盈后均价崩溃
-                        const reduceRatio = closeQty / targetState.totalCoinAmount;
-                        targetState.totalUsdtAmount -= (targetState.totalUsdtAmount * reduceRatio);
+                        // 增加极其严苛的防 NaN 与防零除校验
+                        const safeTotalCoin = Number.isFinite(targetState.totalCoinAmount) && targetState.totalCoinAmount > 0 
+                                              ? targetState.totalCoinAmount : 1; // 避免除以 0
+                        let reduceRatio = closeQty / safeTotalCoin;
+                        if (!Number.isFinite(reduceRatio) || reduceRatio < 0) reduceRatio = 0;
+                        if (reduceRatio > 1) reduceRatio = 1; // 卖出比例最多 100%
+
+                        const deductUsdt = targetState.totalUsdtAmount * reduceRatio;
+                        if (Number.isFinite(deductUsdt)) {
+                            targetState.totalUsdtAmount -= deductUsdt;
+                        }
                         
                         targetState.totalCoinAmount -= closeQty;
                         if (targetState.totalCoinAmount < 0.00001) {
@@ -425,7 +439,11 @@ function startBotLoop(getEngineConfig, getEngineState) {
                             targetState.totalFees = 0;
                         } else {
                             const adjUsdt = isLongTrade ? (targetState.totalUsdtAmount + (targetState.totalFees || 0)) : (targetState.totalUsdtAmount - (targetState.totalFees || 0));
-                            targetState.averagePrice = adjUsdt / targetState.totalCoinAmount;
+                            const newAvgPrice = adjUsdt / targetState.totalCoinAmount;
+                            // 最终兜底：如果算出来是 NaN，强行保持之前的均价不变，绝不污染内存
+                            if (Number.isFinite(newAvgPrice) && newAvgPrice > 0) {
+                                targetState.averagePrice = newAvgPrice;
+                            }
                         }
                         
                         const actionName = isLongTrade ? '卖出平多' : '买入平空';
