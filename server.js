@@ -768,6 +768,13 @@ server.on('upgrade', (request, socket, head) => {
         wss.handleUpgrade(request, socket, head, (ws) => {
             wss.emit('connection', ws, request);
         });
+    } else if (request.url.startsWith('/api/ws-dca')) {
+        // 将 /api/ws-dca 的 WebSocket 请求转发给 spotDcaEngine
+        if (spotDcaEngine.handleUpgrade) {
+            spotDcaEngine.handleUpgrade(request, socket, head);
+        } else {
+            socket.destroy();
+        }
     }
 });
 

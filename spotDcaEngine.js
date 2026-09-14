@@ -618,10 +618,42 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
   res.json({ ok: true, state });
 });
 
+// ================= WebSocket 后端服务 =================
+const WebSocket = require('ws');
+const wss = new WebSocket.Server({ noServer: true });
+
+wss.on('connection', (ws) => {
+    // 首次连接，立刻推送一次全量状态
+    ws.send(JSON.stringify({
+        type: 'init',
+        config,
+        state
+    }));
+});
+
+// 每 2 秒向所有已连接的客户端广播最新状态
+setInterval(() => {
+    const payload = JSON.stringify({
+        type: 'update',
+        config,
+        state
+    });
+    wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(payload);
+        }
+    });
+}, 2000);
+
 module.exports = {
   router,
   getConfig: () => config,
-  getState: () => state
+  getState: () => state,
+  handleUpgrade: (request, socket, head) => {
+      wss.handleUpgrade(request, socket, head, (ws) => {
+          wss.emit('connection', ws, request);
+      });
+  }
 };
 
 // 启动后端自动交易引擎 (传入获取状态的 getter)
