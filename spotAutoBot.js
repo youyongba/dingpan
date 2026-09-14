@@ -463,7 +463,7 @@ function startBotLoop(getEngineConfig, getEngineState) {
                                               ? targetState.totalCoinAmount : 1; // 避免除以 0
                         let reduceRatio = closeQty / safeTotalCoin;
                         if (!Number.isFinite(reduceRatio) || reduceRatio < 0) reduceRatio = 0;
-                        if (reduceRatio > 1) reduceRatio = 1; // 卖出比例最多 100%
+                        if (reduceRatio > 1.05) reduceRatio = 1; // 卖出比例最多 100% (给浮点数留一点点精度容差)
 
                         const deductUsdt = targetState.totalUsdtAmount * reduceRatio;
                         if (Number.isFinite(deductUsdt)) {
@@ -557,6 +557,24 @@ function startBotLoop(getEngineConfig, getEngineState) {
     }, 2000);
 }
 
+// 4. 允许外部（如手动操作）通知引擎重置时间戳，防止手动开仓后立刻触发自动开仓
+function notifyManualTrade(isLongTrade) {
+    const now = Date.now();
+    if (isLongTrade) {
+        botSignalState.lastDcaTimeLong = now;
+        botSignalState.longRsiHitTime = 0;
+        botSignalState.longMacdHitTime = 0;
+        globalRsiOversoldTime = 0;
+        globalMacdGoldenCrossTime = 0;
+    } else {
+        botSignalState.lastDcaTimeShort = now;
+        botSignalState.shortRsiHitTime = 0;
+        botSignalState.shortMacdHitTime = 0;
+        globalRsiOverboughtTime = 0;
+        globalMacdDeathCrossTime = 0;
+    }
+}
+
 module.exports = { 
     startBotLoop, 
     executeRealOrder, 
@@ -564,5 +582,6 @@ module.exports = {
     setApiKeys, 
     getCurrentPrice: () => currentPrice,
     getDeltaUsdt: () => deltaUsdt,
-    getGlobalVpoc: () => Array.from(globalVolumeProfile.entries())
+    getGlobalVpoc: () => Array.from(globalVolumeProfile.entries()),
+    notifyManualTrade
 };
