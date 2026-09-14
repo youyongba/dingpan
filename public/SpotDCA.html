@@ -802,6 +802,11 @@
                     if (data.price) currentPrice = data.price;
                     if (data.mtfState) currentState.mtfState = data.mtfState;
                     
+                    // Update Global Volume Profile from Backend
+                    if (data.globalVpoc) {
+                        globalVolumeProfile = new Map(data.globalVpoc);
+                    }
+
                     // 更新真实的指标 UI
                     if (data.realIndicators) {
                         // 渲染 15m RSI
@@ -863,60 +868,36 @@
                         }
                     }
                     
+                    if (data.mtfState && data.mtfState.deltaUsdt !== undefined) {
+                        const deltaUsdt = data.mtfState.deltaUsdt;
+                        const deltaValEl = document.getElementById('delta-val');
+                        deltaValEl.textContent = (deltaUsdt > 0 ? '+' : '') + (deltaUsdt / 1000000).toFixed(2) + 'M USDT';
+                        deltaValEl.className = deltaUsdt >= 0 ? 'font-mono text-green' : 'font-mono text-red';
+                        
+                        // Check Pattern
+                        if (deltaUsdt < 0 && Math.abs(deltaUsdt) > (currentConfig.deltaThreshold || 2500000)) {
+                            document.getElementById('ui-pattern-box').innerHTML = '<i class="fa-solid fa-shield-halved"></i><span>检测到冰山吸收 (空头力竭)</span>';
+                            document.getElementById('ui-pattern-box').className = 'flex items-center gap-2 text-green';
+                            document.getElementById('ui-pattern-desc').textContent = 'Delta 持续为负，但价格未破买方 vPOC';
+                            document.getElementById('ui-delta-msg').textContent = '发现底部 Delta 激增';
+                        } else if (deltaUsdt > 0 && Math.abs(deltaUsdt) > (currentConfig.deltaThreshold || 2500000)) {
+                            document.getElementById('ui-pattern-box').innerHTML = '<i class="fa-solid fa-rocket"></i><span>检测到主动买盘 (推土机)</span>';
+                            document.getElementById('ui-pattern-box').className = 'flex items-center gap-2 text-green';
+                            document.getElementById('ui-pattern-desc').textContent = '多头主动吃单，突破上层阻力';
+                            document.getElementById('ui-delta-msg').textContent = '发现顶部 Delta 激增';
+                        } else {
+                            document.getElementById('ui-pattern-box').innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>正在监控订单流微观结构...</span>';
+                            document.getElementById('ui-pattern-box').className = 'flex items-center gap-2 text-gray-500';
+                            document.getElementById('ui-pattern-desc').textContent = '等待激进吃单...';
+                            document.getElementById('ui-delta-msg').textContent = '数据流已连接，等待成交...';
+                        }
+                    }
+                    
                     renderUI();
                 }
             } catch (e) {
                 console.error("Failed to fetch Spot DCA status:", e);
             }
-        }
-        
-        // --- Real-time VPOC from aggTrade ---
-        function initAggTrade() {
-            // Using spot stream for spot DCA, fallback to fstream if needed, but spot is stream.binance.com:9443
-            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${wsProtocol}//${window.location.host}/api/ws-dca`;
-            const ws = new WebSocket(wsUrl);
-            
-            ws.onopen = () => {
-                console.log('[SpotDCA] WebSocket Connected to Binance Spot aggTrade');
-                document.getElementById('ui-delta-msg').textContent = '数据流已连接，等待成交...';
-            };
-            
-            ws.onerror = (e) => {
-                console.error('[SpotDCA] WebSocket Error:', e);
-                document.getElementById('ui-delta-msg').textContent = 'WebSocket 连接失败，正在重连...';
-            };
-            
-            ws.onclose = () => {
-                console.log('[SpotDCA] WebSocket Closed. Reconnecting in 3s...');
-                setTimeout(initAggTrade, 3000);
-            };
-
-            ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                const price = parseFloat(data.p);
-                const qty = parseFloat(data.q);
-                const isSell = data.m;
-                
-                // Only update and render if price actually changes or we need to init
-                if (currentPrice !== price) {
-                    currentPrice = price;
-                    renderUI(); // 触发价格在界面上的更新
-                }
-
-                const tickSize = 10;
-                const level = Math.floor(price / tickSize) * tickSize;
-                
-                if (!globalVolumeProfile.has(level)) {
-                    globalVolumeProfile.set(level, { buy: 0, sell: 0 });
-                }
-                
-                let pData = globalVolumeProfile.get(level);
-                if (isSell) pData.sell += qty;
-                else pData.buy += qty;
-                
-                updateDeltaChart(qty, isSell);
-            };
         }
         
         function updateVpocUI() {
@@ -1326,74 +1307,9 @@
         setInterval(updateCountdowns, 1000);
         updateCountdowns();
 
-        // --- Dynamic Delta Tracking ---
-        let deltaHistory = [];
-        let currentMinuteDelta = 0;
-        let lastMinuteStamp = 0;
-
-        function updateDeltaChart(qty, isSell) {
-            const now = new Date();
-            const currentMinute = now.getMinutes();
-            
-            if (currentMinute !== lastMinuteStamp) {
-                if (lastMinuteStamp !== 0) {
-                    deltaHistory.push(currentMinuteDelta);
-                    if (deltaHistory.length > 15) deltaHistory.shift();
-                }
-                currentMinuteDelta = 0;
-                lastMinuteStamp = currentMinute;
-            }
-            
-            currentMinuteDelta += isSell ? -qty : qty;
-            
-            // UI Update
-            const deltaValEl = document.getElementById('delta-val');
-            const deltaUsdt = currentMinuteDelta * currentPrice;
-            deltaValEl.textContent = (deltaUsdt > 0 ? '+' : '') + (deltaUsdt / 1000000).toFixed(2) + 'M USDT';
-            deltaValEl.className = deltaUsdt >= 0 ? 'font-mono text-green' : 'font-mono text-red';
-            
-            const chartContainer = document.getElementById('delta-chart');
-            chartContainer.innerHTML = '';
-            
-            const allDeltas = [...deltaHistory, currentMinuteDelta];
-            const maxAbsDelta = Math.max(...allDeltas.map(Math.abs), 1); // Avoid division by zero
-            
-            allDeltas.forEach(d => {
-                const isPositive = d >= 0;
-                const height = Math.max((Math.abs(d) / maxAbsDelta) * 100, 5); // min 5% height
-                const bar = document.createElement('div');
-                bar.className = `flex-1 rounded-t-sm ${isPositive ? 'bg-green-500' : 'bg-red-500'}`;
-                bar.style.height = `${height}%`;
-                chartContainer.appendChild(bar);
-            });
-            
-            // Check Pattern
-            if (currentMinuteDelta < 0 && Math.abs(deltaUsdt) > (currentConfig.deltaThreshold || 2500000)) {
-                document.getElementById('ui-pattern-box').innerHTML = '<i class="fa-solid fa-shield-halved"></i><span>检测到冰山吸收 (空头力竭)</span>';
-                document.getElementById('ui-pattern-box').className = 'flex items-center gap-2 text-green';
-                document.getElementById('ui-pattern-desc').textContent = 'Delta 持续为负，但价格未破买方 vPOC';
-                document.getElementById('ui-delta-msg').textContent = '发现底部 Delta 激增';
-            } else if (currentMinuteDelta > 0 && Math.abs(deltaUsdt) > (currentConfig.deltaThreshold || 2500000)) {
-                document.getElementById('ui-pattern-box').innerHTML = '<i class="fa-solid fa-rocket"></i><span>检测到主动买盘 (推土机)</span>';
-                document.getElementById('ui-pattern-box').className = 'flex items-center gap-2 text-green';
-                document.getElementById('ui-pattern-desc').textContent = '多头主动吃单，突破上层阻力';
-                document.getElementById('ui-delta-msg').textContent = '发现顶部 Delta 激增';
-            } else if (deltaHistory.length > 0 || currentMinuteDelta !== 0) {
-                document.getElementById('ui-pattern-box').innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>正在监控订单流微观结构...</span>';
-                document.getElementById('ui-pattern-box').className = 'flex items-center gap-2 text-gray-500';
-                document.getElementById('ui-pattern-desc').textContent = '等待冰山吸收或强买盘信号';
-                document.getElementById('ui-delta-msg').textContent = 'Delta 处于正常波动范围';
-            } else {
-                document.getElementById('ui-pattern-box').innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>等待 Delta 数据流接入...</span>';
-                document.getElementById('ui-pattern-box').className = 'flex items-center gap-2 text-gray-500';
-                document.getElementById('ui-pattern-desc').textContent = '连接建立中，等待首次成交发生';
-                document.getElementById('ui-delta-msg').textContent = '等待数据';
-            }
-        }
         setInterval(fetchStatus, 2000);
         setInterval(updateVpocUI, 1000);
         fetchStatus();
-        initAggTrade();
 
         // --- Configuration Logic ---
         const modal = document.getElementById('config-modal');

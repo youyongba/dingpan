@@ -7,7 +7,7 @@ const dataFile = path.join(__dirname, 'spotDcaData.json');
 const mtfModule = require('./mtfModule');
 const regimeModule = require('./regimeModule');
 
-const { startBotLoop, executeRealOrder, executeFuturesOrder, getCurrentPrice, getDeltaUsdt } = require('./spotAutoBot');
+const { startBotLoop, executeRealOrder, executeFuturesOrder, getCurrentPrice, getDeltaUsdt, getGlobalVpoc } = require('./spotAutoBot');
 
 // 强制使用绝对路径加载 .env，防止 PM2 工作目录 (cwd) 偏移导致找不到文件
 const envPath = path.resolve(__dirname, '.env');
@@ -449,6 +449,7 @@ router.get('/status', (req, res) => {
     state,
     realIndicators,
     macroVpoc: macroVpocData,
+    globalVpoc: getGlobalVpoc ? getGlobalVpoc() : [],
     hasAuthToken: !!CONFIG_AUTH_TOKEN, // 告诉前端服务端是否需要鉴权
     hasApiKeys: !!SPOT_API_KEY && !!SPOT_API_SECRET, // 告诉前端是否已经配置了 API Keys
     price: getCurrentPrice ? getCurrentPrice() : 0,
@@ -658,7 +659,8 @@ function getFullPayload() {
         state,
         price: getCurrentPrice ? getCurrentPrice() : 0,
         mtfState: frontendMtfState,
-        macroVpoc: macroVpocData
+        macroVpoc: macroVpocData,
+        globalVpoc: getGlobalVpoc ? getGlobalVpoc() : []
     };
 }
 

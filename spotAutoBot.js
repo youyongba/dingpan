@@ -18,6 +18,7 @@ let currentPrice = 0;
 let currentMinuteDelta = 0;
 let lastMinuteStamp = 0;
 let deltaUsdt = 0;
+const globalVolumeProfile = new Map();
 
 let botSignalState = {
     longRsiHitTime: 0,
@@ -43,20 +44,46 @@ function initBackendDeltaWS() {
     const ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade');
     ws.on('open', () => console.log('[SpotAutoBot] WS Connected for Backend Delta tracking'));
     ws.on('message', (data) => {
-        const parsed = JSON.parse(data);
-        const price = parseFloat(parsed.p);
-        const qty = parseFloat(parsed.q);
-        const isSell = parsed.m;
-        currentPrice = price;
+        try {
+            const parsed = JSON.parse(data);
+            if (!parsed.p || !parsed.q) return; // 忽略没有价格和数量的数据包，防止 NaN 污染
 
-        const now = new Date();
-        const currentMinute = now.getMinutes();
-        if (currentMinute !== lastMinuteStamp) {
-            currentMinuteDelta = 0;
-            lastMinuteStamp = currentMinute;
-        }
-        currentMinuteDelta += isSell ? -qty : qty;
-        deltaUsdt = currentMinuteDelta * currentPrice;
+            const price = parseFloat(parsed.p);
+            const qty = parseFloat(parsed.q);
+            const isSell = parsed.m;
+            currentPrice = price;
+
+            const now = new Date();
+            const currentMinute = now.getMinutes();
+            if (currentMinute !== lastMinuteStamp) {
+                currentMinuteDelta = 0;
+                lastMinuteStamp = currentMinute;
+            }
+            currentMinuteDelta += isSell ? -qty : qty;
+            
+            const newDelta = currentMinuteDelta * currentPrice;
+            if (Number.isFinite(newDelta)) {
+                deltaUsdt = newDelta;
+            }
+
+            const tickSize = 10;
+            const level = Math.floor(price / tickSize) * tickSize;
+            if (!globalVolumeProfile.has(level)) {
+                globalVolumeProfile.set(level, { buy: 0, sell: 0 });
+            }
+            let pData = globalVolumeProfile.get(level);
+            if (isSell) pData.sell += qty;
+            else pData.buy += qty;
+            
+            // 限制内存，防止 Map 无限增长
+            if (globalVolumeProfile.size > 2000) {
+                const keys = Array.from(globalVolumeProfile.keys());
+                for (let i = 0; i < 500; i++) {
+                    globalVolumeProfile.delete(keys[i]);
+                }
+            }
+
+        } catch (e) {}
     });
     ws.on('error', (e) => console.error('[SpotAutoBot] WS Error:', e.message));
     ws.on('close', () => setTimeout(initBackendDeltaWS, 3000));
@@ -522,5 +549,6 @@ module.exports = {
     executeFuturesOrder, 
     setApiKeys, 
     getCurrentPrice: () => currentPrice,
-    getDeltaUsdt: () => deltaUsdt 
+    getDeltaUsdt: () => deltaUsdt,
+    getGlobalVpoc: () => Array.from(globalVolumeProfile.entries())
 };
