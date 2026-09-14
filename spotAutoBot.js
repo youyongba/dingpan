@@ -180,7 +180,7 @@ function startBotLoop(getEngineConfig, getEngineState) {
             return; // 忽略单次读取失败
         }
 
-        // --- A2. 全局状态追踪 (严格判断“再次出现”) ---
+        // --- A2. 全局状态追踪 (后台持续运行，即使机器人暂停也记录跨越动作) ---
         if (macdState) {
             if (globalMacdState === null) {
                 globalMacdState = macdState;
@@ -209,6 +209,9 @@ function startBotLoop(getEngineConfig, getEngineState) {
         }
 
         // --- B. 状态机时序流转 (双向并行处理) ---
+        if (!state.isLongBotRunning && !state.isShortBotRunning) return;
+        if (botSignalState.isExecuting) return;
+
         const processDirection = async (isLongTrade, targetState, isBotRunning) => {
             if (!isBotRunning) return;
             
@@ -244,21 +247,32 @@ function startBotLoop(getEngineConfig, getEngineState) {
             }
 
             // 3. 判断大周期环境是否就绪
-            let isReady = isLongTrade 
-                ? (botSignalState.longRsiHitTime > 0 && botSignalState.longMacdHitTime > 0)
-                : (botSignalState.shortRsiHitTime > 0 && botSignalState.shortMacdHitTime > 0);
+            let isReady = false;
+            if (isLongTrade) {
+                isReady = botSignalState.longRsiHitTime > 0;
+                if (config.requireMacd) isReady = isReady && (botSignalState.longMacdHitTime > 0);
+            } else {
+                isReady = botSignalState.shortRsiHitTime > 0;
+                if (config.requireMacd) isReady = isReady && (botSignalState.shortMacdHitTime > 0);
+            }
                 
             // --- C. 微观扳机扣动 (真实买入/做空) ---
             if (isReady && (now - lastDcaTime > 15 * 60 * 1000)) { // 15分钟冷却防抖
-                let triggerMtf = isLongTrade 
-                    ? (config.triggerMtf && mtfState && mtfState.includes('强多'))
-                    : (config.triggerMtf && mtfState && mtfState.includes('强空'));
+                let triggerMtf = true;
+                if (config.triggerMtf) {
+                    triggerMtf = isLongTrade 
+                        ? (mtfState && mtfState.includes('强多'))
+                        : (mtfState && mtfState.includes('强空'));
+                }
                     
-                let triggerDelta = isLongTrade
-                    ? (config.triggerDelta && (currentMinuteDelta > 0 && Math.abs(deltaUsdt) > config.deltaThreshold))
-                    : (config.triggerDelta && (currentMinuteDelta < 0 && Math.abs(deltaUsdt) > config.deltaThreshold));
+                let triggerDelta = true;
+                if (config.triggerDelta) {
+                    triggerDelta = isLongTrade
+                        ? (currentMinuteDelta > 0 && Math.abs(deltaUsdt) > (config.deltaThreshold || 2500000))
+                        : (currentMinuteDelta < 0 && Math.abs(deltaUsdt) > (config.deltaThreshold || 2500000));
+                }
                     
-                let isExecuting = isReady && triggerMtf;
+                let isExecuting = isReady && triggerMtf && triggerDelta;
 
                 if (isExecuting) {
                     const maxSteps = config.dcaMaxSteps || 5;
@@ -267,11 +281,11 @@ function startBotLoop(getEngineConfig, getEngineState) {
                         if (isLongTrade) {
                             botSignalState.lastDcaTimeLong = now;
                             botSignalState.longRsiHitTime = 0; botSignalState.longMacdHitTime = 0;
-                            globalRsiOversoldTime = 0; globalMacdGoldenCrossTime = 0; // 同步清空
+                            // globalRsiOversoldTime = 0; globalMacdGoldenCrossTime = 0; // 不清空全局状态，防止刚清空又被下一秒重新赋上
                         } else {
                             botSignalState.lastDcaTimeShort = now;
                             botSignalState.shortRsiHitTime = 0; botSignalState.shortMacdHitTime = 0;
-                            globalRsiOverboughtTime = 0; globalMacdDeathCrossTime = 0; // 同步清空
+                            // globalRsiOverboughtTime = 0; globalMacdDeathCrossTime = 0; // 不清空全局状态
                         }
                         console.log(`[AutoBot] 已达到最大 DCA 次数 (${maxSteps})，本次信号被忽略`);
                         return;
