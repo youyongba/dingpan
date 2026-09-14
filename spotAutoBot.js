@@ -411,8 +411,11 @@ function startBotLoop(getEngineConfig, getEngineState) {
                             cumQuote = parseFloat(res.cummulativeQuoteQty);
                         }
                         
+                        // 致命Bug修复：按比例扣除名义价值，防止部分止盈后均价崩溃
+                        const reduceRatio = closeQty / targetState.totalCoinAmount;
+                        targetState.totalUsdtAmount -= (targetState.totalUsdtAmount * reduceRatio);
+                        
                         targetState.totalCoinAmount -= closeQty;
-                        targetState.totalUsdtAmount -= closeQty * avgP;
                         if (targetState.totalCoinAmount < 0.00001) {
                             targetState.totalCoinAmount = 0;
                             targetState.totalUsdtAmount = 0;
@@ -473,6 +476,7 @@ function startBotLoop(getEngineConfig, getEngineState) {
                         targetState.totalUsdtAmount = 0;
                         targetState.averagePrice = 0;
                         targetState.activeDcaCount = 0;
+                        targetState.tp1Fired = false; targetState.tp2Fired = false; targetState.tp3Fired = false;
                         success = true; 
                     }
 
