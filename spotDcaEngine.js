@@ -7,7 +7,7 @@ const dataFile = path.join(__dirname, 'spotDcaData.json');
 const mtfModule = require('./mtfModule');
 const regimeModule = require('./regimeModule');
 
-const { startBotLoop, executeRealOrder, executeFuturesOrder } = require('./spotAutoBot');
+const { startBotLoop, executeRealOrder, executeFuturesOrder, getCurrentPrice, getDeltaUsdt } = require('./spotAutoBot');
 
 // 强制使用绝对路径加载 .env，防止 PM2 工作目录 (cwd) 偏移导致找不到文件
 const envPath = path.resolve(__dirname, '.env');
@@ -438,6 +438,11 @@ router.get('/status', (req, res) => {
       console.error('[SpotDCA] Error fetching real indicators:', e.message);
   }
 
+  const frontendMtfState = {
+      state: realIndicators.mtf1m || '观望',
+      deltaUsdt: getDeltaUsdt ? getDeltaUsdt() : 0
+  };
+
   res.json({
     ok: true,
     config,
@@ -445,7 +450,9 @@ router.get('/status', (req, res) => {
     realIndicators,
     macroVpoc: macroVpocData,
     hasAuthToken: !!CONFIG_AUTH_TOKEN, // 告诉前端服务端是否需要鉴权
-    hasApiKeys: !!SPOT_API_KEY && !!SPOT_API_SECRET // 告诉前端是否已经配置了 API Keys
+    hasApiKeys: !!SPOT_API_KEY && !!SPOT_API_SECRET, // 告诉前端是否已经配置了 API Keys
+    price: getCurrentPrice ? getCurrentPrice() : 0,
+    mtfState: frontendMtfState
   });
 });
 
@@ -632,12 +639,34 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
 const WebSocket = require('ws');
 const wss = new WebSocket.Server({ noServer: true });
 
+function getFullPayload() {
+    let mtfState = '观望';
+    try {
+        if (mtfModule && typeof mtfModule.getTimeframe === 'function') {
+            const row1m = mtfModule.getTimeframe('1');
+            if (row1m && row1m.state) mtfState = row1m.state;
+        }
+    } catch(e){}
+    
+    const frontendMtfState = {
+        state: mtfState,
+        deltaUsdt: getDeltaUsdt ? getDeltaUsdt() : 0
+    };
+
+    return {
+        config,
+        state,
+        price: getCurrentPrice ? getCurrentPrice() : 0,
+        mtfState: frontendMtfState,
+        macroVpoc: macroVpocData
+    };
+}
+
 wss.on('connection', (ws) => {
     // 首次连接，立刻推送一次全量状态
     ws.send(JSON.stringify({
         type: 'init',
-        config,
-        state
+        ...getFullPayload()
     }));
 });
 
@@ -645,8 +674,7 @@ wss.on('connection', (ws) => {
 setInterval(() => {
     const payload = JSON.stringify({
         type: 'update',
-        config,
-        state
+        ...getFullPayload()
     });
     wss.clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN) {

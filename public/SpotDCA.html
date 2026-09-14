@@ -799,6 +799,8 @@
                     currentState = data.state;
                     currentMacroVpoc = data.macroVpoc || null;
                     currentRealIndicators = data.realIndicators || {};
+                    if (data.price) currentPrice = data.price;
+                    if (data.mtfState) currentState.mtfState = data.mtfState;
                     
                     // 更新真实的指标 UI
                     if (data.realIndicators) {

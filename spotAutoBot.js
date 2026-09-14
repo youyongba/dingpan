@@ -516,4 +516,11 @@ function startBotLoop(getEngineConfig, getEngineState) {
     }, 2000);
 }
 
-module.exports = { startBotLoop, executeRealOrder, executeFuturesOrder, setApiKeys, getCurrentPrice: () => currentPrice };
+module.exports = { 
+    startBotLoop, 
+    executeRealOrder, 
+    executeFuturesOrder, 
+    setApiKeys, 
+    getCurrentPrice: () => currentPrice,
+    getDeltaUsdt: () => deltaUsdt 
+};
