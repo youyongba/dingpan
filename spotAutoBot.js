@@ -156,19 +156,19 @@ function startBotLoop(getEngineConfig, getEngineState) {
         if (botSignalState.isExecuting) return;
 
         const now = Date.now();
-        const windowMs = (config.signalWindow || 12) * 15 * 60 * 1000;
+        const windowMs = (config.signalWindow || 12) * 60 * 60 * 1000; // 12小时信号窗口
 
         // --- A. 获取宏观指标状态 ---
         let rsi = null, macdState = null, mtfState = null;
         try {
             if (regimeModule && typeof regimeModule.getState === 'function') {
                 const regimeState = regimeModule.getState();
-                if (regimeState && regimeState.m15) {
-                    const m15 = regimeState.m15;
-                    // 强制使用 length - 2 获取上一根“已收盘”的 15m K线状态，过滤盘中未收线时的假穿越/假超买超卖
-                    if (m15.rsi && m15.rsi.length > 1) rsi = m15.rsi[m15.rsi.length - 2];
-                    if (m15.macd && m15.signal && m15.macd.length > 1) {
-                        macdState = m15.macd[m15.macd.length - 2] > m15.signal[m15.signal.length - 2] ? '金叉' : '死叉';
+                if (regimeState && regimeState.indicators) {
+                    const ind = regimeState.indicators;
+                    // 强制使用 length - 2 获取上一根“已收盘”的 1h K线状态，过滤盘中未收线时的假穿越/假超买超卖
+                    if (ind.rsi && ind.rsi.length > 1) rsi = ind.rsi[ind.rsi.length - 2];
+                    if (ind.macd && ind.signal && ind.macd.length > 1) {
+                        macdState = ind.macd[ind.macd.length - 2] > ind.signal[ind.signal.length - 2] ? '金叉' : '死叉';
                     }
                 }
             }
@@ -257,7 +257,7 @@ function startBotLoop(getEngineConfig, getEngineState) {
             }
                 
             // --- C. 微观扳机扣动 (真实买入/做空) ---
-            if (isReady && (now - lastDcaTime > 15 * 60 * 1000)) { // 15分钟冷却防抖
+            if (isReady && (now - lastDcaTime > 60 * 60 * 1000)) { // 1小时冷却防抖
                 let triggerMtf = true;
                 if (config.triggerMtf) {
                     triggerMtf = isLongTrade 

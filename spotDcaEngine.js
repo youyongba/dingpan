@@ -439,7 +439,7 @@ setInterval(fetchMacroVpoc, 15 * 60 * 1000);
 
 router.get('/status', (req, res) => {
   // 获取真实的指标状态
-  let realIndicators = { rsi15m: null, macd15m: null, mtf1m: null, currentAtr: 0 };
+  let realIndicators = { rsi1h: null, macd1h: null, mtf1m: null, currentAtr: 0 };
   try {
     if (regimeModule && typeof regimeModule.getState === 'function') {
         const regimeState = regimeModule.getState();
@@ -447,15 +447,15 @@ router.get('/status', (req, res) => {
             const atrArr = regimeState.indicators.atr;
             realIndicators.currentAtr = atrArr[atrArr.length - 1];
         }
-        if (regimeState && regimeState.m15) {
-            const m15 = regimeState.m15;
-            if (m15.rsi && m15.rsi.length > 0) {
-                realIndicators.rsi15m = m15.rsi[m15.rsi.length - 1];
+        if (regimeState && regimeState.indicators) {
+            const ind = regimeState.indicators;
+            if (ind.rsi && ind.rsi.length > 0) {
+                realIndicators.rsi1h = ind.rsi[ind.rsi.length - 1];
             }
-            if (m15.macd && m15.signal && m15.macd.length > 0) {
-                const macd = m15.macd[m15.macd.length - 1];
-                const sig = m15.signal[m15.signal.length - 1];
-                realIndicators.macd15m = macd > sig ? 'MACD 金叉 (多头)' : 'MACD 死叉 (空头)';
+            if (ind.macd && ind.signal && ind.macd.length > 0) {
+                const macd = ind.macd[ind.macd.length - 1];
+                const sig = ind.signal[ind.signal.length - 1];
+                realIndicators.macd1h = macd > sig ? 'MACD 金叉 (多头)' : 'MACD 死叉 (空头)';
             }
         }
     }
