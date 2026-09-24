@@ -7,7 +7,7 @@ const dataFile = path.join(__dirname, 'spotDcaData.json');
 const mtfModule = require('./mtfModule');
 const regimeModule = require('./regimeModule');
 
-const { startBotLoop, executeRealOrder, executeFuturesOrder, getCurrentPrice, getDeltaUsdt, getGlobalVpoc, notifyManualTrade } = require('./spotAutoBot');
+const { startBotLoop, executeRealOrder, executeFuturesOrder, getCurrentPrice, getDeltaUsdt, getGlobalVpoc, notifyManualTrade, setOnStateChangeCallback } = require('./spotAutoBot');
 
 // 强制使用绝对路径加载 .env，防止 PM2 工作目录 (cwd) 偏移导致找不到文件
 const envPath = path.resolve(__dirname, '.env');
@@ -24,6 +24,21 @@ if (envResult.error) {
 console.log('4. Raw SPOT_API_KEY length:', (process.env.BINANCE_SPOT_API_KEY || '').length);
 console.log('5. Raw SPOT_API_SECRET length:', (process.env.BINANCE_SPOT_API_SECRET || '').length);
 console.log('=====================================================\n');
+
+// --- 全局防崩溃与崩溃日志记录 ---
+process.on('uncaughtException', (err) => {
+    const time = new Date().toLocaleString('zh-CN', { hour12: false });
+    const logStr = `[${time}] Uncaught Exception: ${err.message}\n${err.stack}\n`;
+    fs.appendFileSync(path.join(__dirname, 'crash.log'), logStr);
+    console.error(logStr);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    const time = new Date().toLocaleString('zh-CN', { hour12: false });
+    const logStr = `[${time}] Unhandled Rejection at: ${promise}, reason: ${reason}\n`;
+    fs.appendFileSync(path.join(__dirname, 'crash.log'), logStr);
+    console.error(logStr);
+});
 
 const router = express.Router();
 
@@ -72,6 +87,10 @@ try {
             state.isLongBotRunning = saved.botState.isLongBotRunning || false;
             state.isShortBotRunning = saved.botState.isShortBotRunning || false;
         }
+        if (saved.positions) {
+            if (saved.positions.long) state.long = { ...state.long, ...saved.positions.long };
+            if (saved.positions.short) state.short = { ...state.short, ...saved.positions.short };
+        }
     }
 } catch (e) {
     console.error('[SpotDCA] Load data error:', e);
@@ -81,12 +100,21 @@ function saveData() {
     try {
         fs.writeFileSync(dataFile, JSON.stringify({
             config,
-            botState: { isLongBotRunning: state.isLongBotRunning, isShortBotRunning: state.isShortBotRunning }
+            botState: { isLongBotRunning: state.isLongBotRunning, isShortBotRunning: state.isShortBotRunning },
+            positions: { long: state.long, short: state.short }
         }, null, 2));
     } catch (e) {
         console.error('[SpotDCA] Save data error:', e);
     }
 }
+
+// 绑定持久化回调，让底层引擎每次成功开仓/平仓后都能瞬间触发持久化
+if (typeof setOnStateChangeCallback === 'function') {
+    setOnStateChangeCallback(saveData);
+}
+
+// 兜底机制：每 5 秒持久化一次状态，防止意外遗漏
+setInterval(saveData, 5000);
 
 const createPosState = () => ({
   activeDcaCount: 0,
@@ -209,6 +237,7 @@ async function fetchBalances() {
                         if (!Number.isFinite(stateObj.totalUsdtAmount)) stateObj.totalUsdtAmount = 0; // 防 NaN
                         
                         stateObj.entryTime = stateObj.entryTime || Date.now();
+                        // 只有在完全没有记录（连持久化都没有）的情况下才认为是新接管
                         if (stateObj.activeDcaCount === 0) stateObj.activeDcaCount = 1; 
                         
                         // 自动接管时，如果使用 atr_static，必须给一个初始标尺，防止 spotAutoBot 用当前极端的 ATR 误算止盈
@@ -232,6 +261,7 @@ async function fetchBalances() {
                         stateObj.totalCoinAmount = apiAmt;
                         stateObj.totalUsdtAmount = apiAmt * stateObj.averagePrice; // 致命 Bug 修复
                         state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 仓位数量修正(${posSideStr}): 同步至 ${apiAmt} BTC`);
+                        saveData();
                     }
                 } else if (stateObj.totalCoinAmount > 0.00001) {
                     stateObj.totalCoinAmount = 0;
@@ -245,6 +275,7 @@ async function fetchBalances() {
                     stateObj.tp3Fired = false;
                     stateObj.lockedAtr = 0;
                     state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 远端无持仓，自动清空(${posSideStr})本地状态`);
+                    saveData();
                 }
             };
             syncSide('LONG', state.long);
@@ -487,10 +518,17 @@ router.post('/toggle-bot', express.json(), requireAdmin, (req, res) => {
 });
 
 router.post('/custom-tp', express.json(), requireAdmin, (req, res) => {
-  const { level, price } = req.body;
-  if (level === 1) state.customTp1Price = price || null;
-  if (level === 2) state.customTp2Price = price || null;
-  if (level === 3) state.customTp3Price = price || null;
+  const { level, price, direction } = req.body;
+  const isShort = direction === 'short';
+  const targetState = isShort ? state.short : state.long;
+
+  if (level === 1) targetState.customTp1Price = price || null;
+  if (level === 2) targetState.customTp2Price = price || null;
+  if (level === 3) targetState.customTp3Price = price || null;
+  
+  const sideStr = isShort ? '空头' : '多头';
+  state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动更新${sideStr}止盈${level}价格为: ${price || '默认'}`);
+  
   res.json({ ok: true, state });
 });
 
@@ -589,6 +627,7 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
       
       const actionName = action === 'market-buy-short' ? '做空' : '买入';
       state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动${actionName}成功: 获 ${executedQty} BTC`);
+      saveData(); // 手动交易瞬间保存
     } catch (e) {
       const errorMsg = e.response ? JSON.stringify(e.response.data) : e.message;
       console.error('[Override Error] BUY/SELL failed:', errorMsg);
@@ -629,6 +668,7 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
           }
           Object.assign(state.long, createPosState());
       }
+      saveData(); // 手动平仓瞬间保存
     } catch (e) {
       const errorMsg = e.response ? JSON.stringify(e.response.data) : e.message;
       console.error('[Override Error] SELL failed:', errorMsg);

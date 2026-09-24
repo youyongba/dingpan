@@ -744,8 +744,9 @@
             }
         }
         
-        async function editTpPrice(level, currentPrice) {
-            const input = prompt(`请输入新的 TP${level} 止盈价格:\n(输入 0 或留空则恢复按收益率自动计算)`, currentPrice ? currentPrice.toFixed(2) : '');
+        async function editTpPrice(level, currentPrice, direction) {
+            const sideStr = direction === 'short' ? '空头' : '多头';
+            const input = prompt(`请输入新的 ${sideStr} TP${level} 止盈价格:\n(输入 0 或留空则恢复按收益率自动计算)`, currentPrice ? currentPrice.toFixed(2) : '');
             if (input === null) return; // 用户点击取消
             
             const price = parseFloat(input);
@@ -758,7 +759,11 @@
                 const res = await authFetch('/api/spot-dca/custom-tp', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ level, price: price === 0 || isNaN(price) ? null : price })
+                    body: JSON.stringify({ 
+                        level, 
+                        price: price === 0 || isNaN(price) ? null : price,
+                        direction
+                    })
                 });
                 const data = await res.json();
                 if (data.ok) {

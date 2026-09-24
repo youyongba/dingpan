@@ -380,6 +380,7 @@ function startBotLoop(getEngineConfig, getEngineState) {
                             globalRsiOverboughtTime = 0;
                             globalMacdDeathCrossTime = 0;
                         }
+                         if (typeof onStateChangeCallback === 'function') onStateChangeCallback();
                     } catch (e) {
                         const errorMsg = e.response ? JSON.stringify(e.response.data) : e.message;
                         console.error('[SpotAutoBot] Action Error:', errorMsg);
@@ -489,6 +490,7 @@ function startBotLoop(getEngineConfig, getEngineState) {
                         
                         const actionName = isLongTrade ? '卖出平多' : '买入平空';
                         state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 真实${label} ${actionName}: ${closeQty} BTC (获 ${cumQuote.toFixed(2)})`);
+                        if (onStateChangeCallback) onStateChangeCallback();
                         return true;
                     } catch (e) {
                         const errorMsg = e.response ? JSON.stringify(e.response.data) : e.message;
@@ -557,6 +559,12 @@ function startBotLoop(getEngineConfig, getEngineState) {
     }, 2000);
 }
 
+// 外部传入的状态持久化回调，用于发生交易后瞬间保存数据
+let onStateChangeCallback = null;
+function setOnStateChangeCallback(cb) {
+    onStateChangeCallback = cb;
+}
+
 // 4. 允许外部（如手动操作）通知引擎重置时间戳，防止手动开仓后立刻触发自动开仓
 function notifyManualTrade(isLongTrade) {
     const now = Date.now();
@@ -583,5 +591,6 @@ module.exports = {
     getCurrentPrice: () => currentPrice,
     getDeltaUsdt: () => deltaUsdt,
     getGlobalVpoc: () => Array.from(globalVolumeProfile.entries()),
-    notifyManualTrade
+    notifyManualTrade,
+    setOnStateChangeCallback
 };
