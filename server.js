@@ -1,3 +1,18 @@
+// ================= 全局防崩溃与崩溃日志记录 =================
+process.on('uncaughtException', (err) => {
+    const time = new Date().toLocaleString('zh-CN', { hour12: false });
+    const logStr = `[${time}] Uncaught Exception: ${err.message}\n${err.stack}\n`;
+    fs.appendFileSync(path.join(__dirname, 'crash.log'), logStr);
+    console.error(logStr);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    const time = new Date().toLocaleString('zh-CN', { hour12: false });
+    const logStr = `[${time}] Unhandled Rejection at: ${promise}, reason: ${reason}\n`;
+    fs.appendFileSync(path.join(__dirname, 'crash.log'), logStr);
+    console.error(logStr);
+});
+
 require('dotenv').config();
 
 const express = require('express');

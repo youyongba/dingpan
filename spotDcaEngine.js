@@ -25,21 +25,6 @@ console.log('4. Raw SPOT_API_KEY length:', (process.env.BINANCE_SPOT_API_KEY || 
 console.log('5. Raw SPOT_API_SECRET length:', (process.env.BINANCE_SPOT_API_SECRET || '').length);
 console.log('=====================================================\n');
 
-// --- 全局防崩溃与崩溃日志记录 ---
-process.on('uncaughtException', (err) => {
-    const time = new Date().toLocaleString('zh-CN', { hour12: false });
-    const logStr = `[${time}] Uncaught Exception: ${err.message}\n${err.stack}\n`;
-    fs.appendFileSync(path.join(__dirname, 'crash.log'), logStr);
-    console.error(logStr);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-    const time = new Date().toLocaleString('zh-CN', { hour12: false });
-    const logStr = `[${time}] Unhandled Rejection at: ${promise}, reason: ${reason}\n`;
-    fs.appendFileSync(path.join(__dirname, 'crash.log'), logStr);
-    console.error(logStr);
-});
-
 const router = express.Router();
 
 const CONFIG_AUTH_TOKEN = process.env.CONFIG_AUTH_TOKEN || '';
