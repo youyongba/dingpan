@@ -813,12 +813,16 @@ wss.on('connection', (ws, request) => {
     });
     
     targetWs.on('message', (msg) => {
-        console.log(`[WS Proxy] Received msg length: ${msg.length} from ${targetUrl}`); // 开启日志以排查是否收到币安数据
-        if (ws.readyState === WebSocket.OPEN) ws.send(msg.toString());
+        // 恢复关闭疯狂打印，避免撑爆云主机日志
+        // console.log(`[WS Proxy] Received msg length: ${msg.length} from ${targetUrl}`); 
+        if (ws.readyState === WebSocket.OPEN) {
+            // 直接转发原始数据 (Buffer或String)，不要用 toString()，防止破坏二进制或压缩帧
+            ws.send(msg);
+        }
     });
     
     ws.on('message', (msg) => {
-        if (targetWs.readyState === WebSocket.OPEN) targetWs.send(msg.toString());
+        if (targetWs.readyState === WebSocket.OPEN) targetWs.send(msg);
     });
     
     targetWs.on('close', (code, reason) => {
