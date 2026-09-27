@@ -812,17 +812,17 @@ wss.on('connection', (ws, request) => {
         console.log(`[WS Proxy] Successfully connected to Binance: ${targetUrl}`);
     });
     
-    targetWs.on('message', (msg) => {
-        // 恢复关闭疯狂打印，避免撑爆云主机日志
-        // console.log(`[WS Proxy] Received msg length: ${msg.length} from ${targetUrl}`); 
+    targetWs.on('message', (msg, isBinary) => {
         if (ws.readyState === WebSocket.OPEN) {
-            // 直接转发原始数据 (Buffer或String)，不要用 toString()，防止破坏二进制或压缩帧
-            ws.send(msg);
+            // ws 库 v8+ 会把 msg 作为 Buffer 传递，必须通过 isBinary 标志位来判断是否是文本帧
+            ws.send(msg, { binary: isBinary });
         }
     });
     
-    ws.on('message', (msg) => {
-        if (targetWs.readyState === WebSocket.OPEN) targetWs.send(msg);
+    ws.on('message', (msg, isBinary) => {
+        if (targetWs.readyState === WebSocket.OPEN) {
+            targetWs.send(msg, { binary: isBinary });
+        }
     });
     
     targetWs.on('close', (code, reason) => {

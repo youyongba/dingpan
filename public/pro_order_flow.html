@@ -797,14 +797,19 @@ function connectWebSocket() {
     };
     
     let msgCount = 0;
-    ws.onmessage = (event) => {
+    ws.onmessage = async (event) => {
         if (!STATE.isRunning) return;
         try {
             msgCount++;
             if (msgCount % 10 === 0) {
                 document.getElementById('conn-status').textContent = `已连接真实数据 (P:${msgCount})`;
             }
-            const data = JSON.parse(event.data);
+            
+            let textData = event.data;
+            if (textData instanceof Blob) {
+                textData = await textData.text();
+            }
+            const data = JSON.parse(textData);
             if (!data) return;
             
             // 独立连接没有 stream 外层包装，直接解析
@@ -828,10 +833,14 @@ function connectWebSocket() {
     // 根据刚才的测试，币安的 /stream?streams= 多路复用端点能稳定下发深度数据，而 /market/ws 端点对深度的支持似乎有坑
     wsDepth = new WebSocket(`${wsProtocol}//${window.location.host}/ws/binance/stream?streams=${currentSymbol}@depth20@100ms`);
     
-    wsDepth.onmessage = (event) => {
+    wsDepth.onmessage = async (event) => {
         if (!STATE.isRunning) return;
         try {
-            const data = JSON.parse(event.data);
+            let textData = event.data;
+            if (textData instanceof Blob) {
+                textData = await textData.text();
+            }
+            const data = JSON.parse(textData);
             if (!data) return;
             
             const depthData = data.data || data; 
