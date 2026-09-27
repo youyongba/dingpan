@@ -794,8 +794,14 @@ server.on('upgrade', (request, socket, head) => {
 });
 
 wss.on('connection', (ws, request) => {
-    // 动态提取前端请求的完整路径，支持 /stream?streams=... 和 /market/ws/... 等所有币安端点
-    const targetPath = request.url.replace(/^\/ws\/binance/, '');
+    // 修复：确保代理给币安的路径正确
+    // 如果前端请求是 /ws/binance/ws/btcusdt@aggTrade
+    // 替换后 targetPath 是 /ws/btcusdt@aggTrade
+    let targetPath = request.url.replace(/^\/ws\/binance/, '');
+    
+    // 如果 targetPath 是 /stream?streams=... 这种格式，需要保留
+    // 如果是 /ws/btcusdt@aggTrade 这种格式，也需要保留
+    
     const targetUrl = `wss://fstream.binance.com${targetPath}`;
     console.log(`[WS Proxy] 代理前端直连: ${targetUrl}`);
     
