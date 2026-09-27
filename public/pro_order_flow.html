@@ -805,6 +805,11 @@ function connectWebSocket() {
                 document.getElementById('conn-status').textContent = `已连接真实数据 (P:${msgCount})`;
             }
             
+            // Debug: 强行将最新的原生数据类型显示出来
+            if (msgCount === 1) {
+                 console.log("First WS message type:", typeof event.data, event.data instanceof Blob ? "Blob" : "Not Blob");
+            }
+            
             let textData = event.data;
             if (textData instanceof Blob) {
                 textData = await textData.text();

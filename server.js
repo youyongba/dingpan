@@ -813,6 +813,10 @@ wss.on('connection', (ws, request) => {
     });
     
     targetWs.on('message', (msg, isBinary) => {
+        // 添加防撑爆的轻量级日志：只打印前几十个字符或固定频率打印
+        if (Math.random() < 0.05) {
+            console.log(`[WS Proxy Debug] Received msg from ${targetUrl}, isBinary: ${isBinary}, length: ${msg.length}`);
+        }
         if (ws.readyState === WebSocket.OPEN) {
             // ws 库 v8+ 会把 msg 作为 Buffer 传递，必须通过 isBinary 标志位来判断是否是文本帧
             ws.send(msg, { binary: isBinary });
