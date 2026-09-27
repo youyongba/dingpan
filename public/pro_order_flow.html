@@ -3,6 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>深度订单流专业版 (Pro Order Flow System)</title>
     <style>
         :root {
@@ -793,9 +796,14 @@ function connectWebSocket() {
         document.getElementById('conn-dot').style.backgroundColor = 'var(--buy-color)';
     };
     
+    let msgCount = 0;
     ws.onmessage = (event) => {
         if (!STATE.isRunning) return;
         try {
+            msgCount++;
+            if (msgCount % 10 === 0) {
+                document.getElementById('conn-status').textContent = `已连接真实数据 (P:${msgCount})`;
+            }
             const data = JSON.parse(event.data);
             if (!data) return;
             
