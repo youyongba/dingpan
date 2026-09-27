@@ -813,7 +813,7 @@ wss.on('connection', (ws, request) => {
     });
     
     targetWs.on('message', (msg) => {
-        // console.log(`[WS Proxy] Received msg length: ${msg.length}`); // 调试用，暂时不打印全量防止刷屏
+        console.log(`[WS Proxy] Received msg length: ${msg.length} from ${targetUrl}`); // 开启日志以排查是否收到币安数据
         if (ws.readyState === WebSocket.OPEN) ws.send(msg.toString());
     });
     
