@@ -2098,13 +2098,18 @@ function bindChartEvents(container, isDelta) {
         STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
         STATE.offsetX = 0;
         
+        const wasRunning = STATE.isRunning;
         STATE.isRunning = true;
         document.getElementById('btn-play').classList.add('active');
         document.getElementById('btn-pause').classList.remove('active');
         document.getElementById('conn-status').textContent = '实时数据同步中...';
         document.getElementById('conn-dot').style.backgroundColor = 'var(--buy-color)';
         
-        renderAll();
+        if (!wasRunning) {
+            requestAnimationFrame(renderLoop);
+        } else {
+            renderAll();
+        }
     });
 
     container.addEventListener('wheel', e => {
@@ -2320,6 +2325,7 @@ document.querySelectorAll('.btn-group .btn[data-tf]').forEach(btn => {
 
 // 顶部按钮控制 (播放/暂停)
 document.getElementById('btn-play').addEventListener('click', (e) => {
+    const wasRunning = STATE.isRunning;
     STATE.isRunning = true;
     e.target.classList.add('active');
     document.getElementById('btn-pause').classList.remove('active');
@@ -2331,7 +2337,9 @@ document.getElementById('btn-play').addEventListener('click', (e) => {
     const rect = fpContainer.getBoundingClientRect();
     STATE.offsetY = (rect.height / 2) - (STATE.currentPrice / CONFIG.tickSize) * CONFIG.rowHeight;
     
-    requestAnimationFrame(renderLoop);
+    if (!wasRunning) {
+        requestAnimationFrame(renderLoop);
+    }
 });
 
 document.getElementById('btn-pause').addEventListener('click', (e) => {
