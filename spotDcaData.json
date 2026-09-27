@@ -1,0 +1,65 @@
+{
+  "config": {
+    "tradeMode": "spot",
+    "tradeDirection": "long",
+    "leverage": 100,
+    "positionSizePct": 3,
+    "rsiThreshold": 30,
+    "rsiOverboughtThreshold": 70,
+    "requireMacd": true,
+    "signalWindow": 12,
+    "triggerDelta": true,
+    "triggerMtf": true,
+    "deltaThreshold": 2500000,
+    "dcaAmount": 3000,
+    "dcaMaxSteps": 5,
+    "martingaleMultiplier": 2,
+    "breakevenSl": true,
+    "autoLoop": false,
+    "tp1": 50,
+    "tp2": 30,
+    "tp3": 20,
+    "tp1Target": 1,
+    "tp2Target": 3,
+    "tp3Target": 5,
+    "tpMode": "percent"
+  },
+  "botState": {
+    "isLongBotRunning": false,
+    "isShortBotRunning": false
+  },
+  "positions": {
+    "long": {
+      "activeDcaCount": 0,
+      "totalCoinAmount": 0,
+      "totalUsdtAmount": 0,
+      "averagePrice": 0,
+      "entryTime": null,
+      "totalFees": 0,
+      "tp1Fired": false,
+      "tp2Fired": false,
+      "tp3Fired": false,
+      "customTp1Price": null,
+      "customTp2Price": null,
+      "customTp3Price": null,
+      "lockedAtr": 0,
+      "slMoved": false
+    },
+    "short": {
+      "activeDcaCount": 0,
+      "totalCoinAmount": 0,
+      "totalUsdtAmount": 0,
+      "averagePrice": 0,
+      "entryTime": null,
+      "totalFees": 0,
+      "tp1Fired": false,
+      "tp2Fired": false,
+      "tp3Fired": false,
+      "customTp1Price": null,
+      "customTp2Price": null,
+      "customTp3Price": null,
+      "lockedAtr": 0,
+      "slMoved": false
+    }
+  }
+}

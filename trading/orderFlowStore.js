@@ -112,11 +112,12 @@ class OrderFlowStore extends EventEmitter {
             } catch(e) {}
         }
         
-        const ws = new WebSocket('wss://fstream.binance.com/market/ws/btcusdt@aggTrade', { agent });
+        const ws = new WebSocket('wss://fstream.binance.com/stream?streams=btcusdt@aggTrade', { agent });
         
         ws.on('message', (buf) => {
             try {
-                const raw = JSON.parse(buf.toString());
+                const rawData = JSON.parse(buf.toString());
+                const raw = rawData.data || rawData; // 兼容 stream 包装
                 // 确保只处理 e: 'aggTrade' 数据
                 if (raw && raw.e === 'aggTrade') {
                     this._onTick({ ts: Date.now(), raw });

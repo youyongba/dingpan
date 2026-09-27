@@ -785,24 +785,15 @@ function connectWebSocket() {
         .catch(e => console.warn("Failed to fetch initial MTF walls:", e));
 
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // 拆分成两个独立的流，解决多路复用时丢数据的问题
-    const baseUrl = `${wsProtocol}//${window.location.host}/ws/binance/ws`;
-
+    
     // 1. 专门连价格 (aggTrade)
-    ws = new WebSocket(`${baseUrl}/${currentSymbol}@aggTrade`);
+    // 币安文档规定：Stream 名称必须是小写！
+    const aggTradeStream = `${currentSymbol.toLowerCase()}@aggTrade`;
+    ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws/binance/stream?streams=${aggTradeStream}`);
     
     ws.onopen = () => {
         document.getElementById('conn-status').textContent = '已连接真实数据';
         document.getElementById('conn-dot').style.backgroundColor = 'var(--buy-color)';
-        
-        // 主动发送订阅请求，防止币安部分节点在直连 /ws 时静默
-        ws.send(JSON.stringify({
-            method: "SUBSCRIBE",
-            params: [
-                `${currentSymbol}@aggTrade`
-            ],
-            id: 1
-        }));
     };
     
     let msgCount = 0;
@@ -814,11 +805,6 @@ function connectWebSocket() {
                 document.getElementById('conn-status').textContent = `已连接真实数据 (P:${msgCount})`;
             }
             
-            // Debug: 强行将最新的原生数据类型显示出来
-            if (msgCount === 1) {
-                 console.log("First WS message type:", typeof event.data, event.data instanceof Blob ? "Blob" : "Not Blob");
-            }
-            
             let textData = event.data;
             if (textData instanceof Blob) {
                 textData = await textData.text();
@@ -826,9 +812,11 @@ function connectWebSocket() {
             const data = JSON.parse(textData);
             if (!data) return;
             
-            // 独立连接没有 stream 外层包装，直接解析
-            if (data.e === 'aggTrade' || data.m !== undefined) {
-                handleAggTrade(data);
+            // 多路复用端点会包一层 { stream: "...", data: {...} }
+            const payload = data.data || data;
+            
+            if (payload.e === 'aggTrade' || payload.m !== undefined) {
+                handleAggTrade(payload);
             }
         } catch (e) {
             console.warn("WebSocket aggTrade error:", e);
