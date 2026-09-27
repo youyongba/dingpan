@@ -783,7 +783,7 @@ function connectWebSocket() {
 
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     // 拆分成两个独立的流，解决多路复用时丢数据的问题
-    const baseUrl = `${wsProtocol}//${window.location.host}/ws/binance/market/ws`;
+    const baseUrl = `${wsProtocol}//${window.location.host}/ws/binance/ws`;
 
     // 1. 专门连价格 (aggTrade)
     ws = new WebSocket(`${baseUrl}/${currentSymbol}@aggTrade`);

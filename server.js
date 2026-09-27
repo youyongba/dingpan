@@ -802,6 +802,10 @@ wss.on('connection', (ws, request) => {
     const agent = buildProxyAgent();
     const targetWs = new WebSocket(targetUrl, { agent: agent });
     
+    targetWs.on('open', () => {
+        console.log(`[WS Proxy] Successfully connected to Binance: ${targetUrl}`);
+    });
+    
     targetWs.on('message', (msg) => {
         if (ws.readyState === WebSocket.OPEN) ws.send(msg.toString());
     });
@@ -810,10 +814,12 @@ wss.on('connection', (ws, request) => {
         if (targetWs.readyState === WebSocket.OPEN) targetWs.send(msg.toString());
     });
     
-    targetWs.on('close', () => {
+    targetWs.on('close', (code, reason) => {
+        console.log(`[WS Proxy] targetWs closed: code=${code}, reason=${reason}`);
         if (ws.readyState === WebSocket.OPEN) ws.close();
     });
-    ws.on('close', () => {
+    ws.on('close', (code, reason) => {
+        console.log(`[WS Proxy] client ws closed: code=${code}, reason=${reason}`);
         if (targetWs.readyState === WebSocket.OPEN) targetWs.close();
     });
     targetWs.on('error', (err) => {
