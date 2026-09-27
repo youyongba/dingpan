@@ -794,6 +794,15 @@ function connectWebSocket() {
     ws.onopen = () => {
         document.getElementById('conn-status').textContent = '已连接真实数据';
         document.getElementById('conn-dot').style.backgroundColor = 'var(--buy-color)';
+        
+        // 主动发送订阅请求，防止币安部分节点在直连 /ws 时静默
+        ws.send(JSON.stringify({
+            method: "SUBSCRIBE",
+            params: [
+                `${currentSymbol}@aggTrade`
+            ],
+            id: 1
+        }));
     };
     
     let msgCount = 0;

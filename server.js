@@ -795,13 +795,16 @@ server.on('upgrade', (request, socket, head) => {
 
 wss.on('connection', (ws, request) => {
     // 修复：确保代理给币安的路径正确
-    // 如果前端请求是 /ws/binance/ws/btcusdt@aggTrade
-    // 替换后 targetPath 是 /ws/btcusdt@aggTrade
+    // 前端请求可能形如 /ws/binance/ws/btcusdt@aggTrade
+    // 必须保留原始的 /ws 或 /stream 前缀，但要去掉 /ws/binance
     let targetPath = request.url.replace(/^\/ws\/binance/, '');
     
     // 强制修复双斜杠问题，将 //ws 替换为 /ws
     targetPath = targetPath.replace(/^\/+/, '/');
     
+    // 判断走单流还是多路复用流
+    // 如果是 /stream?streams=... 走 wss://fstream.binance.com
+    // 如果是 /ws/... 走 wss://fstream.binance.com
     const targetUrl = `wss://fstream.binance.com${targetPath}`;
     console.log(`[WS Proxy] 代理前端直连: ${targetUrl}`);
     
@@ -813,10 +816,6 @@ wss.on('connection', (ws, request) => {
     });
     
     targetWs.on('message', (msg, isBinary) => {
-        // 添加防撑爆的轻量级日志：只打印前几十个字符或固定频率打印
-        if (Math.random() < 0.05) {
-            console.log(`[WS Proxy Debug] Received msg from ${targetUrl}, isBinary: ${isBinary}, length: ${msg.length}`);
-        }
         if (ws.readyState === WebSocket.OPEN) {
             // ws 库 v8+ 会把 msg 作为 Buffer 传递，必须通过 isBinary 标志位来判断是否是文本帧
             ws.send(msg, { binary: isBinary });
