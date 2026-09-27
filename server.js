@@ -799,8 +799,8 @@ wss.on('connection', (ws, request) => {
     // 替换后 targetPath 是 /ws/btcusdt@aggTrade
     let targetPath = request.url.replace(/^\/ws\/binance/, '');
     
-    // 如果 targetPath 是 /stream?streams=... 这种格式，需要保留
-    // 如果是 /ws/btcusdt@aggTrade 这种格式，也需要保留
+    // 强制修复双斜杠问题，将 //ws 替换为 /ws
+    targetPath = targetPath.replace(/^\/+/, '/');
     
     const targetUrl = `wss://fstream.binance.com${targetPath}`;
     console.log(`[WS Proxy] 代理前端直连: ${targetUrl}`);
