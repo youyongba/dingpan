@@ -802,10 +802,9 @@ wss.on('connection', (ws, request) => {
     // 强制修复双斜杠问题，将 //ws 替换为 /ws
     targetPath = targetPath.replace(/^\/+/, '/');
     
-    // 判断走单流还是多路复用流
-    // 如果是 /stream?streams=... 走 wss://fstream.binance.com
-    // 如果是 /ws/... 走 wss://fstream.binance.com
-    const targetUrl = `wss://fstream.binance.com${targetPath}`;
+    // 终极排查：把代理目标从合约 (fstream) 换成现货 (stream.binance.com:9443)！
+    // 如果是代理节点或者币安合约服务器单方面屏蔽了您的 aggTrade 流，现货服务器通常不受影响。
+    const targetUrl = `wss://stream.binance.com:9443${targetPath}`;
     console.log(`[WS Proxy] 代理前端直连: ${targetUrl}`);
     
     const agent = buildProxyAgent();

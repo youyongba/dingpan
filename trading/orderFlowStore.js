@@ -112,7 +112,8 @@ class OrderFlowStore extends EventEmitter {
             } catch(e) {}
         }
         
-        const ws = new WebSocket('wss://fstream.binance.com/stream?streams=btcusdt@aggTrade', { agent });
+        // 同样切换为币安现货 WebSocket，规避合约端点对 aggTrade 的风控屏蔽
+        const ws = new WebSocket('wss://fstream.binance.com:9443/stream?streams=btcusdt@aggTrade', { agent });
         
         ws.on('message', (buf) => {
             try {
