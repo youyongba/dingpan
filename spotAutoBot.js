@@ -41,11 +41,13 @@ let globalRsiOverboughtTime = 0;
 
 // 1. 后端实时监听微观订单流 (脱离浏览器也能运行)
 function initBackendDeltaWS() {
-    const ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade');
+    const ws = new WebSocket('wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade');
     ws.on('open', () => console.log('[SpotAutoBot] WS Connected for Backend Delta tracking'));
     ws.on('message', (data) => {
         try {
-            const parsed = JSON.parse(data);
+            const rawData = JSON.parse(data);
+            const parsed = rawData.data || rawData; // 兼容多路复用格式
+            
             if (!parsed.p || !parsed.q) return; // 忽略没有价格和数量的数据包，防止 NaN 污染
 
             const price = parseFloat(parsed.p);
@@ -501,14 +503,14 @@ function startBotLoop(getEngineConfig, getEngineState) {
                     }
                 };
 
-                const hitTp1 = isLongTrade ? (currentPrice >= tp1Price) : (currentPrice <= tp1Price);
-                const hitTp2 = isLongTrade ? (currentPrice >= tp2Price) : (currentPrice <= tp2Price);
-                const hitTp3 = isLongTrade ? (currentPrice >= tp3Price) : (currentPrice <= tp3Price);
+                const hitTp1 = currentPrice > 0 && (isLongTrade ? (currentPrice >= tp1Price) : (currentPrice <= tp1Price));
+                const hitTp2 = currentPrice > 0 && (isLongTrade ? (currentPrice >= tp2Price) : (currentPrice <= tp2Price));
+                const hitTp3 = currentPrice > 0 && (isLongTrade ? (currentPrice >= tp3Price) : (currentPrice <= tp3Price));
                 
                 // 保本止损容差 (滑点与手续费补偿): 0.05%
                 const slBuffer = avgP * 0.0005; 
                 const slTriggerPrice = isLongTrade ? (avgP + slBuffer) : (avgP - slBuffer);
-                const hitSl = isLongTrade ? (currentPrice <= slTriggerPrice) : (currentPrice >= slTriggerPrice);
+                const hitSl = currentPrice > 0 && (isLongTrade ? (currentPrice <= slTriggerPrice) : (currentPrice >= slTriggerPrice));
 
                 if (!targetState.tp1Fired && hitTp1 && !botSignalState.isExecuting) {
                     const closeQty = floorVol(targetState.totalCoinAmount * (config.tp1 / 100));
