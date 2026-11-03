@@ -186,7 +186,9 @@ function startBotLoop(getEngineConfig, getEngineState) {
         if (macdState) {
             if (globalMacdState === null) {
                 globalMacdState = macdState;
-                // 启动时不记录时间戳，只记录当前处于什么状态，防止把历史残留当成新信号
+                // 修复：如果启动时就已经处于金叉/死叉状态，必须承认当前状态，否则重启服务器会导致丢失正在发生的宏观信号
+                if (macdState === '金叉') globalMacdGoldenCrossTime = now;
+                if (macdState === '死叉') globalMacdDeathCrossTime = now;
             } else if (macdState !== globalMacdState) {
                 globalMacdState = macdState;
                 if (macdState === '金叉') globalMacdGoldenCrossTime = now;
@@ -201,7 +203,9 @@ function startBotLoop(getEngineConfig, getEngineState) {
 
             if (globalRsiState === null) {
                 globalRsiState = currentRsiState;
-                // 启动时不记录时间戳，只记录当前处于什么状态，防止把历史残留当成新信号
+                // 修复：如果启动时就已经处于超卖/超买状态，必须承认当前状态
+                if (currentRsiState === 'oversold') globalRsiOversoldTime = now;
+                if (currentRsiState === 'overbought') globalRsiOverboughtTime = now;
             } else if (currentRsiState !== globalRsiState) {
                 // 只有在运行期间真实发生状态跨越（比如从 normal 变成 overbought），才记录时间戳
                 globalRsiState = currentRsiState;
