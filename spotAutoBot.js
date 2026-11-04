@@ -522,7 +522,13 @@ function startBotLoop(getEngineConfig, getEngineState) {
                     if (closeQty <= 0 && targetState.totalCoinAmount > 0) closeQty = targetState.totalCoinAmount;
                     
                     if (await executeClose(closeQty, 'TP1')) {
-                        if (targetState.totalCoinAmount > 0) targetState.tp1Fired = true;
+                        targetState.tp1Fired = true; // 强制标记
+                        if (targetState.totalCoinAmount <= 0) {
+                            targetState.tp1Fired = false; 
+                            targetState.tp2Fired = false; 
+                            targetState.tp3Fired = false;
+                        }
+                        if (typeof setOnStateChangeCallback === 'function') setOnStateChangeCallback(); // 强制持久化
                     }
                 }
                 else if (targetState.tp1Fired && !targetState.tp2Fired && hitTp2 && !botSignalState.isExecuting) {
@@ -531,7 +537,13 @@ function startBotLoop(getEngineConfig, getEngineState) {
                     if (closeQty <= 0 && targetState.totalCoinAmount > 0) closeQty = targetState.totalCoinAmount;
                     
                     if (await executeClose(closeQty, 'TP2')) {
-                        if (targetState.totalCoinAmount > 0) targetState.tp2Fired = true;
+                        targetState.tp2Fired = true; // 强制标记
+                        if (targetState.totalCoinAmount <= 0) {
+                            targetState.tp1Fired = false; 
+                            targetState.tp2Fired = false; 
+                            targetState.tp3Fired = false;
+                        }
+                        if (typeof setOnStateChangeCallback === 'function') setOnStateChangeCallback(); // 强制持久化
                     }
                 }
                 else if (targetState.tp2Fired && !targetState.tp3Fired && hitTp3 && !botSignalState.isExecuting) {
