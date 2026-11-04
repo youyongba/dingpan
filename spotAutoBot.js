@@ -186,9 +186,7 @@ function startBotLoop(getEngineConfig, getEngineState) {
         if (macdState) {
             if (globalMacdState === null) {
                 globalMacdState = macdState;
-                // 修复：如果启动时就已经处于金叉/死叉状态，必须承认当前状态，否则重启服务器会导致丢失正在发生的宏观信号
-                if (macdState === '金叉') globalMacdGoldenCrossTime = now;
-                if (macdState === '死叉') globalMacdDeathCrossTime = now;
+                // 取消重启时的伪造时间戳，MACD必须等待真正的状态跨越才记录
             } else if (macdState !== globalMacdState) {
                 globalMacdState = macdState;
                 if (macdState === '金叉') globalMacdGoldenCrossTime = now;
@@ -225,21 +223,35 @@ function startBotLoop(getEngineConfig, getEngineState) {
             
             // 1. 15m已收盘 RSI 曾超卖(做多) / 曾超买(做空) (必须是上次开仓之后新产生的穿越！)
             if (rsi !== null) {
-                if (isLongTrade && currentRsiState === 'oversold' && globalRsiOversoldTime > lastDcaTime) {
-                    botSignalState.longRsiHitTime = globalRsiOversoldTime;
-                }
-                if (!isLongTrade && currentRsiState === 'overbought' && globalRsiOverboughtTime > lastDcaTime) {
-                    botSignalState.shortRsiHitTime = globalRsiOverboughtTime;
+                if (isLongTrade) {
+                    if (currentRsiState === 'oversold' && globalRsiOversoldTime > lastDcaTime) {
+                        botSignalState.longRsiHitTime = globalRsiOversoldTime;
+                    } else if (currentRsiState === 'overbought') {
+                        botSignalState.longRsiHitTime = 0; // 反向极端，清空做多记忆
+                    }
+                } else {
+                    if (currentRsiState === 'overbought' && globalRsiOverboughtTime > lastDcaTime) {
+                        botSignalState.shortRsiHitTime = globalRsiOverboughtTime;
+                    } else if (currentRsiState === 'oversold') {
+                        botSignalState.shortRsiHitTime = 0; // 反向极端，清空做空记忆
+                    }
                 }
             }
 
             // 2. 15m已收盘 MACD 曾金叉(做多) / 曾死叉(做空)
             if (macdState !== null) {
-                if (isLongTrade && macdState === '金叉' && globalMacdGoldenCrossTime > lastDcaTime) {
-                    botSignalState.longMacdHitTime = globalMacdGoldenCrossTime;
-                }
-                if (!isLongTrade && macdState === '死叉' && globalMacdDeathCrossTime > lastDcaTime) {
-                    botSignalState.shortMacdHitTime = globalMacdDeathCrossTime;
+                if (isLongTrade) {
+                    if (macdState === '金叉' && globalMacdGoldenCrossTime > lastDcaTime) {
+                        botSignalState.longMacdHitTime = globalMacdGoldenCrossTime;
+                    } else if (macdState === '死叉') {
+                        botSignalState.longMacdHitTime = 0; // 当前是死叉，废弃之前的金叉信号
+                    }
+                } else {
+                    if (macdState === '死叉' && globalMacdDeathCrossTime > lastDcaTime) {
+                        botSignalState.shortMacdHitTime = globalMacdDeathCrossTime;
+                    } else if (macdState === '金叉') {
+                        botSignalState.shortMacdHitTime = 0; // 当前是金叉，废弃之前的死叉信号
+                    }
                 }
             }
 
@@ -256,10 +268,15 @@ function startBotLoop(getEngineConfig, getEngineState) {
             let isReady = false;
             if (isLongTrade) {
                 isReady = botSignalState.longRsiHitTime > 0;
-                if (config.requireMacd) isReady = isReady && (botSignalState.longMacdHitTime > 0);
+                if (config.requireMacd) {
+                    // 确保 MACD 信号有效，并且 MACD 交叉时间必须晚于或等于 RSI 超卖时间 (强制先后顺序)
+                    isReady = isReady && (botSignalState.longMacdHitTime >= botSignalState.longRsiHitTime) && (botSignalState.longMacdHitTime > 0);
+                }
             } else {
                 isReady = botSignalState.shortRsiHitTime > 0;
-                if (config.requireMacd) isReady = isReady && (botSignalState.shortMacdHitTime > 0);
+                if (config.requireMacd) {
+                    isReady = isReady && (botSignalState.shortMacdHitTime >= botSignalState.shortRsiHitTime) && (botSignalState.shortMacdHitTime > 0);
+                }
             }
                 
             // --- C. 微观扳机扣动 (真实买入/做空) ---
