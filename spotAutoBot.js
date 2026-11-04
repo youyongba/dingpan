@@ -517,23 +517,32 @@ function startBotLoop(getEngineConfig, getEngineState) {
                 const hitSl = currentPrice > 0 && (isLongTrade ? (currentPrice <= slTriggerPrice) : (currentPrice >= slTriggerPrice));
 
                 if (!targetState.tp1Fired && hitTp1 && !botSignalState.isExecuting) {
-                    const closeQty = floorVol(targetState.totalCoinAmount * (config.tp1 / 100));
-                    if (await executeClose(closeQty, 'TP1')) targetState.tp1Fired = true;
+                    let closeQty = floorVol(targetState.totalCoinAmount * (config.tp1 / 100));
+                    // 修复：如果分批后的数量小于交易所最小精度(如0.001)，则无法下单，改为全平
+                    if (closeQty <= 0 && targetState.totalCoinAmount > 0) closeQty = targetState.totalCoinAmount;
+                    
+                    if (await executeClose(closeQty, 'TP1')) {
+                        if (targetState.totalCoinAmount > 0) targetState.tp1Fired = true;
+                    }
                 }
                 else if (targetState.tp1Fired && !targetState.tp2Fired && hitTp2 && !botSignalState.isExecuting) {
                     const remainingRatio = config.tp2 / (config.tp2 + config.tp3);
-                    const closeQty = floorVol(targetState.totalCoinAmount * remainingRatio);
-                    if (await executeClose(closeQty, 'TP2')) targetState.tp2Fired = true;
-                }
-                else if (targetState.tp2Fired && !targetState.tp3Fired && hitTp3 && !botSignalState.isExecuting) {
-                    const closeQty = floorVol(targetState.totalCoinAmount);
-                    if (await executeClose(closeQty, 'TP3')) {
-                        targetState.tp3Fired = true;
-                        targetState.tp1Fired = false; targetState.tp2Fired = false; targetState.tp3Fired = false;
+                    let closeQty = floorVol(targetState.totalCoinAmount * remainingRatio);
+                    if (closeQty <= 0 && targetState.totalCoinAmount > 0) closeQty = targetState.totalCoinAmount;
+                    
+                    if (await executeClose(closeQty, 'TP2')) {
+                        if (targetState.totalCoinAmount > 0) targetState.tp2Fired = true;
                     }
                 }
+                else if (targetState.tp2Fired && !targetState.tp3Fired && hitTp3 && !botSignalState.isExecuting) {
+                    let closeQty = floorVol(targetState.totalCoinAmount);
+                    if (closeQty <= 0 && targetState.totalCoinAmount > 0) closeQty = targetState.totalCoinAmount;
+                    
+                    await executeClose(closeQty, 'TP3');
+                }
                 else if (targetState.tp1Fired && config.breakevenSl && hitSl && !botSignalState.isExecuting) {
-                    const closeQty = floorVol(targetState.totalCoinAmount);
+                    let closeQty = floorVol(targetState.totalCoinAmount);
+                    if (closeQty <= 0 && targetState.totalCoinAmount > 0) closeQty = targetState.totalCoinAmount;
                     let success = await executeClose(closeQty, '保本止损');
                     
                     // 重试机制：如果由于极小仓位被币安拒绝，尝试强制清零本地状态以防止僵尸仓位
