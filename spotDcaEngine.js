@@ -237,11 +237,13 @@ async function fetchBalances() {
                         }
                         
                         state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 自动接管(${posSideStr})持仓: ${apiAmt} BTC`);
+                        saveData();
                     } else if (localAvgPrice > 0 && apiAvgPrice > 0 && Math.abs(apiAvgPrice - localAvgPrice) / localAvgPrice > 0.0005) {
                         stateObj.averagePrice = apiAvgPrice;
                         stateObj.totalCoinAmount = apiAmt;
                         stateObj.totalUsdtAmount = apiAmt * apiAvgPrice; // 致命 Bug 修复
                         state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 均价漂移修正(${posSideStr}): 同步至 ${apiAvgPrice.toFixed(2)}`);
+                        saveData();
                     } else if (localAmt > 0 && apiAmt > 0 && Math.abs(apiAmt - localAmt) > 0.0001) {
                         stateObj.totalCoinAmount = apiAmt;
                         stateObj.totalUsdtAmount = apiAmt * stateObj.averagePrice; // 致命 Bug 修复
