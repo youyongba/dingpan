@@ -107,6 +107,7 @@ const createPosState = () => ({
   totalUsdtAmount: 0,
   averagePrice: 0,
   entryTime: null,
+  lastDcaTime: 0, // 新增：持久化记录最后一次加仓时间，防止重启后冷却期失效
   totalFees: 0,
   tp1Fired: false,
   tp2Fired: false,
@@ -544,6 +545,14 @@ router.post('/refresh-atr', express.json(), requireAdmin, (req, res) => {
 
 router.post('/override', express.json(), requireAdmin, async (req, res) => {
   const { action, amount, price } = req.body;
+  
+  // 防止手动操作与自动机器人高频并发抢夺资源
+  const { botSignalState } = require('./spotAutoBot');
+  if (botSignalState && botSignalState.isExecuting) {
+      return res.status(409).json({ ok: false, error: '机器人正在自动交易中，请稍后再试' });
+  }
+  if (botSignalState) botSignalState.isExecuting = true;
+
   const logMsg = `[Override] 强制发起 ${action} ${amount || ''}`;
   state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] ` + logMsg);
   if (state.logs.length > 20) state.logs.pop();
@@ -665,6 +674,9 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
   
   // 立即刷新余额和持仓，确保 UI 状态同步
   await fetchBalances();
+  if (botSignalState) {
+    botSignalState.isExecuting = false;
+  }
   res.json({ ok: true, state });
 });
 

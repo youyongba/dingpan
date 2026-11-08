@@ -154,7 +154,13 @@ function startBotLoop(getEngineConfig, getEngineState) {
         const config = getEngineConfig();
         const state = getEngineState();
         
-        if (!state.isLongBotRunning && !state.isShortBotRunning) return;
+        const hasLongPosition = state.long && state.long.totalCoinAmount > 0;
+        const hasShortPosition = state.short && state.short.totalCoinAmount > 0;
+        
+        // 如果多空开关全关，且目前也没有任何持仓，才直接返回省CPU。
+        // 如果有持仓，即使开关关闭，也必须继续循环以执行止盈止损！
+        if (!state.isLongBotRunning && !state.isShortBotRunning && !hasLongPosition && !hasShortPosition) return;
+        
         if (botSignalState.isExecuting) return;
 
         const now = Date.now();
@@ -217,9 +223,10 @@ function startBotLoop(getEngineConfig, getEngineState) {
         if (botSignalState.isExecuting) return;
 
         const processDirection = async (isLongTrade, targetState, isBotRunning) => {
-            if (!isBotRunning) return;
+            // 绝不能在这里因为 !isBotRunning 就 return，否则会跳过现有仓位的止盈止损！
             
-            const lastDcaTime = isLongTrade ? botSignalState.lastDcaTimeLong : botSignalState.lastDcaTimeShort;
+            // 从持久化的 targetState 中读取 lastDcaTime，防止重启后冷却期归零
+            const lastDcaTime = targetState.lastDcaTime || 0;
             
             // 1. 15m已收盘 RSI 曾超卖(做多) / 曾超买(做空) (必须是上次开仓之后新产生的穿越！)
             if (rsi !== null) {
@@ -269,18 +276,21 @@ function startBotLoop(getEngineConfig, getEngineState) {
             if (isLongTrade) {
                 isReady = botSignalState.longRsiHitTime > 0;
                 if (config.requireMacd) {
-                    // 确保 MACD 信号有效，并且 MACD 交叉时间必须晚于或等于 RSI 超卖时间 (强制先后顺序)
+                    // 铁律：必须先 RSI 超卖，再 MACD 金叉。
+                    // 也就是说，MACD 金叉发生的时间，必须晚于或等于 RSI 超卖的时间
                     isReady = isReady && (botSignalState.longMacdHitTime >= botSignalState.longRsiHitTime) && (botSignalState.longMacdHitTime > 0);
                 }
             } else {
                 isReady = botSignalState.shortRsiHitTime > 0;
                 if (config.requireMacd) {
+                    // 铁律：必须先 RSI 超买，再 MACD 死叉。
                     isReady = isReady && (botSignalState.shortMacdHitTime >= botSignalState.shortRsiHitTime) && (botSignalState.shortMacdHitTime > 0);
                 }
             }
                 
             // --- C. 微观扳机扣动 (真实买入/做空) ---
-            if (isReady && (now - lastDcaTime > 60 * 60 * 1000)) { // 1小时冷却防抖
+            // 只有当自动机器人开关是打开的 (isBotRunning = true) 时，才允许开新仓或加仓
+            if (isBotRunning && isReady && (now - lastDcaTime > 60 * 60 * 1000)) { // 1小时冷却防抖
                 let triggerMtf = true;
                 if (config.triggerMtf) {
                     triggerMtf = isLongTrade 
@@ -301,14 +311,12 @@ function startBotLoop(getEngineConfig, getEngineState) {
                     const maxSteps = config.dcaMaxSteps || 5;
                     
                     if (targetState.activeDcaCount >= maxSteps) {
+                        targetState.lastDcaTime = now; // 即使到达上限，也要刷新持久化的冷却时间
+                        if (typeof setOnStateChangeCallback === 'function') setOnStateChangeCallback();
                         if (isLongTrade) {
-                            botSignalState.lastDcaTimeLong = now;
                             botSignalState.longRsiHitTime = 0; botSignalState.longMacdHitTime = 0;
-                            // globalRsiOversoldTime = 0; globalMacdGoldenCrossTime = 0; // 不清空全局状态，防止刚清空又被下一秒重新赋上
                         } else {
-                            botSignalState.lastDcaTimeShort = now;
                             botSignalState.shortRsiHitTime = 0; botSignalState.shortMacdHitTime = 0;
-                            // globalRsiOverboughtTime = 0; globalMacdDeathCrossTime = 0; // 不清空全局状态
                         }
                         console.log(`[AutoBot] 已达到最大 DCA 次数 (${maxSteps})，本次信号被忽略`);
                         return;
@@ -391,23 +399,26 @@ function startBotLoop(getEngineConfig, getEngineState) {
                         state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 真实${actionLabel}: ${cumQuote.toFixed(2)} USDT @ ${avgP.toFixed(2)}`);
                         
                         if (isLongTrade) {
-                            botSignalState.lastDcaTimeLong = now;
                             botSignalState.longRsiHitTime = 0; botSignalState.longMacdHitTime = 0;
                             // 暴力斩断：强行清空全局追踪记忆，必须等待下一次真正的跨越才能开启新一轮等待
                             globalRsiOversoldTime = 0;
                             globalMacdGoldenCrossTime = 0;
                         } else {
-                            botSignalState.lastDcaTimeShort = now;
                             botSignalState.shortRsiHitTime = 0; botSignalState.shortMacdHitTime = 0;
                             // 暴力斩断：强行清空全局追踪记忆，必须等待下一次真正的跨越才能开启新一轮等待
                             globalRsiOverboughtTime = 0;
                             globalMacdDeathCrossTime = 0;
                         }
-                         if (typeof onStateChangeCallback === 'function') onStateChangeCallback();
+                        targetState.lastDcaTime = now; // 写入持久化状态
+                        if (typeof onStateChangeCallback === 'function') onStateChangeCallback();
                     } catch (e) {
                         const errorMsg = e.response ? JSON.stringify(e.response.data) : e.message;
                         console.error('[SpotAutoBot] Action Error:', errorMsg);
                         state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 真实操作失败: ${errorMsg}`);
+                        // 失败惩罚：如果调用币安接口报错（比如保证金不足），给它强制加上 1 分钟的冷却期
+                        // 防止陷入死循环每 2 秒疯狂轰炸币安 API 导致封号
+                        targetState.lastDcaTime = now - 60 * 60 * 1000 + 60 * 1000; // 冷却期 = 1 分钟
+                        if (typeof onStateChangeCallback === 'function') onStateChangeCallback();
                     } finally {
                         botSignalState.isExecuting = false;
                     }
