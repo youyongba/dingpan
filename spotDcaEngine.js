@@ -7,7 +7,7 @@ const dataFile = path.join(__dirname, 'spotDcaData.json');
 const mtfModule = require('./mtfModule');
 const regimeModule = require('./regimeModule');
 
-const { startBotLoop, executeRealOrder, executeFuturesOrder, getCurrentPrice, getDeltaUsdt, getGlobalVpoc, notifyManualTrade, setOnStateChangeCallback } = require('./spotAutoBot');
+const { startBotLoop, executeRealOrder, executeFuturesOrder, getCurrentPrice, getDeltaUsdt, getGlobalVpoc, notifyManualTrade, setOnStateChangeCallback, beginOrder, confirmedFill, rejectOrder } = require('./spotAutoBot');
 
 // 强制使用绝对路径加载 .env，防止 PM2 工作目录 (cwd) 偏移导致找不到文件
 const envPath = path.resolve(__dirname, '.env');
@@ -64,32 +64,41 @@ let config = {
   tpMode: 'percent' // 'percent' or 'atr'
 };
 
+let savedData = null;
 try {
     if (fs.existsSync(dataFile)) {
         const saved = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
+        savedData = saved;
         if (saved.config) config = { ...config, ...saved.config };
-        if (saved.botState) {
-            state.isLongBotRunning = saved.botState.isLongBotRunning || false;
-            state.isShortBotRunning = saved.botState.isShortBotRunning || false;
-        }
-        if (saved.positions) {
-            if (saved.positions.long) state.long = { ...state.long, ...saved.positions.long };
-            if (saved.positions.short) state.short = { ...state.short, ...saved.positions.short };
-        }
     }
 } catch (e) {
     console.error('[SpotDCA] Load data error:', e);
+    // 不允许损坏的存档被默认空仓状态覆盖后继续交易。
+    throw e;
 }
 
 function saveData() {
+    let fd;
     try {
-        fs.writeFileSync(dataFile, JSON.stringify({
+        const tempFile = `${dataFile}.tmp`;
+        fd = fs.openSync(tempFile, 'w', 0o600);
+        fs.writeFileSync(fd, JSON.stringify({
             config,
             botState: { isLongBotRunning: state.isLongBotRunning, isShortBotRunning: state.isShortBotRunning },
-            positions: { long: state.long, short: state.short }
+            positions: { long: state.long, short: state.short },
+            signalMemory: state.signalMemory
         }, null, 2));
+        fs.fsyncSync(fd);
+        fs.closeSync(fd);
+        fd = null;
+        fs.renameSync(tempFile, dataFile);
+        fd = fs.openSync(__dirname, 'r');
+        fs.fsyncSync(fd);
     } catch (e) {
         console.error('[SpotDCA] Save data error:', e);
+        throw e;
+    } finally {
+        if (fd !== undefined && fd !== null) fs.closeSync(fd);
     }
 }
 
@@ -133,6 +142,14 @@ let state = {
   futuresPositions: []
 };
 
+if (savedData) {
+    state.isLongBotRunning = savedData.botState?.isLongBotRunning === true;
+    state.isShortBotRunning = savedData.botState?.isShortBotRunning === true;
+    Object.assign(state.long, savedData.positions?.long);
+    Object.assign(state.short, savedData.positions?.short);
+    state.signalMemory = savedData.signalMemory;
+}
+
 // 币安现货 API 密钥 (初始从环境变量读取，如果配置里有则优先使用)
 let SPOT_API_KEY = (process.env.BINANCE_SPOT_API_KEY || process.env.BINANCE_API_KEY || '').trim();
 let SPOT_API_SECRET = (process.env.BINANCE_SPOT_API_SECRET || process.env.BINANCE_API_SECRET || '').trim();
@@ -140,6 +157,7 @@ let SPOT_API_SECRET = (process.env.BINANCE_SPOT_API_SECRET || process.env.BINANC
 function refreshApiKeys() {
     if (config.apiKey) SPOT_API_KEY = config.apiKey.trim();
     if (config.apiSecret) SPOT_API_SECRET = config.apiSecret.trim();
+    require('./spotAutoBot').setApiKeys(SPOT_API_KEY, SPOT_API_SECRET);
 }
 refreshApiKeys();
 
@@ -148,6 +166,9 @@ const { httpAgent, httpsAgent } = require('./lib/httpAgents');
 
 // 获取账户余额 (包含现货与合约)
 async function fetchBalances() {
+  // 同步请求期间可能成交，旧快照不能覆盖新仓位或止盈记录。
+  const { botSignalState, getTradeRevision } = require('./spotAutoBot');
+  const revision = getTradeRevision();
   if (!SPOT_API_KEY || !SPOT_API_SECRET) {
       console.log('[SpotDCA] Missing Binance API keys in .env. Using mock balance.');
       state.spotBalanceUsdt = 50000;
@@ -207,9 +228,11 @@ async function fetchBalances() {
         }));
         
         // 自动纠正内存中的 DCA 状态 (双向隔离同步)
-        if (config.tradeMode === 'futures') {
+        if (config.tradeMode === 'futures' && !botSignalState.isExecuting && revision === getTradeRevision()) {
             const syncSide = (posSideStr, stateObj) => {
                 const active = state.futuresPositions.find(p => p.positionSide === posSideStr);
+                // 未确认订单必须先核对，不能按仓位数量猜测其成交阶段。
+                if (stateObj.pendingOrder) return;
                 if (active) {
                     const apiAvgPrice = active.entryPrice;
                     const apiAmt = Math.abs(active.positionAmt);
@@ -223,6 +246,7 @@ async function fetchBalances() {
                         if (!Number.isFinite(stateObj.totalUsdtAmount)) stateObj.totalUsdtAmount = 0; // 防 NaN
                         
                         stateObj.entryTime = stateObj.entryTime || Date.now();
+                        stateObj.lastDcaTime = stateObj.lastDcaTime || Date.now();
                         // 只有在完全没有记录（连持久化都没有）的情况下才认为是新接管
                         if (stateObj.activeDcaCount === 0) stateObj.activeDcaCount = 1; 
                         
@@ -262,6 +286,10 @@ async function fetchBalances() {
                     stateObj.tp2Fired = false;
                     stateObj.tp3Fired = false;
                     stateObj.lockedAtr = 0;
+                    stateObj.slMoved = false;
+                    stateObj.customTp1Price = null;
+                    stateObj.customTp2Price = null;
+                    stateObj.customTp3Price = null;
                     state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 远端无持仓，自动清空(${posSideStr})本地状态`);
                     saveData();
                 }
@@ -326,7 +354,7 @@ async function fetchPositionFees() {
         }
         
         stateObj.totalFees = Number.isFinite(totalFee) ? totalFee : 0;
-        if (stateObj.totalCoinAmount > 0) {
+        if (stateObj.totalCoinAmount > 0 && config.tradeMode !== 'futures') {
             const safeUsdt = Number.isFinite(stateObj.totalUsdtAmount) ? stateObj.totalUsdtAmount : 0;
             const safeFees = Number.isFinite(stateObj.totalFees) ? stateObj.totalFees : 0;
             
@@ -437,12 +465,12 @@ router.get('/status', (req, res) => {
         }
         if (regimeState && regimeState.indicators) {
             const ind = regimeState.indicators;
-            if (ind.rsi && ind.rsi.length > 0) {
-                realIndicators.rsi1h = ind.rsi[ind.rsi.length - 1];
+            if (ind.rsi && ind.rsi.length > 1) {
+                realIndicators.rsi1h = ind.rsi[ind.rsi.length - 2];
             }
-            if (ind.macd && ind.signal && ind.macd.length > 0) {
-                const macd = ind.macd[ind.macd.length - 1];
-                const sig = ind.signal[ind.signal.length - 1];
+            if (ind.macd && ind.signal && ind.macd.length > 1) {
+                const macd = ind.macd[ind.macd.length - 2];
+                const sig = ind.signal[ind.signal.length - 2];
                 realIndicators.macd1h = macd > sig ? 'MACD 金叉 (多头)' : 'MACD 死叉 (空头)';
             }
         }
@@ -507,6 +535,9 @@ router.post('/toggle-bot', express.json(), requireAdmin, (req, res) => {
 
 router.post('/custom-tp', express.json(), requireAdmin, (req, res) => {
   const { level, price, direction } = req.body;
+  if (![1, 2, 3].includes(level) || (price !== null && (!Number.isFinite(price) || price <= 0))) {
+      return res.status(400).json({ ok: false, error: '止盈级别或价格无效' });
+  }
   const isShort = direction === 'short';
   const targetState = isShort ? state.short : state.long;
 
@@ -516,12 +547,29 @@ router.post('/custom-tp', express.json(), requireAdmin, (req, res) => {
   
   const sideStr = isShort ? '空头' : '多头';
   state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动更新${sideStr}止盈${level}价格为: ${price || '默认'}`);
-  
+  saveData();
   res.json({ ok: true, state });
 });
 
 router.post('/config', express.json(), requireAdmin, (req, res) => {
-  config = { ...config, ...req.body };
+  const next = { ...config, ...req.body };
+  const positiveFields = ['leverage', 'positionSizePct', 'signalWindow', 'dcaAmount', 'dcaMaxSteps',
+      'martingaleMultiplier', 'tp1', 'tp2', 'tp3', 'tp1Target', 'tp2Target', 'tp3Target'];
+  if (positiveFields.some(key => !Number.isFinite(next[key]) || next[key] <= 0) ||
+      !Number.isInteger(next.dcaMaxSteps) || next.positionSizePct > 100 ||
+      Math.abs(next.tp1 + next.tp2 + next.tp3 - 100) > 1e-6 ||
+      !(next.tp1Target < next.tp2Target && next.tp2Target < next.tp3Target) ||
+      !(next.rsiThreshold > 0 && next.rsiThreshold < next.rsiOverboughtThreshold && next.rsiOverboughtThreshold < 100) ||
+      !['spot', 'futures'].includes(next.tradeMode) ||
+      !['percent', 'atr_static', 'atr_dynamic'].includes(next.tpMode)) {
+      return res.status(400).json({ ok: false, error: '策略参数无效，请检查止盈比例、目标顺序和仓位限制' });
+  }
+  if (next.tradeMode !== config.tradeMode &&
+      (state.long.totalCoinAmount > 0 || state.short.totalCoinAmount > 0 ||
+       state.long.pendingOrder || state.short.pendingOrder)) {
+      return res.status(409).json({ ok: false, error: '持仓期间不能切换现货和合约模式' });
+  }
+  config = next;
   saveData();
   res.json({ ok: true, config });
 });
@@ -544,7 +592,13 @@ router.post('/refresh-atr', express.json(), requireAdmin, (req, res) => {
 });
 
 router.post('/override', express.json(), requireAdmin, async (req, res) => {
-  const { action, amount, price } = req.body;
+  const { action, amount } = req.body;
+  if (!['market-buy', 'market-buy-short', 'market-sell-long', 'market-sell-short', 'market-sell'].includes(action)) {
+      return res.status(400).json({ ok: false, error: '未知操作' });
+  }
+  if (state.long.pendingOrder || state.short.pendingOrder) {
+      return res.status(409).json({ ok: false, error: '有未确认订单，必须先与交易所核对' });
+  }
   
   // 防止手动操作与自动机器人高频并发抢夺资源
   const { botSignalState } = require('./spotAutoBot');
@@ -552,13 +606,15 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
       return res.status(409).json({ ok: false, error: '机器人正在自动交易中，请稍后再试' });
   }
   if (botSignalState) botSignalState.isExecuting = true;
-
+  try {
   const logMsg = `[Override] 强制发起 ${action} ${amount || ''}`;
   state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] ` + logMsg);
   if (state.logs.length > 20) state.logs.pop();
   
   if (action === 'market-buy' || action === 'market-buy-short') {
+    const targetState = action === 'market-buy-short' ? state.short : state.long;
     try {
+      if (targetState.tp1Fired) throw new Error('止盈阶段禁止加仓，以保留尾仓保护');
       let amt = parseFloat(amount);
       let executedQty = 0;
       let cumQuote = 0;
@@ -566,26 +622,29 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
       if (config.tradeMode === 'futures') {
         if (!amt || amt <= 0) throw new Error('无效的开仓金额');
         const { getCurrentPrice } = require('./spotAutoBot');
-        const currentPrice = getCurrentPrice() || 70000; // 使用真实的实时价格
+        const currentPrice = getCurrentPrice();
+        if (!Number.isFinite(currentPrice) || currentPrice <= 0) throw new Error('当前价格不可用');
         let qtyToBuy = Math.floor((amt / currentPrice) * 1000) / 1000;
         if (qtyToBuy < 0.001) throw new Error(`数量太小: ${qtyToBuy}`);
         
         const side = action === 'market-buy-short' ? 'SELL' : 'BUY';
         const posSide = action === 'market-buy-short' ? 'SHORT' : 'LONG';
-        const orderRes = await executeFuturesOrder(side, qtyToBuy, posSide);
-        executedQty = parseFloat(orderRes.executedQty) || qtyToBuy;
-        cumQuote = (orderRes.cumQuoteQty && parseFloat(orderRes.cumQuoteQty) > 0) ? parseFloat(orderRes.cumQuoteQty) : (executedQty * currentPrice);
+        const id = beginOrder(targetState, 'entry', 'manual');
+        const orderRes = await executeFuturesOrder(side, qtyToBuy, posSide, id);
+        const fill = confirmedFill(orderRes);
+        executedQty = fill.qty;
+        cumQuote = fill.quote;
       } else {
         if (action === 'market-buy-short') throw new Error('现货模式不支持做空');
         if (!amt || amt <= 0) throw new Error('无效的买入金额');
-        const { executeRealOrder } = require('./spotAutoBot');
-        const orderRes = await executeRealOrder('BUY', null, amt);
-        executedQty = parseFloat(orderRes.executedQty);
-        cumQuote = parseFloat(orderRes.cummulativeQuoteQty);
+        const id = beginOrder(targetState, 'entry', 'manual');
+        const orderRes = await executeRealOrder('BUY', null, amt, id);
+        const fill = confirmedFill(orderRes);
+        executedQty = fill.qty;
+        cumQuote = fill.quote;
       }
       
       const isShort = action === 'market-buy-short';
-      const targetState = isShort ? state.short : state.long;
 
       if (targetState.totalCoinAmount < 0.00001) {
           targetState.entryTime = Date.now();
@@ -596,8 +655,7 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
       targetState.totalUsdtAmount += cumQuote;
       targetState.totalCoinAmount += executedQty;
       
-      const adjUsdt = !isShort ? (targetState.totalUsdtAmount + (targetState.totalFees || 0)) : (targetState.totalUsdtAmount - (targetState.totalFees || 0));
-      targetState.averagePrice = targetState.totalCoinAmount > 0 ? (adjUsdt / targetState.totalCoinAmount) : 0;
+      targetState.averagePrice = targetState.totalUsdtAmount / targetState.totalCoinAmount;
       
       try {
           if (regimeModule && typeof regimeModule.getState === 'function') {
@@ -612,22 +670,26 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
       targetState.tp1Fired = false;
       targetState.tp2Fired = false;
       targetState.tp3Fired = false;
+      targetState.slMoved = false;
       targetState.customTp1Price = null;
       targetState.customTp2Price = null;
       targetState.customTp3Price = null;
       
       // 同步清空底层信号时间戳，防止手动开仓后立刻触发自动开仓
       if (typeof notifyManualTrade === 'function') {
-          notifyManualTrade(!isShort);
+          notifyManualTrade(!isShort, targetState);
       }
       
       const actionName = action === 'market-buy-short' ? '做空' : '买入';
       state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动${actionName}成功: 获 ${executedQty} BTC`);
+      delete targetState.pendingOrder;
       saveData(); // 手动交易瞬间保存
     } catch (e) {
       const errorMsg = e.response ? JSON.stringify(e.response.data) : e.message;
       console.error('[Override Error] BUY/SELL failed:', errorMsg);
       state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 开仓失败: ${errorMsg}`);
+      rejectOrder(targetState, e);
+      return res.status(502).json({ ok: false, error: errorMsg });
     }
   } else if (action === 'market-sell-long' || action === 'market-sell-short' || action === 'market-sell') {
     try {
@@ -636,48 +698,65 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
           if (action === 'market-sell-long' || action === 'market-sell') {
               if (state.long.totalCoinAmount > 0.00001) {
                   const closeLongQty = Math.floor(state.long.totalCoinAmount * 1000) / 1000;
-                  await executeFuturesOrder('SELL', closeLongQty, 'LONG');
+                  const id = beginOrder(state.long, 'close', 'manual');
+                  const fill = confirmedFill(await executeFuturesOrder('SELL', closeLongQty, 'LONG', id));
+                  if (Math.abs(fill.qty - state.long.totalCoinAmount) > 1e-8) throw new Error('成交数量与清仓数量不一致，需要核对');
                   state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动平多成功: 平仓 ${closeLongQty} BTC`);
               } else if (action === 'market-sell-long') {
                   state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动平多: 没有找到可平的多头仓位`);
               }
               Object.assign(state.long, createPosState());
+              notifyManualTrade(true, state.long);
+              delete state.long.pendingOrder;
+              saveData();
           }
           
           if (action === 'market-sell-short' || action === 'market-sell') {
               if (state.short.totalCoinAmount > 0.00001) {
                   const closeShortQty = Math.floor(state.short.totalCoinAmount * 1000) / 1000;
-                  await executeFuturesOrder('BUY', closeShortQty, 'SHORT');
+                  const id = beginOrder(state.short, 'close', 'manual');
+                  const fill = confirmedFill(await executeFuturesOrder('BUY', closeShortQty, 'SHORT', id));
+                  if (Math.abs(fill.qty - state.short.totalCoinAmount) > 1e-8) throw new Error('成交数量与清仓数量不一致，需要核对');
                   state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动平空成功: 平仓 ${closeShortQty} BTC`);
               } else if (action === 'market-sell-short') {
                   state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动平空: 没有找到可平的空头仓位`);
               }
               Object.assign(state.short, createPosState());
+              notifyManualTrade(false, state.short);
+              delete state.short.pendingOrder;
+              saveData();
           }
       } else {
           // 现货模式
           if (action === 'market-sell-short') throw new Error('现货模式不支持平空');
           if (state.long.totalCoinAmount > 0.00001) {
               const sellQty = Math.floor(state.long.totalCoinAmount * 100000) / 100000;
-              await executeRealOrder('SELL', sellQty, null);
+              const id = beginOrder(state.long, 'close', 'manual');
+              const fill = confirmedFill(await executeRealOrder('SELL', sellQty, null, id));
+              if (Math.abs(fill.qty - state.long.totalCoinAmount) > 1e-8) throw new Error('成交数量与清仓数量不一致，需要核对');
               state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动现货清仓成功: 卖出 ${sellQty} BTC`);
           }
           Object.assign(state.long, createPosState());
+          notifyManualTrade(true, state.long);
+          delete state.long.pendingOrder;
       }
       saveData(); // 手动平仓瞬间保存
     } catch (e) {
       const errorMsg = e.response ? JSON.stringify(e.response.data) : e.message;
       console.error('[Override Error] SELL failed:', errorMsg);
       state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 清仓失败: ${errorMsg}`);
+      if (state.long.pendingOrder) rejectOrder(state.long, e);
+      if (state.short.pendingOrder) rejectOrder(state.short, e);
+      return res.status(502).json({ ok: false, error: errorMsg });
     }
   }
   
   // 立即刷新余额和持仓，确保 UI 状态同步
   await fetchBalances();
-  if (botSignalState) {
+  res.json({ ok: true, state });
+  } finally {
     botSignalState.isExecuting = false;
   }
-  res.json({ ok: true, state });
 });
 
 // ================= WebSocket 后端服务 =================

@@ -1219,7 +1219,7 @@
                             <div class="flex justify-between items-center mb-1">
                                 <span class="text-green font-bold"><i class="fa-solid fa-shield mr-1"></i>动态保本止损已激活</span>
                             </div>
-                            <div class="text-xs text-green-400">TP1 已成交，剩余仓位止损线已上移至均价 ${entryPrice.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</div>
+                            <div class="text-xs text-green-400">TP1 已成交，尾仓保本止损触发价 ${(entryPrice * (isLong ? 1.0005 : 0.9995)).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}（含 0.05% 缓冲）</div>
                         </div>`;
                     } else if (currentConfig.breakevenSl) {
                         slHtml = `<div class="mt-4 p-3 bg-gray-800 border border-gray-700 rounded text-sm">
@@ -1238,6 +1238,7 @@
                         ${refreshBtnHtml}
                     </div>
                     <div class="space-y-2">
+                        ${stateObj?.pendingOrder ? '<div class="p-2 text-red-400 text-sm">存在未确认订单，已暂停该方向下单，请核对交易所成交记录。</div>' : ''}
                         ${getTpRowHtml(1, label1, tp1Price, isTracked && stateObj?.tp1Fired)}
                         ${getTpRowHtml(2, label2, tp2Price, isTracked && stateObj?.tp2Fired)}
                         ${getTpRowHtml(3, label3, tp3Price, isTracked && stateObj?.tp3Fired)}
@@ -1251,12 +1252,12 @@
                     const isLong = pos.positionAmt > 0 || pos.positionSide === 'LONG';
                     const posSide = isLong ? 'long' : 'short';
                     const stateObj = isLong ? currentState.long : currentState.short;
-                    // 如果引擎开启，则托管该方向
-                    const isTracked = isLong ? currentState.isLongBotRunning : currentState.isShortBotRunning;
-                    tpPanelsHtml += renderSingleTpPanel(posSide, pos.entryPrice, isTracked, stateObj);
+                    // 持仓保护和止盈记录不依赖自动开仓开关。
+                    const isTracked = stateObj?.totalCoinAmount > 0;
+                    tpPanelsHtml += renderSingleTpPanel(posSide, stateObj?.averagePrice || pos.entryPrice, isTracked, stateObj);
                 });
             } else if (currentConfig.tradeMode === 'spot' && currentState.spotBalanceBtc > 0) {
-                tpPanelsHtml += renderSingleTpPanel('long', currentState.long?.averagePrice || currentPrice, currentState.isLongBotRunning, currentState.long);
+                tpPanelsHtml += renderSingleTpPanel('long', currentState.long?.averagePrice || currentPrice, currentState.long?.totalCoinAmount > 0, currentState.long);
             } else {
                 tpPanelsHtml = `
                 <div class="mb-4">
