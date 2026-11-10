@@ -8,7 +8,8 @@ const { httpAgent, httpsAgent } = require('../lib/httpAgents');
 const HOUR = 3600000;
 const SAMPLE_INTERVAL = 90000;
 const MAX_AGE = 180000;
-const VENUES = ['Binance', 'Bybit', 'OKX'];
+const LEGACY_VENUES = ['Binance', 'Bybit', 'OKX'];
+const VENUES = [...LEGACY_VENUES, 'Hyperliquid'];
 
 function number(value, label, positive = false) {
     if (value == null || value === '' || typeof value === 'boolean') throw new Error(`${label}缺失`);
@@ -28,7 +29,7 @@ function row(exchange, fundingRate, interestUsd, intervalHours, asOf, now) {
         rate8h: rate * 8 / fundingIntervalHours, asOf: timestamp };
 }
 
-async function getJson(url) {
+async function getJson(url, body) {
     // Honor only the operator's environment; no proxy address is embedded in source or .env.
     const proxy = process.env.HTTPS_PROXY || process.env.https_proxy ||
         process.env.ALL_PROXY || process.env.all_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
@@ -42,7 +43,10 @@ async function getJson(url) {
             agent = new HttpsProxyAgent(proxy);
         }
     }
-    const response = await axios.get(url, { timeout: 12000, httpAgent, httpsAgent: agent, proxy: false });
+    const options = { timeout: 12000, httpAgent, httpsAgent: agent, proxy: false };
+    const response = body === undefined
+        ? await axios.get(url, options)
+        : await axios.post(url, body, options);
     return response.data;
 }
 
@@ -96,9 +100,11 @@ async function collectOkx(get, now) {
 function weightedAverage(sources) {
     if (sources.length !== VENUES.length || new Set(sources.map(item => item.exchange)).size !== VENUES.length ||
         !VENUES.every(venue => sources.some(item => item.exchange === venue))) {
-        throw new Error('必须取得固定三家交易所数据');
+        throw new Error('必须取得固定四家交易所数据');
     }
-    if (Math.max(...sources.map(item => item.asOf)) - Math.min(...sources.map(item => item.asOf)) > 60000) {
+    // Hyperliquid provides no snapshot timestamp; do not compare a request clock to exchange clocks.
+    const exchangeTimes = sources.filter(item => item.timeSource !== 'request-observation').map(item => item.asOf);
+    if (Math.max(...exchangeTimes) - Math.min(...exchangeTimes) > 60000) {
         throw new Error('跨交易所数据时间差过大');
     }
     const totalOpenInterestUsd = sources.reduce((sum, item) => sum + item.openInterestUsd, 0);
@@ -108,6 +114,23 @@ function weightedAverage(sources) {
     }
     return { rate, totalOpenInterestUsd,
         sources: sources.map(item => ({ ...item, weight: item.openInterestUsd / totalOpenInterestUsd })) };
+}
+
+async function collectHyperliquid(get, now) {
+    const data = await get('https://api.hyperliquid.xyz/info', { type: 'metaAndAssetCtxs', dex: '' });
+    const universe = data?.[0]?.universe;
+    const contexts = data?.[1];
+    if (!Array.isArray(data) || data.length !== 2 || !Array.isArray(universe) ||
+        !Array.isArray(contexts) || universe.length !== contexts.length ||
+        universe.filter(asset => asset?.name === 'BTC').length !== 1) {
+        throw new Error('Hyperliquid 资产上下文结构异常或缺少BTC');
+    }
+    const index = universe.findIndex(asset => asset.name === 'BTC');
+    if (universe[index].isDelisted || !contexts[index]) throw new Error('Hyperliquid BTC市场不可用');
+    const context = contexts[index];
+    const usd = number(context.openInterest, 'Hyperliquid单边BTC持仓量', true) *
+        number(context.markPx, 'Hyperliquid标记价', true);
+    return { ...row('Hyperliquid', context.funding, usd, 1, now, now), timeSource: 'request-observation' };
 }
 
 function recordBar(history, sample, hours, limit) {
@@ -148,6 +171,7 @@ class WeightedFundingService {
         this.current = null;
         this.history8h = [];
         this.history1h = [];
+        this.legacyHistory = null;
         this.errors = [];
         this.storageError = null;
         this.busy = false;
@@ -160,9 +184,21 @@ class WeightedFundingService {
         try {
             if (!this.fs.existsSync(this.storageFile)) return;
             const saved = JSON.parse(this.fs.readFileSync(this.storageFile, 'utf8'));
-            if (saved.version !== 1 || !validBars(saved.history8h, 8) || !validBars(saved.history1h, 1)) {
+            if (![1, 2].includes(saved.version) || !validBars(saved.history8h, 8) || !validBars(saved.history1h, 1)) {
                 throw new Error('加权费率历史存档结构无效');
             }
+            if (saved.version === 1) {
+                // Retain the old three-venue series without relabeling it as four-venue history.
+                this.legacyHistory = { venues: LEGACY_VENUES,
+                    history8h: saved.history8h.slice(-180), history1h: saved.history1h.slice(-240) };
+                return;
+            }
+            if (JSON.stringify(saved.venues) !== JSON.stringify(VENUES) ||
+                (saved.legacyHistory && (JSON.stringify(saved.legacyHistory.venues) !== JSON.stringify(LEGACY_VENUES) ||
+                !validBars(saved.legacyHistory.history8h, 8) || !validBars(saved.legacyHistory.history1h, 1)))) {
+                throw new Error('加权费率存档交易所覆盖范围异常');
+            }
+            this.legacyHistory = saved.legacyHistory || null;
             this.history8h = saved.history8h.slice(-180);
             this.history1h = saved.history1h.slice(-240);
         } catch (e) {
@@ -179,7 +215,8 @@ class WeightedFundingService {
             this.fs.mkdirSync(path.dirname(this.storageFile), { recursive: true });
             const temp = `${this.storageFile}.tmp`;
             fd = this.fs.openSync(temp, 'w', 0o600);
-            this.fs.writeFileSync(fd, JSON.stringify({ version: 1, history8h: this.history8h, history1h: this.history1h }));
+            this.fs.writeFileSync(fd, JSON.stringify({ version: 2, venues: VENUES,
+                history8h: this.history8h, history1h: this.history1h, legacyHistory: this.legacyHistory }));
             this.fs.fsyncSync(fd);
             this.fs.closeSync(fd);
             fd = undefined;
@@ -198,7 +235,8 @@ class WeightedFundingService {
         try {
             const now = this.now();
             const results = await Promise.allSettled([
-                collectBinance(this.get, now), collectBybit(this.get, now), collectOkx(this.get, now)
+                collectBinance(this.get, now), collectBybit(this.get, now), collectOkx(this.get, now),
+                collectHyperliquid(this.get, now)
             ]);
             this.errors = results.flatMap((result, i) => result.status === 'rejected'
                 ? [{ exchange: VENUES[i], message: result.reason.message }] : []);
@@ -234,6 +272,7 @@ class WeightedFundingService {
             source: 'self-calculated', symbol: 'BTCUSDT', unit: 'decimal', normalizedHours: 8,
             venues: VENUES, fresh, status: this.errors.length ? 'degraded' : fresh ? 'ready' : this.current ? 'stale' : 'loading',
             current: this.current, history8h: this.history8h, history1h: this.history1h,
+            legacyHistory: this.legacyHistory,
             errors: this.errors, storageError: this.storageError, sampleIntervalMs: SAMPLE_INTERVAL
         };
     }
@@ -251,4 +290,4 @@ class WeightedFundingService {
     }
 }
 
-module.exports = { WeightedFundingService, weightedAverage, recordBar, collectBinance, collectBybit, collectOkx };
+module.exports = { WeightedFundingService, weightedAverage, recordBar, collectBinance, collectBybit, collectOkx, collectHyperliquid };

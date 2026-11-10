@@ -105,6 +105,7 @@ function renderWeightedFunding(data) {
     const hintEl = document.getElementById('weightedFundingHistoryHint');
     if (!valueEl || !statusEl || !sourcesEl || !hintEl) return;
     const current = data?.current;
+    const venueCount = data?.venues?.length || current?.sources?.length || 4;
     const validCurrent = current && Number.isFinite(current.rate);
     valueEl.innerHTML = validCurrent
         ? `<span class="rate-primary">${weightedNumber(current.rate)}</span><span class="rate-secondary">${fmtPct(current.rate)} · 原始小数 ${fmtRateNumber(current.rate)}</span>`
@@ -114,20 +115,21 @@ function renderWeightedFunding(data) {
         statusEl.textContent = '加权数据尚未就绪，请确认后端已更新。';
     } else if (!data.fresh) {
         const failed = (data.errors || []).map(item => item.exchange).join(' / ');
-        statusEl.textContent = (failed ? `${failed} 数据异常，已暂停新增历史点。` : '等待三家交易所的同步采样。') +
+        statusEl.textContent = (failed ? `${failed} 数据异常，已暂停新增历史点。` : `等待 ${venueCount} 家交易所的同步采样。`) +
             (validCurrent ? '当前显示为上次有效值，非实时。' : '');
     } else {
-        statusEl.textContent = `固定覆盖 3 家 · 单边持仓合计 ${(current.totalOpenInterestUsd / 1e9).toFixed(3)}B USD · 更新 ${new Date(current.observedAt).toLocaleTimeString('zh-CN', { hour12: false })}`;
+        statusEl.textContent = `固定覆盖 ${venueCount} 家 · 单边持仓合计 ${(current.totalOpenInterestUsd / 1e9).toFixed(3)}B USD · 更新 ${new Date(current.observedAt).toLocaleTimeString('zh-CN', { hour12: false })}`;
     }
     if (data?.storageError) statusEl.textContent += ` ${data.storageError}`;
     statusEl.className = 'rate-note weighted-status' + (data?.fresh && !data.storageError ? '' : ' warning');
     sourcesEl.innerHTML = validCurrent ? current.sources.map(source =>
         `<tr><td>${escapeAiHtml(source.exchange)}</td><td>${weightedNumber(source.rate8h)}</td>` +
         `<td>${(source.openInterestUsd / 1e9).toFixed(3)}B</td><td>${(source.weight * 100).toFixed(2)}%</td></tr>`
-    ).join('') : '<tr><td colspan="4">等待三家交易所真实数据，不使用零值替代缺失数据。</td></tr>';
+    ).join('') : `<tr><td colspan="4">等待 ${venueCount} 家交易所真实数据，不使用零值替代缺失数据。</td></tr>`;
     const history = (weightedInterval === '8h' ? data?.history8h : data?.history1h) || [];
     hintEl.textContent = `已积累 ${history.length} 根 ${weightedInterval === '8h' ? '8 小时' : '1 小时'}柱。` +
         '历史从首次成功采样开始，每根为 UTC 时间窗口内最后一次有效加权值（close），缺失窗口留空；非结算费率，不按当前持仓反推过去历史。';
+    if (data?.legacyHistory) hintEl.textContent += ' 旧三家历史已单独保留，新增四家历史从升级后完整采样开始，两种口径不混用。';
     const fp = `${weightedInterval}|${JSON.stringify(history)}`;
     if (weightedFingerprint !== fp) {
         weightedFingerprint = fp;

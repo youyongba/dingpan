@@ -106,9 +106,10 @@ function weightedFixture() {
     const time = 1700000000000;
     const bar = { time, open: 0.0001, high: 0.0001, low: 0.000097, close: 0.000097,
         firstSampleAt: time, lastSampleAt: time + 90000, samples: 2 };
-    return { fresh: true, current: { rate: 0.000097, totalOpenInterestUsd: 3e9, observedAt: time,
-        sources: ['Binance', 'Bybit', 'OKX'].map(exchange => ({
-            exchange, rate8h: 0.000097, openInterestUsd: 1e9, weight: 1 / 3
+    return { fresh: true, venues: ['Binance', 'Bybit', 'OKX', 'Hyperliquid'],
+        current: { rate: 0.000097, totalOpenInterestUsd: 4e9, observedAt: time,
+        sources: ['Binance', 'Bybit', 'OKX', 'Hyperliquid'].map(exchange => ({
+            exchange, rate8h: 0.000097, openInterestUsd: 1e9, weight: 1 / 4
         })) }, history8h: [bar], history1h: [{ ...bar, time: time + 3600000 }], errors: [] };
 }
 
@@ -119,7 +120,19 @@ test('加权指标按截图显示0.0097而非误乘或误用原始小数', () =>
     assert.match(html, /rate-primary">0\.00970000/);
     assert.match(html, /0\.009700%/);
     assert.match(html, /原始小数 0\.00009700/);
-    assert.match(h.elements.get('weightedFundingSources').innerHTML, /33\.33%/);
+    assert.match(h.elements.get('weightedFundingSources').innerHTML, /25\.00%/);
+    assert.match(h.elements.get('weightedFundingSources').innerHTML, /Hyperliquid/);
+    assert.match(h.elements.get('weightedFundingStatus').textContent, /固定覆盖 4 家/);
+});
+
+test('三家旧历史保留提示，不把旧口径加入新的四家close图表', () => {
+    const h = harness();
+    const data = weightedFixture();
+    data.legacyHistory = { venues: ['Binance', 'Bybit', 'OKX'], history8h: [{ time: 1, close: 1 }] };
+    h.renderWeightedFunding(data);
+    assert.match(h.elements.get('weightedFundingHistoryHint').textContent, /旧三家历史已单独保留/);
+    assert.equal(h.instances.chartWeightedFunding.options[0].series[0].data.length, 1);
+    assert.ok(Math.abs(h.instances.chartWeightedFunding.options[0].series[0].data[0][1] - 0.0097) < 1e-15);
 });
 
 test('加权图仅绘制真实close柱，保持百分比数值口径且不平滑插值', () => {
