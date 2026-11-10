@@ -23,6 +23,30 @@ let lastMinuteStamp = 0;
 let deltaUpdatedAt = 0;
 let deltaUsdt = 0;
 const globalVolumeProfile = new Map();
+let deltaSocket = null;
+let deltaConnectionStartedAt = 0;
+const deltaStreamState = { connected: false, market: null, lastTradeAt: 0, tradeCount: 0, error: null };
+
+function getDeltaStreamStatus() {
+    return {
+        ...deltaStreamState,
+        fresh: deltaStreamState.connected && deltaStreamState.tradeCount > 0 &&
+            Date.now() - deltaStreamState.lastTradeAt < 5000
+    };
+}
+
+function buildDeltaAgent() {
+    const proxy = process.env.HTTPS_PROXY || process.env.https_proxy ||
+        process.env.ALL_PROXY || process.env.all_proxy ||
+        process.env.HTTP_PROXY || process.env.http_proxy;
+    if (!proxy) return httpsAgent;
+    if (/^socks/i.test(proxy)) {
+        const { SocksProxyAgent } = require('socks-proxy-agent');
+        return new SocksProxyAgent(proxy);
+    }
+    const { HttpsProxyAgent } = require('https-proxy-agent');
+    return new HttpsProxyAgent(proxy);
+}
 
 let botSignalState = {
     longRsiHitTime: 0,
@@ -46,9 +70,33 @@ let globalRsiOverboughtTime = 0;
 // 1. 后端实时监听微观订单流 (脱离浏览器也能运行)
 function initBackendDeltaWS(getEngineConfig) {
     const mode = getEngineConfig().tradeMode;
-    const host = mode === 'futures' ? 'fstream.binance.com' : 'stream.binance.com:9443';
-    const ws = new WebSocket(`wss://${host}/stream?streams=btcusdt@aggTrade`, { agent: httpsAgent });
-    ws.on('open', () => console.log('[SpotAutoBot] WS Connected for Backend Delta tracking'));
+    const base = mode === 'futures' ? 'wss://fstream.binance.com/market' : 'wss://stream.binance.com:9443';
+    if (deltaStreamState.market !== mode) {
+        currentPrice = 0;
+        priceUpdatedAt = 0;
+        currentMinuteDelta = 0;
+        deltaUsdt = 0;
+        deltaUpdatedAt = 0;
+        globalVolumeProfile.clear();
+    }
+    Object.assign(deltaStreamState, { connected: false, market: mode, lastTradeAt: 0, tradeCount: 0, error: null });
+    deltaConnectionStartedAt = Date.now();
+    let ws;
+    try {
+        ws = new WebSocket(`${base}/stream?streams=btcusdt@aggTrade`, {
+            agent: buildDeltaAgent(), handshakeTimeout: 15000
+        });
+    } catch (e) {
+        deltaStreamState.error = e.message;
+        console.error('[SpotAutoBot] Delta connection failed:', e.message);
+        setTimeout(() => initBackendDeltaWS(getEngineConfig), 3000);
+        return;
+    }
+    deltaSocket = ws;
+    ws.on('open', () => {
+        deltaStreamState.connected = true;
+        console.log(`[SpotAutoBot] ${mode} Delta WS connected; waiting for trades`);
+    });
     ws.on('message', (data) => {
         try {
             if (getEngineConfig().tradeMode !== mode) {
@@ -67,7 +115,11 @@ function initBackendDeltaWS(getEngineConfig) {
 
             const price = parseFloat(parsed.p);
             const qty = parseFloat(parsed.q);
-            if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(qty) || qty <= 0) return;
+            if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(qty) || qty <= 0 ||
+                typeof parsed.m !== 'boolean') return;
+            deltaStreamState.lastTradeAt = Date.now();
+            deltaStreamState.tradeCount++;
+            deltaStreamState.error = null;
             const isSell = parsed.m;
             currentPrice = price;
             priceUpdatedAt = Date.now();
@@ -103,17 +155,27 @@ function initBackendDeltaWS(getEngineConfig) {
                 }
             }
             wakeRiskCheck();
-        } catch (e) {}
+        } catch (e) {
+            deltaStreamState.error = 'Invalid trade message';
+        }
     });
-    ws.on('error', (e) => console.error('[SpotAutoBot] WS Error:', e.message));
-    ws.on('close', () => setTimeout(() => initBackendDeltaWS(getEngineConfig), 3000));
+    ws.on('error', (e) => {
+        deltaStreamState.error = e.message;
+        console.error('[SpotAutoBot] WS Error:', e.message);
+    });
+    ws.on('close', () => {
+        deltaStreamState.connected = false;
+        deltaSocket = null;
+        setTimeout(() => initBackendDeltaWS(getEngineConfig), 3000);
+    });
 }
 
 // 下单确认与本地状态提交之间保留订单意图；重启后不盲目重复下单。
-function beginOrder(targetState, kind, label) {
+function beginOrder(targetState, kind, label, metadata = {}) {
     if (targetState.pendingOrder) throw new Error('存在未核对订单，禁止重复下单');
     targetState.pendingOrder = {
-        kind, label, clientOrderId: `sdca_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`
+        ...metadata, kind, label, createdAt: Date.now(), before: { ...targetState },
+        clientOrderId: `sdca_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`
     };
     tradeRevision++;
     if (onStateChangeCallback) onStateChangeCallback();
@@ -122,7 +184,10 @@ function beginOrder(targetState, kind, label) {
 
 function confirmedFill(res) {
     const qty = Number(res.executedQty);
-    const quote = Number(res.cumQuote || res.cumQuoteQty || res.cummulativeQuoteQty);
+    // Futures RESULT/query responses can supply avgPrice instead of a usable quote total.
+    // Never use the requested price or quantity as evidence of a fill.
+    const quote = [res.cumQuote, res.cumQuoteQty, res.cummulativeQuoteQty,
+        qty * Number(res.avgPrice)].map(Number).find(value => Number.isFinite(value) && value > 0);
     if (res.status !== 'FILLED' || !Number.isFinite(qty) || qty <= 0 ||
         !Number.isFinite(quote) || quote <= 0) {
         throw new Error('订单尚未确认完全成交，需核对订单后恢复交易');
@@ -130,10 +195,50 @@ function confirmedFill(res) {
     return { qty, quote };
 }
 
+async function queryOrder(clientOrderId, market) {
+    if (!SPOT_API_KEY || !SPOT_API_SECRET) throw new Error('Missing API Keys in .env');
+    if (!clientOrderId || !['spot', 'futures'].includes(market)) throw new Error('无效的订单核对参数');
+    const queryString = `symbol=BTCUSDT&origClientOrderId=${encodeURIComponent(clientOrderId)}&recvWindow=60000&timestamp=${Date.now()}`;
+    const signature = crypto.createHmac('sha256', SPOT_API_SECRET).update(queryString).digest('hex');
+    const base = market === 'futures' ? 'https://fapi.binance.com/fapi/v1/order' : 'https://api.binance.com/api/v3/order';
+    const res = await axios.get(`${base}?${queryString}&signature=${signature}`, {
+        headers: { 'X-MBX-APIKEY': SPOT_API_KEY }, httpAgent, httpsAgent, timeout: 5000
+    });
+    if (res.data.clientOrderId !== clientOrderId || res.data.symbol !== 'BTCUSDT') {
+        throw new Error('核对响应与原订单不匹配');
+    }
+    return res.data;
+}
+
+function isDefiniteRejection(error) {
+    return error.response?.status >= 400 && error.response.status < 500 &&
+        error.response.data?.code && ![-1006, -1007].includes(Number(error.response.data.code));
+}
+
+async function resolveSubmittedOrder(submit, clientOrderId, market) {
+    try {
+        const res = await submit;
+        confirmedFill(res.data);
+        return res.data;
+    } catch (error) {
+        if (isDefiniteRejection(error)) throw error;
+        if (clientOrderId) {
+            try {
+                const order = await queryOrder(clientOrderId, market);
+                confirmedFill(order);
+                return order;
+            } catch (lookupError) {
+                // A failed lookup is not a rejection of the submitted order.
+                console.error('[SpotAutoBot] Order confirmation pending:', clientOrderId, lookupError.message);
+            }
+        }
+        throw new Error(`订单成交待核对，系统将查询原单，不会重复下单: ${error.message}`);
+    }
+}
+
 function rejectOrder(targetState, error) {
     // 明确的业务拒绝可以重试；超时、断网、5xx不能假定没有成交。
-    if (error.response?.status >= 400 && error.response.status < 500 &&
-        error.response.data?.code && ![-1006, -1007].includes(error.response.data.code)) {
+    if (isDefiniteRejection(error)) {
         delete targetState.pendingOrder;
     }
     if (onStateChangeCallback) onStateChangeCallback();
@@ -153,11 +258,10 @@ async function executeRealOrder(side, quantity, quoteOrderQty, clientOrderId) {
     const signature = crypto.createHmac('sha256', SPOT_API_SECRET).update(queryString).digest('hex');
     const url = `https://api.binance.com/api/v3/order?${queryString}&signature=${signature}`;
 
-    const res = await axios.post(url, null, {
+    return resolveSubmittedOrder(axios.post(url, null, {
         headers: { 'X-MBX-APIKEY': SPOT_API_KEY },
         httpAgent, httpsAgent, timeout: 10000
-    });
-    return res.data;
+    }), clientOrderId, 'spot');
 }
 
 // 2.5 真实合约下单 API 与杠杆设置
@@ -192,11 +296,10 @@ async function executeFuturesOrder(side, quantity, positionSide = '', clientOrde
     const signature = crypto.createHmac('sha256', SPOT_API_SECRET).update(queryString).digest('hex');
     const url = `https://fapi.binance.com/fapi/v1/order?${queryString}&signature=${signature}`;
 
-    const res = await axios.post(url, null, {
+    return resolveSubmittedOrder(axios.post(url, null, {
         headers: { 'X-MBX-APIKEY': SPOT_API_KEY },
         httpAgent, httpsAgent, timeout: 10000
-    });
-    return res.data;
+    }), clientOrderId, 'futures');
 }
 
 // 3. 核心策略状态机轮询
@@ -447,7 +550,7 @@ function startBotLoop(getEngineConfig, getEngineState) {
                             
                             const side = isLongTrade ? 'BUY' : 'SELL';
                             const posSide = isLongTrade ? 'LONG' : 'SHORT';
-                            const id = beginOrder(targetState, 'entry', actionLabel);
+                            const id = beginOrder(targetState, 'entry', actionLabel, { market: config.tradeMode });
                             const res = await executeFuturesOrder(side, qtyToBuy, posSide, id);
                             const fill = confirmedFill(res);
                             executedQty = fill.qty;
@@ -455,7 +558,7 @@ function startBotLoop(getEngineConfig, getEngineState) {
                         } else {
                             if (!isLongTrade) throw new Error('现货模式不支持做空!');
                             const currentStepUsdt = config.dcaAmount * Math.pow(multiplier, targetState.activeDcaCount);
-                            const id = beginOrder(targetState, 'entry', actionLabel);
+                            const id = beginOrder(targetState, 'entry', actionLabel, { market: config.tradeMode });
                             const res = await executeRealOrder('BUY', null, currentStepUsdt, id);
                             const fill = confirmedFill(res);
                             executedQty = fill.qty;
@@ -579,7 +682,7 @@ function startBotLoop(getEngineConfig, getEngineState) {
                     if (closeQty <= 0) return false;
                     botSignalState.isExecuting = true;
                     try {
-                        const id = beginOrder(targetState, 'close', label);
+                        const id = beginOrder(targetState, 'close', label, { market: config.tradeMode });
                         let fill;
                         if (config.tradeMode === 'futures') {
                             const side = isLongTrade ? 'SELL' : 'BUY';
@@ -702,6 +805,17 @@ function startBotLoop(getEngineConfig, getEngineState) {
     initBackendDeltaWS(getEngineConfig);
     setInterval(() => runTick(), 2000);
     setInterval(pollPrice, 1000);
+    setInterval(() => {
+        if (!deltaSocket) return;
+        const lastActivity = deltaStreamState.lastTradeAt || deltaConnectionStartedAt;
+        if (getEngineConfig().tradeMode !== deltaStreamState.market ||
+            Date.now() - lastActivity > 30000) {
+            deltaStreamState.connected = false;
+            deltaStreamState.error = 'Trade stream stale; reconnecting';
+            console.error('[SpotAutoBot] Delta stream stale or market changed; reconnecting');
+            deltaSocket.terminate();
+        }
+    }, 5000);
     void pollPrice();
 }
 
@@ -737,7 +851,8 @@ module.exports = {
     executeFuturesOrder, 
     setApiKeys, 
     getCurrentPrice: () => currentPrice,
-    getDeltaUsdt: () => deltaUsdt,
+    getDeltaUsdt: () => Math.floor(Date.now() / 60000) === lastMinuteStamp ? deltaUsdt : 0,
+    getDeltaStreamStatus,
     getGlobalVpoc: () => Array.from(globalVolumeProfile.entries()),
     notifyManualTrade,
     setOnStateChangeCallback,
@@ -745,5 +860,6 @@ module.exports = {
     getTradeRevision: () => tradeRevision,
     beginOrder,
     confirmedFill,
+    queryOrder,
     rejectOrder
 };

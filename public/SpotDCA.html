@@ -879,8 +879,18 @@
                         deltaValEl.textContent = (deltaUsdt > 0 ? '+' : '') + (deltaUsdt / 1000000).toFixed(2) + 'M USDT';
                         deltaValEl.className = deltaUsdt >= 0 ? 'font-mono text-green' : 'font-mono text-red';
                         
-                        // Check Pattern
-                        if (deltaUsdt < 0 && Math.abs(deltaUsdt) > (currentConfig.deltaThreshold || 2500000)) {
+                        const stream = data.deltaStream;
+                        // A zero Delta does not prove that the upstream trade stream is connected.
+                        if (!stream?.fresh) {
+                            document.getElementById('ui-pattern-box').innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>等待实时成交数据...</span>';
+                            document.getElementById('ui-pattern-box').className = 'flex items-center gap-2 text-gray-500';
+                            document.getElementById('ui-pattern-desc').textContent = '订单流数据未就绪，暂不识别形态';
+                            document.getElementById('ui-delta-msg').textContent = !stream
+                                ? '成交流状态未知，请更新后端'
+                                : !stream.connected ? '成交流连接中，正在重试...'
+                                : stream.tradeCount === 0 ? '已连接，等待首笔成交...'
+                                : '成交数据已停滞，正在恢复...';
+                        } else if (deltaUsdt < 0 && Math.abs(deltaUsdt) > (currentConfig.deltaThreshold || 2500000)) {
                             document.getElementById('ui-pattern-box').innerHTML = '<i class="fa-solid fa-shield-halved"></i><span>检测到冰山吸收 (空头力竭)</span>';
                             document.getElementById('ui-pattern-box').className = 'flex items-center gap-2 text-green';
                             document.getElementById('ui-pattern-desc').textContent = 'Delta 持续为负，但价格未破买方 vPOC';
@@ -894,7 +904,7 @@
                             document.getElementById('ui-pattern-box').innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>正在监控订单流微观结构...</span>';
                             document.getElementById('ui-pattern-box').className = 'flex items-center gap-2 text-gray-500';
                             document.getElementById('ui-pattern-desc').textContent = '等待激进吃单...';
-                            document.getElementById('ui-delta-msg').textContent = '数据流已连接，等待成交...';
+                            document.getElementById('ui-delta-msg').textContent = '成交实时更新，Delta 未达阈值';
                         }
                     }
                     
@@ -1238,7 +1248,7 @@
                         ${refreshBtnHtml}
                     </div>
                     <div class="space-y-2">
-                        ${stateObj?.pendingOrder ? '<div class="p-2 text-red-400 text-sm">存在未确认订单，已暂停该方向下单，请核对交易所成交记录。</div>' : ''}
+                        ${stateObj?.pendingOrder ? '<div class="p-2 text-red-400 text-sm">订单成交待核对，系统正在查询原订单；确认后自动恢复托管，不会重复下单。</div>' : ''}
                         ${getTpRowHtml(1, label1, tp1Price, isTracked && stateObj?.tp1Fired)}
                         ${getTpRowHtml(2, label2, tp2Price, isTracked && stateObj?.tp2Fired)}
                         ${getTpRowHtml(3, label3, tp3Price, isTracked && stateObj?.tp3Fired)}

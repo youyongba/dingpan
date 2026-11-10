@@ -19,9 +19,11 @@ function harness(overrides = {}) {
     let indicators = { rsi: [50, 50, 99], macd: [-1, -1, 2], signal: [0, 0, 0] };
     let failIndicators = false;
     let response;
+    let lookup;
     let tickerPrice = 0;
     const intervals = [];
     const orders = [];
+    const queries = [];
     const snapshots = [];
     const sockets = [];
     const config = { tradeMode: 'futures', signalWindow: 12, requireMacd: true, triggerMtf: true,
@@ -33,12 +35,21 @@ function harness(overrides = {}) {
         isLongBotRunning: false, isShortBotRunning: false, ...overrides.state };
     class Socket extends EventEmitter {
         constructor(url) { super(); this.url = url; sockets.push(this); }
+        terminate() { this.terminated = true; this.emit('close'); }
+        close() { this.emit('close'); }
     }
     class Clock extends Date {
         constructor(...args) { super(...(args.length ? args : [now])); }
         static now() { return now; }
     }
-    const axios = { get: async () => ({ data: { price: tickerPrice } }), post: async url => {
+    const axios = { get: async url => {
+        if (url.includes('origClientOrderId=')) {
+            const params = new URL(url).searchParams;
+            queries.push(params);
+            if (lookup) return { data: await lookup(params) };
+        }
+        return { data: { price: tickerPrice } };
+    }, post: async url => {
         if (url.includes('/leverage?')) return { data: {} };
         const params = new URL(url).searchParams;
         orders.push(params);
@@ -67,13 +78,15 @@ function harness(overrides = {}) {
     bot.setOnStateChangeCallback(() => snapshots.push(JSON.parse(JSON.stringify(state))));
     bot.startBotLoop(() => config, () => state);
     return {
-        bot, state, config, orders, snapshots, sockets,
+        bot, state, config, orders, queries, snapshots, sockets,
         advance(ms) { now += ms; },
         setIndicators(rsi, macd) { indicators = { rsi: [50, rsi, 99], macd: [0, macd, 2], signal: [0, 0, 0] }; },
         failIndicators() { failIndicators = true; },
         respond(fn) { response = fn; },
+        respondLookup(fn) { lookup = fn; },
         setTickerPrice(price) { tickerPrice = price; },
         pollPrice: () => intervals[1](),
+        checkStream: () => intervals[2](),
         tick: () => intervals[0](),
         async price(price) {
             sockets[0].emit('message', JSON.stringify({ data: { p: String(price), q: '1', m: false } }));
@@ -81,6 +94,83 @@ function harness(overrides = {}) {
         }
     };
 }
+
+test('FILLED futures responses use executed quantity and avgPrice when quote fields are zero or absent', () => {
+    const h = harness();
+    for (const extra of [{}, { cumQuote: '0' }, { cumQuote: '0', cumQuoteQty: '600' }]) {
+        const fill = h.bot.confirmedFill({ status: 'FILLED', executedQty: '0.01', avgPrice: '60000', ...extra });
+        assert.equal(fill.qty, 0.01);
+        assert.equal(fill.quote, 600);
+    }
+    assert.throws(() => h.bot.confirmedFill({ status: 'NEW', executedQty: '0.01', avgPrice: '60000' }));
+    assert.throws(() => h.bot.confirmedFill({ status: 'FILLED', executedQty: '0', avgPrice: '60000' }));
+    assert.throws(() => h.bot.confirmedFill({ status: 'FILLED', executedQty: '0.01', price: '60000' }));
+});
+
+test('ACK or submission timeout is confirmed by querying the original ID, with only one POST', async () => {
+    for (const timeout of [false, true]) {
+        const h = harness({ state: { long: position(0.01) } });
+        h.respond(() => {
+            if (timeout) throw new Error('ETIMEDOUT');
+            return { status: 'NEW', executedQty: '0' };
+        });
+        h.respondLookup(params => ({
+            symbol: 'BTCUSDT', clientOrderId: params.get('origClientOrderId'),
+            status: 'FILLED', executedQty: '0.005', avgPrice: '101'
+        }));
+        await h.price(101);
+        assert.equal(h.state.long.tp1Fired, true);
+        assert.equal(h.state.long.pendingOrder, undefined);
+        assert.equal(h.orders.length, 1);
+        assert.equal(h.queries.length, 1);
+        assert.equal(h.queries[0].get('origClientOrderId'), h.orders[0].get('newClientOrderId'));
+    }
+});
+
+test('failed lookup after ambiguous submission must retain the intent, even on a 4xx lookup error', async () => {
+    const h = harness({ state: { short: position(0.01) } });
+    h.respond(() => { throw new Error('ETIMEDOUT'); });
+    h.respondLookup(() => { throw Object.assign(new Error('Order does not exist yet'),
+        { response: { status: 400, data: { code: -2013 } } }); });
+    await h.price(99);
+    assert.ok(h.state.short.pendingOrder);
+    assert.equal(h.state.short.totalCoinAmount, 0.01);
+    assert.equal(h.orders.length, 1);
+});
+
+test('trade stream uses market route for futures and spot route for spot', async () => {
+    const futures = harness();
+    assert.equal(futures.sockets[0].url, 'wss://fstream.binance.com/market/stream?streams=btcusdt@aggTrade');
+    assert.equal(futures.bot.getDeltaStreamStatus().fresh, false);
+    futures.sockets[0].emit('open');
+    assert.equal(futures.bot.getDeltaStreamStatus().fresh, false);
+    await futures.price(100);
+    assert.equal(futures.bot.getDeltaStreamStatus().fresh, true);
+    assert.equal(futures.bot.getDeltaStreamStatus().tradeCount, 1);
+    assert.equal(futures.bot.getDeltaUsdt(), 100);
+    assert.equal(futures.bot.getGlobalVpoc().length, 1);
+    const spot = harness({ config: { tradeMode: 'spot' } });
+    assert.equal(spot.sockets[0].url, 'wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade');
+});
+
+test('silent trade socket is unhealthy and reconnects; expired minute Delta is zero', async () => {
+    const h = harness();
+    h.sockets[0].emit('open');
+    await h.price(100);
+    h.advance(61000);
+    assert.equal(h.bot.getDeltaStreamStatus().fresh, false);
+    assert.equal(h.bot.getDeltaUsdt(), 0);
+    h.checkStream();
+    assert.equal(h.sockets[0].terminated, true);
+    assert.equal(h.bot.getDeltaStreamStatus().connected, false);
+});
+
+test('market switch reconnects even when the previous socket sends no trades', () => {
+    const h = harness();
+    h.config.tradeMode = 'spot';
+    h.checkStream();
+    assert.equal(h.sockets[0].terminated, true);
+});
 
 test('closed switches: TP1, TP2, rebound stop and flags are saved together', async () => {
     const h = harness({ state: { short: position(0.01) } });
@@ -260,6 +350,146 @@ test('front-end keeps completed TP flags and stop visible with auto switches off
     for (const match of html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)) {
         new vm.Script(match[1]);
     }
+});
+
+function recoveryEngineHarness(saved, h) {
+    let savedText;
+    const fakeFs = {
+        existsSync: () => true, readFileSync: () => JSON.stringify(saved),
+        openSync: () => 1, writeFileSync: (fd, text) => { savedText = text; },
+        fsyncSync() {}, closeSync() {}, renameSync() {}
+    };
+    const intervals = [];
+    const routes = new Map();
+    const router = { get() {}, post(name, ...handlers) { routes.set(name, handlers.at(-1)); } };
+    class Server extends EventEmitter { constructor() { super(); this.clients = []; } }
+    const bot = { ...h.bot, startBotLoop() {} };
+    const sandbox = {
+        module: { exports: {} }, __dirname: root,
+        process: { env: { BINANCE_API_KEY: 'test', BINANCE_API_SECRET: 'test' }, cwd: () => root },
+        console: { log() {}, error() {} }, setInterval: fn => intervals.push(fn),
+        require: name => {
+            if (name === 'fs') return fakeFs;
+            if (name === 'express') return { Router: () => router, json: () => () => {} };
+            if (name === 'dotenv') return { config: () => ({ parsed: {} }) };
+            if (name === 'axios') return { get: async () => ({ data: [] }) };
+            if (name === './spotAutoBot') return bot;
+            if (name === './lib/spotOrderRecovery') return require('../lib/spotOrderRecovery');
+            if (name === './regimeModule') return { getState: () => ({ indicators: { atr: [400] } }) };
+            if (name === 'ws') return { Server };
+            if (name.startsWith('./')) return {};
+            return require(name);
+        }
+    };
+    vm.runInNewContext(fs.readFileSync(path.join(root, 'spotDcaEngine.js'), 'utf8'), sandbox);
+    return {
+        state: sandbox.module.exports.getState(), routes,
+        reconcile: () => intervals.at(-1)(),
+        persisted: () => savedText && JSON.parse(savedText)
+    };
+}
+
+test('manual short FILLED with avgPrice is tracked immediately, without a second order', async () => {
+    const h = harness();
+    await h.price(76000);
+    h.respond(params => ({ status: 'FILLED', executedQty: params.get('quantity'), avgPrice: '76000', cumQuote: '0' }));
+    const e = recoveryEngineHarness({ config: { tradeMode: 'futures' } }, h);
+    const res = { json(body) { this.body = body; }, status(code) { this.code = code; return this; } };
+    await e.routes.get('/override')({ body: { action: 'market-buy-short', amount: 700 } }, res);
+    assert.equal(res.body.ok, true);
+    assert.equal(e.state.short.pendingOrder, undefined);
+    assert.equal(e.state.short.totalCoinAmount, 0.009);
+    assert.equal(e.state.short.averagePrice, 76000);
+    assert.equal(e.persisted().positions.short.activeDcaCount, 1);
+    assert.equal(h.orders.length, 1);
+});
+
+test('startup recovers a legacy pending manual short by original ID, persists it and never POSTs', async () => {
+    const h = harness();
+    const pending = { clientOrderId: 'sdca_legacy', kind: 'entry', label: 'manual' };
+    h.respondLookup(() => ({ clientOrderId: pending.clientOrderId, symbol: 'BTCUSDT',
+        side: 'SELL', positionSide: 'SHORT', status: 'FILLED', executedQty: '0.009', avgPrice: '76000' }));
+    const e = recoveryEngineHarness({ config: { tradeMode: 'futures' },
+        positions: { short: { ...empty(), pendingOrder: pending } } }, h);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(e.state.short.pendingOrder, undefined);
+    assert.equal(e.state.short.totalCoinAmount, 0.009);
+    assert.equal(e.state.short.totalUsdtAmount, 684);
+    assert.equal(e.state.short.averagePrice, 76000);
+    assert.equal(e.state.short.activeDcaCount, 1);
+    assert.equal(e.persisted().positions.short.pendingOrder, undefined);
+    assert.ok(e.state.short.lastDcaTime > 0);
+    await e.reconcile();
+    assert.equal(e.state.short.activeDcaCount, 1);
+    assert.equal(h.orders.length, 0);
+    assert.equal(h.queries.length, 1);
+});
+
+test('recovery restores pre-order accounting once, including TP1 and breakeven protection', async () => {
+    const h = harness();
+    const before = position(0.01);
+    const pending = { clientOrderId: 'sdca_tp1', kind: 'close', label: 'TP1', market: 'futures', before };
+    h.respondLookup(() => ({ clientOrderId: pending.clientOrderId, symbol: 'BTCUSDT',
+        side: 'SELL', positionSide: 'LONG', status: 'FILLED', executedQty: '0.005', avgPrice: '101' }));
+    const e = recoveryEngineHarness({ config: { tradeMode: 'futures', breakevenSl: true },
+        positions: { long: { ...before, pendingOrder: pending } } }, h);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(e.state.long.totalCoinAmount, 0.005);
+    assert.equal(e.state.long.totalUsdtAmount, 0.5);
+    assert.equal(e.state.long.tp1Fired, true);
+    assert.equal(e.state.long.slMoved, true);
+    assert.equal(e.persisted().positions.long.tp1Fired, true);
+    await e.reconcile();
+    assert.equal(e.state.long.totalCoinAmount, 0.005);
+    assert.equal(h.orders.length, 0);
+});
+
+test('partial, unknown and mismatched recovered orders remain paused without guessing the position', async () => {
+    for (const extra of [{ status: 'PARTIALLY_FILLED' }, { positionSide: 'LONG' }, { clientOrderId: 'other' }]) {
+        const h = harness();
+        const pending = { clientOrderId: 'sdca_uncertain', kind: 'entry', label: 'manual' };
+        h.respondLookup(() => ({ clientOrderId: pending.clientOrderId, symbol: 'BTCUSDT',
+            side: 'SELL', positionSide: 'SHORT', status: 'FILLED', executedQty: '0.009',
+            avgPrice: '76000', ...extra }));
+        const e = recoveryEngineHarness({ config: { tradeMode: 'futures' },
+            positions: { short: { ...empty(), pendingOrder: pending } } }, h);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.ok(e.state.short.pendingOrder);
+        assert.equal(e.state.short.totalCoinAmount, 0);
+        assert.equal(h.orders.length, 0);
+    }
+});
+
+test('terminal order with zero fills releases the intent without creating a position', async () => {
+    const h = harness();
+    const pending = { clientOrderId: 'sdca_canceled', kind: 'entry', label: 'manual' };
+    h.respondLookup(() => ({ clientOrderId: pending.clientOrderId, symbol: 'BTCUSDT',
+        status: 'CANCELED', executedQty: '0' }));
+    const e = recoveryEngineHarness({ config: { tradeMode: 'futures' },
+        positions: { short: { ...empty(), pendingOrder: pending } } }, h);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(e.state.short.pendingOrder, undefined);
+    assert.equal(e.state.short.totalCoinAmount, 0);
+    assert.ok(e.state.short.retryAfter > Date.now());
+    assert.equal(e.persisted().positions.short.pendingOrder, undefined);
+    assert.equal(h.orders.length, 0);
+});
+
+test('failed startup lookup can recover on the next check without submitting another order', async () => {
+    const h = harness();
+    const pending = { clientOrderId: 'sdca_retry', kind: 'entry', label: 'manual' };
+    h.respondLookup(() => { throw new Error('ETIMEDOUT'); });
+    const e = recoveryEngineHarness({ config: { tradeMode: 'futures' },
+        positions: { short: { ...empty(), pendingOrder: pending } } }, h);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(e.state.short.pendingOrder);
+    h.respondLookup(() => ({ clientOrderId: pending.clientOrderId, symbol: 'BTCUSDT',
+        side: 'SELL', positionSide: 'SHORT', status: 'FILLED', executedQty: '0.009', avgPrice: '76000' }));
+    await e.reconcile();
+    assert.equal(e.state.short.pendingOrder, undefined);
+    assert.equal(e.state.short.totalCoinAmount, 0.009);
+    assert.equal(e.state.short.activeDcaCount, 1);
+    assert.equal(h.orders.length, 0);
 });
 
 test('engine restores positions after initialization and saves atomically', () => {

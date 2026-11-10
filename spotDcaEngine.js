@@ -6,8 +6,9 @@ const fs = require('fs');
 const dataFile = path.join(__dirname, 'spotDcaData.json');
 const mtfModule = require('./mtfModule');
 const regimeModule = require('./regimeModule');
+const { recoverPosition } = require('./lib/spotOrderRecovery');
 
-const { startBotLoop, executeRealOrder, executeFuturesOrder, getCurrentPrice, getDeltaUsdt, getGlobalVpoc, notifyManualTrade, setOnStateChangeCallback, beginOrder, confirmedFill, rejectOrder } = require('./spotAutoBot');
+const { startBotLoop, executeRealOrder, executeFuturesOrder, getCurrentPrice, getDeltaUsdt, getDeltaStreamStatus, getGlobalVpoc, notifyManualTrade, setOnStateChangeCallback, beginOrder, confirmedFill, queryOrder, rejectOrder } = require('./spotAutoBot');
 
 // 强制使用绝对路径加载 .env，防止 PM2 工作目录 (cwd) 偏移导致找不到文件
 const envPath = path.resolve(__dirname, '.env');
@@ -163,6 +164,68 @@ refreshApiKeys();
 
 // 引入全局的代理配置 (复用主程序的代理)
 const { httpAgent, httpsAgent } = require('./lib/httpAgents');
+
+const recoveryLogTimes = new Map();
+async function reconcilePendingOrders() {
+    const { botSignalState } = require('./spotAutoBot');
+    if (botSignalState.isExecuting || !queryOrder ||
+        (!state.long.pendingOrder && !state.short.pendingOrder)) return;
+    botSignalState.isExecuting = true;
+    try {
+        for (const [direction, target] of [['long', state.long], ['short', state.short]]) {
+            const pending = target.pendingOrder;
+            if (!pending) continue;
+            const original = { ...target };
+            try {
+                const order = await queryOrder(pending.clientOrderId, pending.market || config.tradeMode);
+                if (target.pendingOrder !== pending) continue;
+                if (['CANCELED', 'EXPIRED', 'EXPIRED_IN_MATCH', 'REJECTED'].includes(order.status) &&
+                    Number(order.executedQty) === 0) {
+                    delete target.pendingOrder;
+                    target.retryAfter = Date.now() + 60000;
+                    saveData();
+                    state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 原订单已${order.status}且无成交，解除待核对状态`);
+                    continue;
+                }
+                const fill = confirmedFill(order);
+                let atr = 0;
+                try {
+                    const arr = regimeModule.getState()?.indicators?.atr;
+                    atr = arr?.[arr.length - 1] || 0;
+                } catch (e) {}
+                const recovered = recoverPosition(target, order, config, direction === 'long', fill, atr);
+                Object.assign(target, recovered);
+                delete target.pendingOrder;
+                notifyManualTrade(direction === 'long', pending.kind === 'entry' ? target : undefined);
+                // Clear persisted entry signals as well as the in-memory signal state.
+                if (state.signalMemory) {
+                    const isLong = direction === 'long';
+                    if (state.signalMemory.botSignalState) {
+                        state.signalMemory.botSignalState[isLong ? 'longRsiHitTime' : 'shortRsiHitTime'] = 0;
+                        state.signalMemory.botSignalState[isLong ? 'longMacdHitTime' : 'shortMacdHitTime'] = 0;
+                    }
+                    state.signalMemory[isLong ? 'globalRsiOversoldTime' : 'globalRsiOverboughtTime'] = 0;
+                    state.signalMemory[isLong ? 'globalMacdGoldenCrossTime' : 'globalMacdDeathCrossTime'] = 0;
+                }
+                saveData();
+                recoveryLogTimes.delete(pending.clientOrderId);
+                state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 原订单核对成功(${direction === 'long' ? '多头' : '空头'} ${pending.label}): 已成交 ${fill.qty} BTC，持仓记录已恢复`);
+                if (state.logs.length > 20) state.logs.length = 20;
+                console.log('[SpotDCA] Reconciled order:', pending.clientOrderId, order.status, fill.qty);
+            } catch (e) {
+                // Restore the intent on lookup/commit failure; never issue a replacement order.
+                Object.assign(target, original);
+                const lastLog = recoveryLogTimes.get(pending.clientOrderId) || 0;
+                if (Date.now() - lastLog > 60000) {
+                    console.error('[SpotDCA] Order still pending:', pending.clientOrderId, e.message);
+                    recoveryLogTimes.set(pending.clientOrderId, Date.now());
+                }
+            }
+        }
+    } finally {
+        botSignalState.isExecuting = false;
+    }
+}
 
 // 获取账户余额 (包含现货与合约)
 async function fetchBalances() {
@@ -497,6 +560,7 @@ router.get('/status', (req, res) => {
     realIndicators,
     macroVpoc: macroVpocData,
     globalVpoc: getGlobalVpoc ? getGlobalVpoc() : [],
+    deltaStream: getDeltaStreamStatus ? getDeltaStreamStatus() : null,
     hasAuthToken: !!CONFIG_AUTH_TOKEN, // 告诉前端服务端是否需要鉴权
     hasApiKeys: !!SPOT_API_KEY && !!SPOT_API_SECRET, // 告诉前端是否已经配置了 API Keys
     price: getCurrentPrice ? getCurrentPrice() : 0,
@@ -629,7 +693,7 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
         
         const side = action === 'market-buy-short' ? 'SELL' : 'BUY';
         const posSide = action === 'market-buy-short' ? 'SHORT' : 'LONG';
-        const id = beginOrder(targetState, 'entry', 'manual');
+        const id = beginOrder(targetState, 'entry', 'manual', { market: config.tradeMode });
         const orderRes = await executeFuturesOrder(side, qtyToBuy, posSide, id);
         const fill = confirmedFill(orderRes);
         executedQty = fill.qty;
@@ -637,7 +701,7 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
       } else {
         if (action === 'market-buy-short') throw new Error('现货模式不支持做空');
         if (!amt || amt <= 0) throw new Error('无效的买入金额');
-        const id = beginOrder(targetState, 'entry', 'manual');
+        const id = beginOrder(targetState, 'entry', 'manual', { market: config.tradeMode });
         const orderRes = await executeRealOrder('BUY', null, amt, id);
         const fill = confirmedFill(orderRes);
         executedQty = fill.qty;
@@ -687,8 +751,8 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
     } catch (e) {
       const errorMsg = e.response ? JSON.stringify(e.response.data) : e.message;
       console.error('[Override Error] BUY/SELL failed:', errorMsg);
-      state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 开仓失败: ${errorMsg}`);
       rejectOrder(targetState, e);
+      state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] ${targetState.pendingOrder ? '开仓订单待核对（不会重复下单）' : '开仓失败'}: ${errorMsg}`);
       return res.status(502).json({ ok: false, error: errorMsg });
     }
   } else if (action === 'market-sell-long' || action === 'market-sell-short' || action === 'market-sell') {
@@ -698,7 +762,7 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
           if (action === 'market-sell-long' || action === 'market-sell') {
               if (state.long.totalCoinAmount > 0.00001) {
                   const closeLongQty = Math.floor(state.long.totalCoinAmount * 1000) / 1000;
-                  const id = beginOrder(state.long, 'close', 'manual');
+                  const id = beginOrder(state.long, 'close', 'manual', { market: config.tradeMode });
                   const fill = confirmedFill(await executeFuturesOrder('SELL', closeLongQty, 'LONG', id));
                   if (Math.abs(fill.qty - state.long.totalCoinAmount) > 1e-8) throw new Error('成交数量与清仓数量不一致，需要核对');
                   state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动平多成功: 平仓 ${closeLongQty} BTC`);
@@ -714,7 +778,7 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
           if (action === 'market-sell-short' || action === 'market-sell') {
               if (state.short.totalCoinAmount > 0.00001) {
                   const closeShortQty = Math.floor(state.short.totalCoinAmount * 1000) / 1000;
-                  const id = beginOrder(state.short, 'close', 'manual');
+                  const id = beginOrder(state.short, 'close', 'manual', { market: config.tradeMode });
                   const fill = confirmedFill(await executeFuturesOrder('BUY', closeShortQty, 'SHORT', id));
                   if (Math.abs(fill.qty - state.short.totalCoinAmount) > 1e-8) throw new Error('成交数量与清仓数量不一致，需要核对');
                   state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动平空成功: 平仓 ${closeShortQty} BTC`);
@@ -731,7 +795,7 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
           if (action === 'market-sell-short') throw new Error('现货模式不支持平空');
           if (state.long.totalCoinAmount > 0.00001) {
               const sellQty = Math.floor(state.long.totalCoinAmount * 100000) / 100000;
-              const id = beginOrder(state.long, 'close', 'manual');
+              const id = beginOrder(state.long, 'close', 'manual', { market: config.tradeMode });
               const fill = confirmedFill(await executeRealOrder('SELL', sellQty, null, id));
               if (Math.abs(fill.qty - state.long.totalCoinAmount) > 1e-8) throw new Error('成交数量与清仓数量不一致，需要核对');
               state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 手动现货清仓成功: 卖出 ${sellQty} BTC`);
@@ -783,6 +847,7 @@ function getFullPayload() {
         price: getCurrentPrice ? getCurrentPrice() : 0,
         mtfState: frontendMtfState,
         macroVpoc: macroVpocData,
+        deltaStream: getDeltaStreamStatus ? getDeltaStreamStatus() : null,
         globalVpoc: getGlobalVpoc ? getGlobalVpoc() : []
     };
 }
@@ -821,3 +886,5 @@ module.exports = {
 
 // 启动后端自动交易引擎 (传入获取状态的 getter)
 startBotLoop(module.exports.getConfig, module.exports.getState);
+void reconcilePendingOrders();
+setInterval(reconcilePendingOrders, 5000);
