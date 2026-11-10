@@ -317,6 +317,26 @@ test('max entry count cannot prevent TP protection', async () => {
     assert.equal(h.state.long.tp1Fired, true);
 });
 
+test('全平后的TP历史标记不锁死下一轮，已有TP1尾仓仍禁止加仓', async () => {
+    for (const hasTail of [false, true]) {
+        const long = hasTail ? { ...position(0.002), tp1Fired: true }
+            : { ...empty(), tp1Fired: true, tp2Fired: true, tp3Fired: true };
+        const h = harness({ state: { long, isLongBotRunning: true } });
+        h.setIndicators(50, -1);
+        await h.price(100.5);
+        h.advance(3600000);
+        h.setIndicators(20, -1);
+        await h.price(100.5);
+        await h.tick();
+        h.advance(3600000);
+        h.setIndicators(50, 1);
+        await h.price(100.5);
+        await h.tick();
+        assert.equal(h.orders.length, hasTail ? 0 : 1);
+        if (!hasTail) assert.equal(h.state.long.tp1Fired, false);
+    }
+});
+
 test('manual entry updates the persisted cooldown', () => {
     const h = harness();
     h.bot.notifyManualTrade(true, h.state.long);
@@ -335,7 +355,7 @@ test('REST price fallback protects a tail when WebSocket is silent', async () =>
 test('front-end keeps completed TP flags and stop visible with auto switches off', () => {
     const html = fs.readFileSync(path.join(root, 'public/SpotDCA.html'), 'utf8');
     const start = html.indexOf('const renderSingleTpPanel =');
-    const end = html.indexOf("if (currentConfig.tradeMode === 'futures' && currentState.futuresPositions", start);
+    const end = html.indexOf("if (currentConfig.tradeMode === 'futures' && futuresPositions", start);
     const sandbox = { module: { exports: {} }, currentConfig: { tpMode: 'percent',
         tp1: 50, tp2: 30, tp3: 20, tp1Target: 1, tp2Target: 3, tp3Target: 5, breakevenSl: true },
         currentRealIndicators: {} };

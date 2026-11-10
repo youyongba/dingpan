@@ -482,7 +482,7 @@ function startBotLoop(getEngineConfig, getEngineState) {
                 
             // --- C. 微观扳机扣动 (真实买入/做空) ---
             // 只有当自动机器人开关是打开的 (isBotRunning = true) 时，才允许开新仓或加仓
-            if (!exitsOnly && isBotRunning && isReady && !targetState.tp1Fired &&
+            if (!exitsOnly && isBotRunning && isReady && !(targetState.totalCoinAmount > 0 && targetState.tp1Fired) &&
                 now >= (targetState.retryAfter || 0) &&
                 (now - lastDcaTime > 60 * 60 * 1000) &&
                 now - priceUpdatedAt < 10000) {

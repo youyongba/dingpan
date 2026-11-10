@@ -166,19 +166,25 @@ refreshApiKeys();
 const { httpAgent, httpsAgent } = require('./lib/httpAgents');
 
 const recoveryLogTimes = new Map();
+let reconciliationBusy = false;
 async function reconcilePendingOrders() {
     const { botSignalState } = require('./spotAutoBot');
-    if (botSignalState.isExecuting || !queryOrder ||
+    if (reconciliationBusy || !queryOrder ||
         (!state.long.pendingOrder && !state.short.pendingOrder)) return;
-    botSignalState.isExecuting = true;
+    reconciliationBusy = true;
     try {
         for (const [direction, target] of [['long', state.long], ['short', state.short]]) {
             const pending = target.pendingOrder;
             if (!pending) continue;
-            const original = { ...target };
+            let original;
+            let commitLocked = false;
             try {
+                // Network lookups are read-only; keep the other side's exit monitor unlocked.
                 const order = await queryOrder(pending.clientOrderId, pending.market || config.tradeMode);
-                if (target.pendingOrder !== pending) continue;
+                if (target.pendingOrder !== pending || botSignalState.isExecuting) continue;
+                botSignalState.isExecuting = true;
+                commitLocked = true;
+                original = { ...target };
                 if (['CANCELED', 'EXPIRED', 'EXPIRED_IN_MATCH', 'REJECTED'].includes(order.status) &&
                     Number(order.executedQty) === 0) {
                     delete target.pendingOrder;
@@ -214,16 +220,18 @@ async function reconcilePendingOrders() {
                 console.log('[SpotDCA] Reconciled order:', pending.clientOrderId, order.status, fill.qty);
             } catch (e) {
                 // Restore the intent on lookup/commit failure; never issue a replacement order.
-                Object.assign(target, original);
+                if (original) Object.assign(target, original);
                 const lastLog = recoveryLogTimes.get(pending.clientOrderId) || 0;
                 if (Date.now() - lastLog > 60000) {
                     console.error('[SpotDCA] Order still pending:', pending.clientOrderId, e.message);
                     recoveryLogTimes.set(pending.clientOrderId, Date.now());
                 }
+            } finally {
+                if (commitLocked) botSignalState.isExecuting = false;
             }
         }
     } finally {
-        botSignalState.isExecuting = false;
+        reconciliationBusy = false;
     }
 }
 
@@ -289,6 +297,7 @@ async function fetchBalances() {
             positionSide: p.positionSide,
             leverage: p.leverage
         }));
+        state.futuresPositionsUpdatedAt = Date.now();
         
         // 自动纠正内存中的 DCA 状态 (双向隔离同步)
         if (config.tradeMode === 'futures' && !botSignalState.isExecuting && revision === getTradeRevision()) {
@@ -628,13 +637,36 @@ router.post('/config', express.json(), requireAdmin, (req, res) => {
       !['percent', 'atr_static', 'atr_dynamic'].includes(next.tpMode)) {
       return res.status(400).json({ ok: false, error: '策略参数无效，请检查止盈比例、目标顺序和仓位限制' });
   }
-  if (next.tradeMode !== config.tradeMode &&
+  // A legacy "spot" configuration can coexist with a recorded futures short.
+  // Repair that mismatch only after a fresh authenticated exchange snapshot matches every held side.
+  const canRepairFuturesMode = config.tradeMode === 'spot' && next.tradeMode === 'futures' &&
+      state.short.totalCoinAmount > 0 && !state.long.pendingOrder && !state.short.pendingOrder &&
+      state.futuresPositionsUpdatedAt > 0 && state.futuresPositionsUpdatedAt <= Date.now() &&
+      Date.now() - state.futuresPositionsUpdatedAt < 90000 &&
+      ['long', 'short'].every(side => {
+          const tracked = state[side];
+          if (!(tracked.totalCoinAmount > 0)) return true;
+          const remote = state.futuresPositions.find(pos => pos.positionSide === (side === 'long' ? 'LONG' : 'SHORT'));
+          return remote && remote.entryPrice > 0 && tracked.averagePrice > 0 &&
+              Math.abs(Math.abs(remote.positionAmt) - tracked.totalCoinAmount) < 1e-8 &&
+              Math.abs(remote.entryPrice - tracked.averagePrice) / tracked.averagePrice < 0.001;
+      });
+  if (next.tradeMode !== config.tradeMode && !canRepairFuturesMode &&
       (state.long.totalCoinAmount > 0 || state.short.totalCoinAmount > 0 ||
        state.long.pendingOrder || state.short.pendingOrder)) {
-      return res.status(409).json({ ok: false, error: '持仓期间不能切换现货和合约模式' });
+      const mismatch = config.tradeMode === 'spot' && state.short.totalCoinAmount > 0;
+      return res.status(409).json({ ok: false, error: mismatch
+          ? '当前现货配置与已记录空头不一致，需要新鲜交易所持仓核对后恢复合约模式；请检查 API 连接，不要删除存档'
+          : '持仓期间不能切换现货和合约模式' });
   }
+  const previous = config;
   config = next;
-  saveData();
+  try {
+      saveData();
+  } catch (e) {
+      config = previous;
+      return res.status(500).json({ ok: false, error: '策略存档失败，未应用新配置，请检查服务器文件权限和磁盘空间' });
+  }
   res.json({ ok: true, config });
 });
 
@@ -660,7 +692,10 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
   if (!['market-buy', 'market-buy-short', 'market-sell-long', 'market-sell-short', 'market-sell'].includes(action)) {
       return res.status(400).json({ ok: false, error: '未知操作' });
   }
-  if (state.long.pendingOrder || state.short.pendingOrder) {
+  const touchesLong = ['market-buy', 'market-sell-long', 'market-sell'].includes(action);
+  const touchesShort = ['market-buy-short', 'market-sell-short'].includes(action) ||
+      (action === 'market-sell' && config.tradeMode === 'futures');
+  if ((touchesLong && state.long.pendingOrder) || (touchesShort && state.short.pendingOrder)) {
       return res.status(409).json({ ok: false, error: '有未确认订单，必须先与交易所核对' });
   }
   
@@ -678,7 +713,7 @@ router.post('/override', express.json(), requireAdmin, async (req, res) => {
   if (action === 'market-buy' || action === 'market-buy-short') {
     const targetState = action === 'market-buy-short' ? state.short : state.long;
     try {
-      if (targetState.tp1Fired) throw new Error('止盈阶段禁止加仓，以保留尾仓保护');
+      if (targetState.totalCoinAmount > 0 && targetState.tp1Fired) throw new Error('止盈阶段禁止加仓，以保留尾仓保护');
       let amt = parseFloat(amount);
       let executedQty = 0;
       let cumQuote = 0;

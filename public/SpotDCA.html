@@ -22,6 +22,14 @@
         .bg-green-dim { background-color: rgba(14, 203, 129, 0.1); }
         .bg-red-dim { background-color: rgba(246, 70, 93, 0.1); }
         .progress-bar { transition: width 0.5s ease-in-out; }
+        .spot-header { flex-wrap: wrap; gap: 16px; }
+        .spot-toolbar { flex-wrap: wrap; gap: 12px; justify-content: flex-end; }
+        .spot-toolbar button { flex-shrink: 0; }
+        @media (max-width: 1023px), (max-height: 650px) {
+            body { height: auto !important; min-height: 100vh; overflow-y: auto !important; }
+            .spot-main { flex: none; }
+            .spot-main > .panel { min-height: 320px; overflow-y: visible; }
+        }
         
         /* Custom Scrollbar for Modal */
         ::-webkit-scrollbar { width: 6px; }
@@ -33,7 +41,7 @@
 <body class="h-screen flex flex-col p-4 gap-4 overflow-hidden">
 
     <!-- Header -->
-    <header class="panel p-4 flex justify-between items-center shrink-0">
+    <header class="spot-header panel p-4 flex justify-between items-center shrink-0">
         <div class="flex items-center gap-3">
             <i class="fa-brands fa-bitcoin text-yellow-500 text-3xl"></i>
             <div>
@@ -42,7 +50,7 @@
             </div>
         </div>
         
-        <div class="flex gap-6 items-center">
+        <div class="spot-toolbar flex items-center">
             <button id="ui-toggle-visibility" class="text-gray-500 hover:text-gray-300 transition-colors" title="显示/隐藏敏感信息">
                 <i class="fa-solid fa-eye" id="ui-visibility-icon"></i>
             </button>
@@ -103,7 +111,7 @@
     </div>
 
     <!-- Main Content -->
-    <div class="flex-1 grid grid-cols-1 lg:grid-cols-3 gap-4 min-h-0">
+    <div class="spot-main flex-1 grid grid-cols-1 lg:grid-cols-3 gap-4 min-h-0">
         
         <!-- Left: Signal Engine (1h + Zones) -->
         <div class="panel p-4 flex flex-col overflow-y-auto">
@@ -461,7 +469,7 @@
                         </div>
 
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                            <div>
+                            <div id="cfg-dca-amount-section">
                                 <label class="block text-sm text-gray-300 mb-1">首仓 (TP0) 基础买入量 (USDT)</label>
                                 <input type="number" step="100" id="cfg-dca-amount" value="3000" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500">
                             </div>
@@ -605,6 +613,9 @@
         // --- API Integration ---
         let currentConfig = {};
         let currentState = {};
+        let configRevision = 0;
+        let statusRequestId = 0;
+        let lastAppliedStatusRequest = 0;
         let currentMacroVpoc = null;
         let currentRealIndicators = {};
         let globalVolumeProfile = new Map();
@@ -672,6 +683,14 @@
                     openApiSettings();
                 }
                 throw new Error('鉴权失败或服务端未就绪');
+            }
+            if (!res.ok) {
+                let error = `请求失败 (HTTP ${res.status})`;
+                try {
+                    const body = await res.json();
+                    error = body.error || body.message || error;
+                } catch (_) {}
+                throw new Error(error);
             }
             return res;
         }
@@ -786,9 +805,15 @@
         }
 
         async function fetchStatus() {
+            const revision = configRevision;
+            const requestId = ++statusRequestId;
             try {
                 const res = await fetch('/api/spot-dca/status');
+                if (!res.ok) throw new Error(`状态接口异常 (HTTP ${res.status})`);
                 const data = await res.json();
+                // A pre-save poll cannot replace the newly confirmed configuration.
+                if (revision !== configRevision || requestId < lastAppliedStatusRequest) return;
+                lastAppliedStatusRequest = requestId;
                 
                 // 检查服务端是否要求鉴权，以及如果没设置Token则主动弹窗
                 if (data.hasAuthToken) {
@@ -991,7 +1016,26 @@
             }
         }
 
+        function getFuturesPositionViews() {
+            const positions = (Array.isArray(currentState.futuresPositions) ? currentState.futuresPositions : [])
+                .filter(pos => Number.isFinite(Number(pos.positionAmt)) && Number(pos.positionAmt) !== 0);
+            for (const side of ['long', 'short']) {
+                const tracked = currentState[side];
+                const qty = Number(tracked?.totalCoinAmount);
+                const entryPrice = Number(tracked?.averagePrice);
+                if (!(qty > 0 && entryPrice > 0) || positions.some(pos =>
+                    (pos.positionSide === 'LONG' || Number(pos.positionAmt) > 0) === (side === 'long'))) continue;
+                // Confirmed local fills precede the slower account snapshot; these are not mock positions.
+                positions.push({ positionSide: side === 'long' ? 'LONG' : 'SHORT',
+                    positionAmt: side === 'long' ? qty : -qty, entryPrice,
+                    leverage: Number(currentConfig.leverage) || 1, localConfirmed: true,
+                    unRealizedProfit: currentPrice > 0 ? (currentPrice - entryPrice) * qty * (side === 'long' ? 1 : -1) : NaN });
+            }
+            return positions;
+        }
+
         function renderUI() {
+            const futuresPositions = getFuturesPositionViews();
             // Render Bot Toggle Status
             const btnLong = document.getElementById('ui-bot-toggle-long');
             const dotLong = document.getElementById('ui-bot-dot-long');
@@ -1062,16 +1106,17 @@
             // 为了处理双向持仓显示止盈的情况，记录当前是否有被追踪的仓位
             let renderedPosition = false;
 
-            if (currentConfig.tradeMode === 'futures' && currentState.futuresPositions && currentState.futuresPositions.length > 0) {
-                posContainer.innerHTML = currentState.futuresPositions.map(pos => {
+            if (currentConfig.tradeMode === 'futures' && futuresPositions.length > 0) {
+                posContainer.innerHTML = futuresPositions.map(pos => {
                     const isLong = pos.positionAmt > 0 || pos.positionSide === 'LONG';
                     const sideText = isLong ? '多头' : '空头';
                     const colorClass = isLong ? 'text-green' : 'text-red';
                     const notionalUsdt = Math.abs(pos.positionAmt) * currentPrice;
-                    const pnlUsdt = pos.unRealizedProfit;
+                    const pnlUsdt = Number(pos.unRealizedProfit);
                     const pnlPct = (pnlUsdt / (notionalUsdt / pos.leverage)) * 100 || 0;
                     
-                    const pnlDisplay = !isDataVisible ? '******' : `${pnlUsdt >= 0 ? '+' : ''}${pnlUsdt.toFixed(2)} USDT (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)`;
+                    const pnlDisplay = !isDataVisible ? '******' : !Number.isFinite(pnlUsdt) ? '--' :
+                        `${pnlUsdt >= 0 ? '+' : ''}${pnlUsdt.toFixed(2)} USDT (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)`;
                     
                     const stateObj = isLong ? currentState.long : currentState.short;
                     
@@ -1081,6 +1126,7 @@
                             <div class="text-sm text-gray-400">当前${modeText}持仓 (${sideText}) - 杠杆 ${pos.leverage}x</div>
                             <div class="text-xs font-bold bg-yellow-500/20 text-yellow-500 px-2 py-1 rounded">DCA 加仓: ${stateObj?.activeDcaCount || 0} 次</div>
                         </div>
+                        ${pos.localConfirmed ? '<div class="text-xs text-yellow-500 mb-2">本地成交已确认，等待交易所持仓快照同步</div>' : ''}
                         <div class="text-2xl font-mono font-bold mb-1"><span class="${colorClass}">${formatMoney(notionalUsdt)}</span> <span class="text-sm font-normal text-gray-400">USDT (名义)</span></div>
                         <div class="flex justify-between text-xs">
                             <span class="text-gray-500">均价: <span class="font-mono text-gray-300">${formatMoney(pos.entryPrice)}</span> | 数量: <span class="font-mono text-gray-300">${isDataVisible ? pos.positionAmt : '******'} BTC</span></span>
@@ -1257,8 +1303,8 @@
                 </div>`;
             };
 
-            if (currentConfig.tradeMode === 'futures' && currentState.futuresPositions && currentState.futuresPositions.length > 0) {
-                currentState.futuresPositions.forEach(pos => {
+            if (currentConfig.tradeMode === 'futures' && futuresPositions.length > 0) {
+                futuresPositions.forEach(pos => {
                     const isLong = pos.positionAmt > 0 || pos.positionSide === 'LONG';
                     const posSide = isLong ? 'long' : 'short';
                     const stateObj = isLong ? currentState.long : currentState.short;
@@ -1333,11 +1379,12 @@
         let currentTradeMode = 'spot';
 
         function setTradeMode(mode) {
+            if (!['spot', 'futures'].includes(mode)) return;
             currentTradeMode = mode;
             const btnSpot = document.getElementById('tab-mode-spot');
             const btnFutures = document.getElementById('tab-mode-futures');
             const futuresSection = document.getElementById('cfg-futures-section');
-            const dcaAmountSection = document.getElementById('cfg-dca-amount').closest('.grid > div');
+            const dcaAmountSection = document.getElementById('cfg-dca-amount-section');
             
             // UI elements for short logic
             const rsiShortContainer = document.getElementById('cfg-rsi-short-container');
@@ -1376,7 +1423,14 @@
             }
         }
 
-        function openConfig() {
+        async function openConfig() {
+            if (!['spot', 'futures'].includes(currentConfig.tradeMode)) {
+                await fetchStatus();
+                if (!['spot', 'futures'].includes(currentConfig.tradeMode)) {
+                    alert('尚未读取到当前策略，请检查 SpotDCA 服务连接后重试。未修改任何配置。');
+                    return;
+                }
+            }
             modal.classList.remove('hidden');
             // Populate form with currentConfig
             if (document.getElementById('cfg-trade-direction')) document.getElementById('cfg-trade-direction').value = currentConfig.tradeDirection || 'long';
@@ -1466,7 +1520,7 @@
             }
             
             const tpMode = document.getElementById('gen-tp-type').value;
-            document.getElementById('cfg-tp-mode').value = tpMode;
+            document.getElementById('cfg-tp-mode').value = tpMode === 'atr' ? 'atr_dynamic' : tpMode;
             
             const preview = document.getElementById('gen-result-preview');
             preview.classList.remove('hidden');
@@ -1533,8 +1587,9 @@
                 alert("请至少选择一种微观触发条件 (Delta激增 或 MTF强多)");
                 return;
             }
-            if (tp1 + tp2 + tp3 !== 100) {
+            if (tp1 <= 0 || tp2 <= 0 || tp3 <= 0 || tp1 + tp2 + tp3 !== 100) {
                 document.getElementById('tp-error').classList.remove('hidden');
+                alert('TP1、TP2、TP3 比例必须各大于 0，且合计为 100%。');
                 return;
             }
 
@@ -1545,11 +1600,19 @@
             };
 
             try {
-                await authFetch('/api/spot-dca/config', {
+                const response = await authFetch('/api/spot-dca/config', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
+                const result = await response.json();
+                if (!result.ok || !['spot', 'futures'].includes(result.config?.tradeMode)) {
+                    throw new Error(result.error || '服务端未确认策略保存，未切换交易模式');
+                }
+                configRevision++;
+                currentConfig = result.config;
+                currentTradeMode = result.config.tradeMode;
+                renderUI();
                 
                 // Apply to UI
                 if (currentTradeMode === 'futures') {
