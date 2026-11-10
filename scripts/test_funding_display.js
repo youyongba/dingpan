@@ -30,7 +30,7 @@ function harness() {
         fetch: async () => { throw new Error('Network disabled in display tests'); }
     };
     const source = fs.readFileSync(path.join(root, 'public/script.js'), 'utf8');
-    vm.runInNewContext(source + '\nmodule.exports = { fmtRateNumber, fmtPct, toTimeSeries, getChartOption, renderRateValue, updateSettledHistoryHint, renderChartIfChanged };', sandbox);
+    vm.runInNewContext(source + '\nmodule.exports = { fmtRateNumber, fmtPct, toTimeSeries, getChartOption, renderRateValue, updateSettledHistoryHint, renderChartIfChanged, weightedNumber, getWeightedChartOption, renderWeightedFunding, setWeightedInterval };', sandbox);
     return { ...sandbox.module.exports, elements, instances };
 }
 
@@ -100,4 +100,48 @@ test('缺失与无效数据不显示为零，也不误报真实平台', () => {
     assert.doesNotMatch(h.elements.get('settledRateHint').textContent, /最近/);
     h.updateSettledHistoryHint([{ time: 1, rate: 0.0001 }, { time: 2, rate: 0.0001000001 }]);
     assert.doesNotMatch(h.elements.get('settledRateHint').textContent, /真实平台/);
+});
+
+function weightedFixture() {
+    const time = 1700000000000;
+    const bar = { time, open: 0.0001, high: 0.0001, low: 0.000097, close: 0.000097,
+        firstSampleAt: time, lastSampleAt: time + 90000, samples: 2 };
+    return { fresh: true, current: { rate: 0.000097, totalOpenInterestUsd: 3e9, observedAt: time,
+        sources: ['Binance', 'Bybit', 'OKX'].map(exchange => ({
+            exchange, rate8h: 0.000097, openInterestUsd: 1e9, weight: 1 / 3
+        })) }, history8h: [bar], history1h: [{ ...bar, time: time + 3600000 }], errors: [] };
+}
+
+test('加权指标按截图显示0.0097而非误乘或误用原始小数', () => {
+    const h = harness();
+    h.renderWeightedFunding(weightedFixture());
+    const html = h.elements.get('weightedFundingRate').innerHTML;
+    assert.match(html, /rate-primary">0\.00970000/);
+    assert.match(html, /0\.009700%/);
+    assert.match(html, /原始小数 0\.00009700/);
+    assert.match(h.elements.get('weightedFundingSources').innerHTML, /33\.33%/);
+});
+
+test('加权图仅绘制真实close柱，保持百分比数值口径且不平滑插值', () => {
+    const h = harness();
+    const data = weightedFixture();
+    const option = h.getWeightedChartOption(data.history8h);
+    assert.equal(option.series.length, 1);
+    assert.equal(option.series[0].type, 'bar');
+    assert.ok(Math.abs(option.series[0].data[0][1] - 0.0097) < 1e-15);
+    const tooltip = option.tooltip.formatter([{ value: option.series[0].data[0] }]);
+    assert.match(tooltip, /0\.00970000/);
+    assert.match(tooltip, /实际采样: 2 次/);
+});
+
+test('切换1小时窗口重新绘图，来源失败明确提示旧值非实时', () => {
+    const h = harness();
+    const data = weightedFixture();
+    h.renderWeightedFunding(data);
+    h.setWeightedInterval('1h');
+    assert.equal(h.instances.chartWeightedFunding.options.length, 2);
+    assert.equal(h.instances.chartWeightedFunding.options[1].series[0].data[0][0], data.history1h[0].time);
+    h.renderWeightedFunding({ ...data, fresh: false, errors: [{ exchange: 'Bybit', message: 'timeout' }] });
+    assert.match(h.elements.get('weightedFundingStatus').textContent, /Bybit 数据异常/);
+    assert.match(h.elements.get('weightedFundingStatus').textContent, /非实时/);
 });

@@ -3,6 +3,10 @@ const chart1h = echarts.init(document.getElementById('chart1h'), 'dark', { backg
 const chart1hAvg = echarts.init(document.getElementById('chart1hAvg'), 'dark', { background: 'transparent' });
 const chartPremium = echarts.init(document.getElementById('chartPremium'), 'dark', { background: 'transparent' });
 const chartPremium1hAvg = echarts.init(document.getElementById('chartPremium1hAvg'), 'dark', { background: 'transparent' });
+const chartWeightedFunding = echarts.init(document.getElementById('chartWeightedFunding'), 'dark', { background: 'transparent' });
+let weightedInterval = '8h';
+let weightedFingerprint = '';
+let lastWeightedFunding = null;
 
 window.addEventListener('resize', () => {
     chart8h.resize();
@@ -10,6 +14,7 @@ window.addEventListener('resize', () => {
     chart1hAvg.resize();
     chartPremium.resize();
     chartPremium1hAvg.resize();
+    chartWeightedFunding.resize();
 });
 
 const AUTH_TOKEN_KEY = 'dp_auth_token_v1';
@@ -56,6 +61,79 @@ function updateSettledHistoryHint(history) {
     el.textContent = repeated >= 2
         ? `最近 ${repeated} 次结算原始值均为 ${fmtRateNumber(last.rate)}（${fmtPct(last.rate)}）。这是真实平台，不是图表封顶；切换单位不会产生新波动。`
         : '结算历史保留币安原始数值，不设置 0.0100% 上限；悬停可同时查看高精度数值和百分比。';
+}
+
+function weightedNumber(rate) {
+    return typeof rate === 'number' && Number.isFinite(rate) ? (rate * 100).toFixed(8) : '--';
+}
+
+function setWeightedInterval(interval) {
+    if (!['8h', '1h'].includes(interval)) return;
+    weightedInterval = interval;
+    weightedFingerprint = '';
+    renderWeightedFunding(lastWeightedFunding);
+}
+
+function getWeightedChartOption(history) {
+    const points = history.map(bar => [bar.time, bar.close * 100]);
+    const option = getChartOption(points, '持仓加权费率 close', 'mmdd');
+    // CoinGlass-style numbers are percentage points, NOT the raw decimal used by other charts.
+    option.yAxis.name = '费率数值（百分比口径）';
+    option.yAxis.axisLabel.formatter = value => Number(value).toFixed(6);
+    option.series = [option.series[0]];
+    option.series[0].large = false;
+    option.animation = false;
+    option.tooltip.formatter = params => {
+        const point = params[0]?.value;
+        const bar = history.find(item => item.time === point?.[0]);
+        if (!bar) return '';
+        const start = new Date(bar.time).toISOString().slice(0, 16).replace('T', ' ');
+        const last = new Date(bar.lastSampleAt).toISOString().slice(0, 19).replace('T', ' ');
+        return `${start} UTC<br/>加权 close: <b>${weightedNumber(bar.close)}</b>` +
+            `<br/>百分比: ${fmtPct(bar.close)}<br/>原始小数: ${fmtRateNumber(bar.close)}` +
+            `<br/>O / H / L: ${weightedNumber(bar.open)} / ${weightedNumber(bar.high)} / ${weightedNumber(bar.low)}` +
+            `<br/>实际采样: ${bar.samples} 次<br/>最后采样: ${last} UTC`;
+    };
+    return option;
+}
+
+function renderWeightedFunding(data) {
+    lastWeightedFunding = data;
+    const valueEl = document.getElementById('weightedFundingRate');
+    const statusEl = document.getElementById('weightedFundingStatus');
+    const sourcesEl = document.getElementById('weightedFundingSources');
+    const hintEl = document.getElementById('weightedFundingHistoryHint');
+    if (!valueEl || !statusEl || !sourcesEl || !hintEl) return;
+    const current = data?.current;
+    const validCurrent = current && Number.isFinite(current.rate);
+    valueEl.innerHTML = validCurrent
+        ? `<span class="rate-primary">${weightedNumber(current.rate)}</span><span class="rate-secondary">${fmtPct(current.rate)} · 原始小数 ${fmtRateNumber(current.rate)}</span>`
+        : '--';
+    valueEl.className = 'data-value' + (validCurrent && !data.fresh ? ' warning' : '');
+    if (!data) {
+        statusEl.textContent = '加权数据尚未就绪，请确认后端已更新。';
+    } else if (!data.fresh) {
+        const failed = (data.errors || []).map(item => item.exchange).join(' / ');
+        statusEl.textContent = (failed ? `${failed} 数据异常，已暂停新增历史点。` : '等待三家交易所的同步采样。') +
+            (validCurrent ? '当前显示为上次有效值，非实时。' : '');
+    } else {
+        statusEl.textContent = `固定覆盖 3 家 · 单边持仓合计 ${(current.totalOpenInterestUsd / 1e9).toFixed(3)}B USD · 更新 ${new Date(current.observedAt).toLocaleTimeString('zh-CN', { hour12: false })}`;
+    }
+    if (data?.storageError) statusEl.textContent += ` ${data.storageError}`;
+    statusEl.className = 'rate-note weighted-status' + (data?.fresh && !data.storageError ? '' : ' warning');
+    sourcesEl.innerHTML = validCurrent ? current.sources.map(source =>
+        `<tr><td>${escapeAiHtml(source.exchange)}</td><td>${weightedNumber(source.rate8h)}</td>` +
+        `<td>${(source.openInterestUsd / 1e9).toFixed(3)}B</td><td>${(source.weight * 100).toFixed(2)}%</td></tr>`
+    ).join('') : '<tr><td colspan="4">等待三家交易所真实数据，不使用零值替代缺失数据。</td></tr>';
+    const history = (weightedInterval === '8h' ? data?.history8h : data?.history1h) || [];
+    hintEl.textContent = `已积累 ${history.length} 根 ${weightedInterval === '8h' ? '8 小时' : '1 小时'}柱。` +
+        '历史从首次成功采样开始，每根为 UTC 时间窗口内最后一次有效加权值（close），缺失窗口留空；非结算费率，不按当前持仓反推过去历史。';
+    const fp = `${weightedInterval}|${JSON.stringify(history)}`;
+    if (weightedFingerprint !== fp) {
+        weightedFingerprint = fp;
+        if (!history.length) chartWeightedFunding.clear();
+        else chartWeightedFunding.setOption(getWeightedChartOption(history), true);
+    }
 }
 
 function getChartOption(timeSeries, seriesName, xAxisFormat /* 'mmdd' | 'hhmm' */) {
@@ -139,10 +217,14 @@ async function fetchStatus() {
         data = await res.json();
     } catch (e) {
         document.getElementById('statusHint').textContent = '⚠️ 状态接口不可达';
+        renderWeightedFunding(lastWeightedFunding && {
+            ...lastWeightedFunding, fresh: false, errors: [{ exchange: '后端接口', message: '连接失败' }]
+        });
         return;
     }
 
     document.getElementById('currentPrice').textContent = data.currentPrice ? data.currentPrice : '--';
+    renderWeightedFunding(data.weightedFunding);
     renderRateValue('currentRate', data.predictedFundingRate);
     renderRateValue('lastSettledRate', data.lastSettledFundingRate);
     renderRateValue('rate1h', data.rate1hAvg);
@@ -291,6 +373,7 @@ async function copyCurrentData() {
         const lines = [
             `📊 当前计算数据:`,
             `最新实时价格: ${getVal('currentPrice')}`,
+            `持仓加权平均资金费率（自算8h口径）: ${getVal('weightedFundingRate')} (${getVal('weightedFundingStatus')})`,
             `🎯 近 1H 瞬时费率情绪: ${getVal('rate1hDirection')} (${getVal('rate1hDetail')})`,
             `瞬时预测费率: ${getVal('currentRate')}`,
             `上期已结算费率: ${getVal('lastSettledRate')}`,

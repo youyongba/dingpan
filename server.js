@@ -21,6 +21,7 @@ const moment = require('moment');
 const fs = require('fs');
 const path = require('path');
 const { httpAgent, httpsAgent } = require('./lib/httpAgents');
+const { WeightedFundingService } = require('./funding/weightedFunding');
 const regimeMod = require('./regimeModule');
 
 require('https-proxy-agent');
@@ -69,6 +70,8 @@ if (!CONFIG_AUTH_TOKEN) {
 const app = express();
 app.use(express.json());
 app.use(express.static('public'));
+const weightedFunding = new WeightedFundingService();
+app.get('/api/funding/weighted', (req, res) => res.json(weightedFunding.getState()));
 
 // === Regime 监控（独立模块）：JSON 接口 + Chart.js 面板 + 飞书通知 ===
 app.use('/api/regime', regimeMod.router);
@@ -534,7 +537,7 @@ async function fetchBinanceData() {
 
 // ================= API 路由 =================
 app.get('/api/status', (req, res) => {
-    res.json(state);
+    res.json({ ...state, weightedFunding: weightedFunding.getState() });
 });
 
 app.get('/api/proxy/depth', async (req, res) => {
@@ -741,6 +744,7 @@ async function heartbeat(trigger = 'periodic', fromDirection = null) {
 // ================= 启动 =================
 setInterval(fetchBinanceData, POLL_INTERVAL_MS);
 fetchBinanceData();
+weightedFunding.start();
 
 setInterval(heartbeat, HEARTBEAT_INTERVAL_MS);
 
