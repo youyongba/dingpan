@@ -27,6 +27,7 @@
                     </button>
                 </div>
             </div>
+            <p class="rate-note">费率以原始小数显示，百分比作为辅助：0.0001 = 0.01%。数值不是 USDT 资金费金额。</p>
             <div class="data-grid">
                 <div class="data-box highlight">
                     <div class="data-label">最新实时价格</div>
@@ -39,6 +40,14 @@
                     <div class="data-label" style="margin-top: 8px; font-size: 11px; text-transform: none;" id="rate1hDetail">等待数据...</div>
                 </div>
 
+                <div class="data-box">
+                    <div class="data-label">当前标记价基差（未经费率公式处理）</div>
+                    <div class="data-value" id="currentPremium">--</div>
+                </div>
+                <div class="data-box">
+                    <div class="data-label">近 1H 标记价基差均值（强弱参考）</div>
+                    <div class="data-value" id="premium1hAvg">--</div>
+                </div>
                 <div class="data-box">
                     <div class="data-label">瞬时预测费率 (仅供参考)</div>
                     <div class="data-value" id="currentRate">--</div>
@@ -102,6 +111,7 @@
     <div class="grid">
         <div class="card chart-container">
             <h3>📈 8小时资金费率历史 (币安结算)</h3>
+            <p class="rate-note"><span id="settledRateHint">按币安原始结算数值绘制，不设置 0.0100% 上限；真实值相同仍会呈现平台。</span> <a href="#premiumAnalysis">查看基差强弱参考</a></p>
             <div id="chart8h" class="chart"></div>
         </div>
         <div class="card chart-container">
@@ -119,14 +129,15 @@
 
     <div class="grid">
         <div class="card chart-container" style="grid-column: 1 / -1;">
-            <h3>📐 premium 基差曲线 (永续溢价/折价 · 近90分钟) <span style="font-size: 12px; color: #94a3b8; font-weight: 400;">未经 ±0.05% clamp · 正值 = 永续溢价(多头拥挤) · 负值 = 折价(空头拥挤) · 比瞬时费率更敏感</span></h3>
+            <h3>📐 标记价基差曲线 (近90分钟) <span style="font-size: 12px; color: #94a3b8; font-weight: 400;">(标记价 − 指数价) / 指数价 · 未经本项目费率公式处理 · 非币安官方溢价指数</span></h3>
             <div id="chartPremium" class="chart"></div>
         </div>
     </div>
 
     <div class="grid">
-        <div class="card chart-container" style="grid-column: 1 / -1;">
-            <h3>📐 premium 基差均值走势 (基差情绪曲线 · 最近 6 小时) <span style="font-size: 12px; color: #94a3b8; font-weight: 400;">近 1H premium 均值 · 平滑瞬时抖动 · 正值 = 永续溢价(多头拥挤) · 负值 = 折价(空头拥挤)</span></h3>
+        <div class="card chart-container" id="premiumAnalysis" style="grid-column: 1 / -1;">
+            <h3>📐 近 1H 标记价基差均值 (最近 6 小时)</h3>
+            <p class="rate-note">当结算费率连续相同时，可补充观察基差变化。正值表示标记价高于指数价，负值表示低于指数价；这不是 8 小时结算费率，也不代表必然反转。</p>
             <div id="chartPremium1hAvg" class="chart"></div>
         </div>
     </div>

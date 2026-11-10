@@ -23,22 +23,39 @@ function saveToken(t) {
 
 function fmtPct(v) {
     if (typeof v !== 'number' || !isFinite(v)) return '--';
-    return (v * 100).toFixed(4) + '%';
+    return (v * 100).toFixed(6) + '%';
+}
+
+function fmtRateNumber(v) {
+    if (typeof v !== 'number' || !Number.isFinite(v)) return '--';
+    return v.toLocaleString('en-US', {
+        useGrouping: false, minimumFractionDigits: 8, maximumFractionDigits: 12
+    });
+}
+
+function renderRateValue(id, value) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.innerHTML = `<span class="rate-primary">${fmtRateNumber(value)}</span><span class="rate-secondary">${fmtPct(value)}</span>`;
 }
 
 function pad2(n) { return String(n).padStart(2, '0'); }
 
-// 极小值剪辑: 避免 (-1e-13).toFixed(4) === "-0.0000"
-function clipEps(v) {
-    if (typeof v !== 'number' || !Number.isFinite(v)) return 0;
-    return Math.abs(v) < 1e-10 ? 0 : v;
+function toTimeSeries(history) {
+    // Keep exchange precision in chart data; formatting must not flatten nearby values.
+    return history.map(d => [d.time, Number.isFinite(d.rate) ? d.rate : null]);
 }
 
-function toTimeSeries(history, rateToPct = true) {
-    return history.map(d => {
-        const rate = clipEps(d.rate) * (rateToPct ? 100 : 1);
-        return [d.time, parseFloat(rate.toFixed(6))];
-    });
+function updateSettledHistoryHint(history) {
+    const el = document.getElementById('settledRateHint');
+    if (!el) return;
+    const valid = (history || []).filter(d => Number.isFinite(d.rate));
+    const last = valid[valid.length - 1];
+    let repeated = 0;
+    for (let i = valid.length - 1; i >= 0 && valid[i].rate === last.rate; i--) repeated++;
+    el.textContent = repeated >= 2
+        ? `最近 ${repeated} 次结算原始值均为 ${fmtRateNumber(last.rate)}（${fmtPct(last.rate)}）。这是真实平台，不是图表封顶；切换单位不会产生新波动。`
+        : '结算历史保留币安原始数值，不设置 0.0100% 上限；悬停可同时查看高精度数值和百分比。';
 }
 
 function getChartOption(timeSeries, seriesName, xAxisFormat /* 'mmdd' | 'hhmm' */) {
@@ -65,7 +82,7 @@ function getChartOption(timeSeries, seriesName, xAxisFormat /* 'mmdd' | 'hhmm' *
                 const v = Array.isArray(p.value) ? p.value[1] : p.value;
                 const c = v > 0 ? '#10b981' : (v < 0 ? '#ef4444' : '#94a3b8');
                 const label = ts ? fmtAxis(ts) : p.axisValue;
-                return `${label}<br/><span style="color:${c}">●</span> ${seriesName}: <b style="color:${c}">${v.toFixed(4)}%</b>`;
+                return `${label}<br/><span style="color:${c}">●</span> ${seriesName}: <b style="color:${c}">${fmtRateNumber(v)}</b><br/><span style="color:#94a3b8">百分比参考: ${fmtPct(v)}</span>`;
             }
         },
         grid: { left: '2%', right: '2%', bottom: '5%', top: '10%', containLabel: true },
@@ -74,7 +91,7 @@ function getChartOption(timeSeries, seriesName, xAxisFormat /* 'mmdd' | 'hhmm' *
             axisLine: { lineStyle: { color: '#2a313f' } },
             axisLabel: { formatter: fmtAxis }
         },
-        yAxis: { type: 'value', splitLine: { lineStyle: { color: '#1e2430', type: 'dashed' } }, axisLabel: { formatter: '{value}%' } },
+        yAxis: { type: 'value', name: '原始数值', splitLine: { lineStyle: { color: '#1e2430', type: 'dashed' } }, axisLabel: { formatter: fmtRateNumber } },
         series: [
             {
                 name: seriesName,
@@ -126,14 +143,17 @@ async function fetchStatus() {
     }
 
     document.getElementById('currentPrice').textContent = data.currentPrice ? data.currentPrice : '--';
-    document.getElementById('currentRate').textContent = fmtPct(data.predictedFundingRate);
-    document.getElementById('lastSettledRate').textContent = fmtPct(data.lastSettledFundingRate);
-    document.getElementById('rate1h').textContent = fmtPct(data.rate1hAvg);
-    document.getElementById('rateDailySettled').textContent = fmtPct(data.rateDailySettledSum);
+    renderRateValue('currentRate', data.predictedFundingRate);
+    renderRateValue('lastSettledRate', data.lastSettledFundingRate);
+    renderRateValue('rate1h', data.rate1hAvg);
+    renderRateValue('rateDailySettled', data.rateDailySettledSum);
+    renderRateValue('currentPremium', data.premium);
+    renderRateValue('premium1hAvg', data.premium1hAvg);
+    updateSettledHistoryHint(data.historyData);
     
     const rateDailyWithPredictEl = document.getElementById('rateDailyWithPredict');
     if (rateDailyWithPredictEl) {
-        rateDailyWithPredictEl.textContent = fmtPct(data.rateDailyWithPredict);
+        renderRateValue('rateDailyWithPredict', data.rateDailyWithPredict);
     }
 
     // 近 1H 瞬时费率情绪面板
@@ -157,12 +177,8 @@ async function fetchStatus() {
         rate1hEl.textContent = label;
         rate1hEl.className = 'data-value ' + cls;
 
-        const avg = typeof data.rate1hAvg === 'number' && isFinite(data.rate1hAvg)
-            ? (data.rate1hAvg * 100).toFixed(4) + '%'
-            : '--';
-        const now = typeof data.predictedFundingRate === 'number' && isFinite(data.predictedFundingRate)
-            ? (data.predictedFundingRate * 100).toFixed(4) + '%'
-            : '--';
+        const avg = `${fmtRateNumber(data.rate1hAvg)}（${fmtPct(data.rate1hAvg)}）`;
+        const now = `${fmtRateNumber(data.predictedFundingRate)}（${fmtPct(data.predictedFundingRate)}）`;
         rate1hDetailEl.textContent =
             `近1H均值: ${avg} (采样 ${data.rate1hSamples || 0} 点) | 当下瞬时: ${now}`;
     }
@@ -221,13 +237,11 @@ function renderChartIfChanged(chartKey, history, seriesName, xFormat) {
         }
         return;
     }
-    const last = history[history.length - 1];
-    const first = history[0];
-    const fp = `${history.length}|${first.time}|${last.time}|${last.rate}`;
+    const fp = JSON.stringify(history);
     if (chartFingerprints[chartKey] === fp) return;
     chartFingerprints[chartKey] = fp;
 
-    const timeSeries = toTimeSeries(history, true);
+    const timeSeries = toTimeSeries(history);
     chartInstances[chartKey].setOption(getChartOption(timeSeries, seriesName, xFormat));
 }
 

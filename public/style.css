@@ -164,6 +164,33 @@ button:disabled {
     color: #f8fafc;
 }
 
+.rate-primary {
+    display: block;
+    font-family: 'JetBrains Mono', monospace;
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+
+.rate-secondary {
+    display: block;
+    margin-top: 5px;
+    font-size: 12px;
+    font-weight: 400;
+    color: #94a3b8;
+}
+
+.rate-note {
+    margin: 0 0 16px;
+    font-size: 12px;
+    line-height: 1.7;
+    color: #94a3b8;
+}
+
+.rate-note a {
+    color: #60a5fa;
+    white-space: nowrap;
+}
+
 .price-text {
     font-size: 32px;
     color: #10b981;
