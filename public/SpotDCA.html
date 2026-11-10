@@ -543,7 +543,7 @@
             <!-- Modal Footer -->
             <div class="p-5 border-t border-gray-800 flex justify-end gap-3 shrink-0 bg-[#181A20] rounded-b-xl">
                 <button onclick="closeConfig()" class="px-5 py-2 rounded text-sm text-gray-300 hover:bg-gray-800 transition-colors">取消</button>
-                <button onclick="saveConfig()" class="px-5 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm text-white font-bold transition-colors">保存并应用策略</button>
+                <button id="config-save-button" onclick="saveConfig()" class="px-5 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm text-white font-bold transition-colors disabled:opacity-50">保存并应用策略</button>
             </div>
         </div>
     </div>
@@ -1560,7 +1560,9 @@
             preview.innerHTML = planHtml;
         }
 
+        let savingConfig = false;
         async function saveConfig() {
+            if (savingConfig) return;
             const leverage = parseInt(document.getElementById('cfg-leverage').value) || 100;
             const positionSizePct = parseFloat(document.getElementById('cfg-position-size').value) || 3.0;
             const rsiThreshold = parseInt(document.getElementById('cfg-rsi-threshold').value);
@@ -1599,6 +1601,10 @@
                 tpMode, tp1, tp2, tp3, tp1Target, tp2Target, tp3Target, dcaAmount, dcaMaxSteps, martingaleMultiplier, breakevenSl, autoLoop
             };
 
+            const saveButton = document.getElementById('config-save-button');
+            savingConfig = true;
+            saveButton.disabled = true;
+            saveButton.textContent = '正在核对并保存…';
             try {
                 const response = await authFetch('/api/spot-dca/config', {
                     method: 'POST',
@@ -1611,6 +1617,7 @@
                 }
                 configRevision++;
                 currentConfig = result.config;
+                if (result.state) currentState = result.state;
                 currentTradeMode = result.config.tradeMode;
                 renderUI();
                 
@@ -1646,11 +1653,18 @@
                 }
 
                 
-                alert("✅ 策略参数已更新并应用");
+                alert(result.modeRestored
+                    ? '合约模式已恢复，持仓已核对。自动开仓暂未启动，已有持仓继续接受止盈监控，请核对后再启动自动交易。' +
+                        (result.adoptedSides?.length ? '\n未记录的持仓已接管，但历史TP进度无法自动推断，请核对成交记录。' : '')
+                    : "✅ 策略参数已更新并应用");
                 closeConfig();
                 fetchStatus();
             } catch (e) {
                 alert("保存失败: " + e.message);
+            } finally {
+                savingConfig = false;
+                saveButton.disabled = false;
+                saveButton.textContent = '保存并应用策略';
             }
         }
         

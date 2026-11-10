@@ -235,16 +235,38 @@ async function reconcilePendingOrders() {
     }
 }
 
+async function queryFuturesPositions() {
+    if (!SPOT_API_KEY || !SPOT_API_SECRET) throw new Error('未配置币安 API Key/Secret，请先完成接口鉴权设置');
+    const query = `symbol=BTCUSDT&recvWindow=60000&timestamp=${Date.now()}`;
+    const signature = crypto.createHmac('sha256', SPOT_API_SECRET).update(query).digest('hex');
+    const response = await axios.get(`https://fapi.binance.com/fapi/v3/positionRisk?${query}&signature=${signature}`, {
+        headers: { 'X-MBX-APIKEY': SPOT_API_KEY }, httpAgent, httpsAgent, timeout: 8000
+    });
+    if (!Array.isArray(response.data)) throw new Error('合约持仓接口响应异常');
+    return response.data.map(p => {
+        const amount = Number(p.positionAmt);
+        const entryPrice = Number(p.entryPrice);
+        if (p.symbol !== 'BTCUSDT' || p.positionAmt == null || p.positionAmt === '' ||
+            p.entryPrice == null || p.entryPrice === '' || !Number.isFinite(amount) || !Number.isFinite(entryPrice) ||
+            (p.positionSide === 'LONG' && amount < 0) || (p.positionSide === 'SHORT' && amount > 0) ||
+            (amount !== 0 && entryPrice <= 0) || !['LONG', 'SHORT', 'BOTH'].includes(p.positionSide)) {
+            throw new Error('合约持仓响应的币种、方向或数值异常');
+        }
+        return { positionAmt: amount, entryPrice,
+            unRealizedProfit: Number(p.unRealizedProfit), positionSide: p.positionSide,
+            leverage: p.leverage || config.leverage };
+    }).filter(p => p.positionAmt !== 0);
+}
+
 // 获取账户余额 (包含现货与合约)
 async function fetchBalances() {
   // 同步请求期间可能成交，旧快照不能覆盖新仓位或止盈记录。
   const { botSignalState, getTradeRevision } = require('./spotAutoBot');
   const revision = getTradeRevision();
+  const marketAtRequest = config.tradeMode;
   if (!SPOT_API_KEY || !SPOT_API_SECRET) {
-      console.log('[SpotDCA] Missing Binance API keys in .env. Using mock balance.');
-      state.spotBalanceUsdt = 50000;
-      state.spotBalanceBtc = 0.5;
-      state.futuresBalanceUsdt = 10000;
+      console.log('[SpotDCA] Missing Binance API keys; account balances are unavailable.');
+      state.spotBalanceUsdt = state.spotBalanceBtc = state.futuresBalanceUsdt = undefined;
       return;
   }
   
@@ -257,7 +279,7 @@ async function fetchBalances() {
     const spotUrl = `https://api.binance.com/api/v3/account?${queryString}&signature=${signature}`;
     const spotRes = await axios.get(spotUrl, {
       headers: { 'X-MBX-APIKEY': SPOT_API_KEY },
-      httpAgent, httpsAgent
+      httpAgent, httpsAgent, timeout: 8000
     });
     if (spotRes.data && spotRes.data.balances) {
       const usdt = spotRes.data.balances.find(b => b.asset === 'USDT');
@@ -271,36 +293,34 @@ async function fetchBalances() {
 
   // 2. 获取合约余额
   try {
-    const futuresUrl = `https://fapi.binance.com/fapi/v2/account?${queryString}&signature=${signature}`;
+    const accountQuery = `recvWindow=60000&timestamp=${Date.now()}`;
+    const accountSignature = crypto.createHmac('sha256', SPOT_API_SECRET).update(accountQuery).digest('hex');
+    const futuresUrl = `https://fapi.binance.com/fapi/v3/account?${accountQuery}&signature=${accountSignature}`;
     const futuresRes = await axios.get(futuresUrl, {
       headers: { 'X-MBX-APIKEY': SPOT_API_KEY },
-      httpAgent, httpsAgent
+      httpAgent, httpsAgent, timeout: 8000
     });
     if (futuresRes.data && futuresRes.data.availableBalance) {
       state.futuresBalanceUsdt = parseFloat(futuresRes.data.availableBalance);
     }
     
-    // 获取合约持仓
-    const posQueryString = `symbol=BTCUSDT&${queryString}`;
-    const posSignature = crypto.createHmac('sha256', SPOT_API_SECRET).update(posQueryString).digest('hex');
-    const posUrl = `https://fapi.binance.com/fapi/v2/positionRisk?${posQueryString}&signature=${posSignature}`;
-    const posRes = await axios.get(posUrl, {
-      headers: { 'X-MBX-APIKEY': SPOT_API_KEY },
-      httpAgent, httpsAgent
-    });
-    
-    if (posRes.data && Array.isArray(posRes.data)) {
-        state.futuresPositions = posRes.data.filter(p => parseFloat(p.positionAmt) !== 0).map(p => ({
-            positionAmt: parseFloat(p.positionAmt),
-            entryPrice: parseFloat(p.entryPrice),
-            unRealizedProfit: parseFloat(p.unRealizedProfit),
-            positionSide: p.positionSide,
-            leverage: p.leverage
-        }));
+  } catch (error) {
+    console.error('[SpotDCA] Futures Balance Error:', error.message);
+  }
+
+  // Position safety does not depend on either account-balance endpoint succeeding.
+  try {
+    {
+        state.futuresPositions = await queryFuturesPositions();
         state.futuresPositionsUpdatedAt = Date.now();
+        if (state.futuresPositions.some(p => p.positionSide === 'BOTH')) {
+            console.error('[SpotDCA] One-way position found; do not clear LONG/SHORT archives.');
+            return;
+        }
         
         // 自动纠正内存中的 DCA 状态 (双向隔离同步)
-        if (config.tradeMode === 'futures' && !botSignalState.isExecuting && revision === getTradeRevision()) {
+        if (config.tradeMode === 'futures' && marketAtRequest === config.tradeMode &&
+            !botSignalState.isExecuting && revision === getTradeRevision()) {
             const syncSide = (posSideStr, stateObj) => {
                 const active = state.futuresPositions.find(p => p.positionSide === posSideStr);
                 // 未确认订单必须先核对，不能按仓位数量猜测其成交阶段。
@@ -371,7 +391,7 @@ async function fetchBalances() {
         }
     }
   } catch (error) {
-    console.error('[SpotDCA] Futures Balance Error:', error.message);
+    console.error('[SpotDCA] Futures Positions Error:', error.message);
   }
 }
 
@@ -624,7 +644,9 @@ router.post('/custom-tp', express.json(), requireAdmin, (req, res) => {
   res.json({ ok: true, state });
 });
 
-router.post('/config', express.json(), requireAdmin, (req, res) => {
+let configSaveBusy = false;
+router.post('/config', express.json(), requireAdmin, async (req, res) => {
+  if (configSaveBusy) return res.status(409).json({ ok: false, error: '正在核对并保存策略，请等待本次请求完成' });
   const next = { ...config, ...req.body };
   const positiveFields = ['leverage', 'positionSizePct', 'signalWindow', 'dcaAmount', 'dcaMaxSteps',
       'martingaleMultiplier', 'tp1', 'tp2', 'tp3', 'tp1Target', 'tp2Target', 'tp3Target'];
@@ -637,20 +659,44 @@ router.post('/config', express.json(), requireAdmin, (req, res) => {
       !['percent', 'atr_static', 'atr_dynamic'].includes(next.tpMode)) {
       return res.status(400).json({ ok: false, error: '策略参数无效，请检查止盈比例、目标顺序和仓位限制' });
   }
-  // A legacy "spot" configuration can coexist with a recorded futures short.
-  // Repair that mismatch only after a fresh authenticated exchange snapshot matches every held side.
-  const canRepairFuturesMode = config.tradeMode === 'spot' && next.tradeMode === 'futures' &&
-      state.short.totalCoinAmount > 0 && !state.long.pendingOrder && !state.short.pendingOrder &&
-      state.futuresPositionsUpdatedAt > 0 && state.futuresPositionsUpdatedAt <= Date.now() &&
-      Date.now() - state.futuresPositionsUpdatedAt < 90000 &&
-      ['long', 'short'].every(side => {
+  configSaveBusy = true;
+  try {
+  let repairPositions = null;
+  if (config.tradeMode === 'spot' && next.tradeMode === 'futures' && state.short.totalCoinAmount > 0) {
+      const { botSignalState, getTradeRevision } = require('./spotAutoBot');
+      if (botSignalState.isExecuting || state.long.pendingOrder || state.short.pendingOrder) {
+          return res.status(409).json({ ok: false, error: '存在执行中或待核对订单，不能同时修复交易模式' });
+      }
+      const revision = getTradeRevision();
+      const originalConfig = config;
+      try {
+          repairPositions = await queryFuturesPositions();
+      } catch (e) {
+          const code = e.response?.data?.code;
+          const detail = e.response?.data?.msg || e.message;
+          return res.status(502).json({ ok: false, error: `合约持仓查询失败${code ? ` (${code})` : ''}: ${detail}。未修改交易模式和仓位。` });
+      }
+      if (config !== originalConfig || botSignalState.isExecuting || revision !== getTradeRevision() ||
+          state.long.pendingOrder || state.short.pendingOrder) {
+          return res.status(409).json({ ok: false, error: '核对期间交易状态发生变化，请重试保存，未修改仓位' });
+      }
+      if (repairPositions.some(pos => pos.positionSide === 'BOTH')) {
+          return res.status(409).json({ ok: false, error: '交易所为单向持仓模式，当前策略使用双向 LONG/SHORT，不能直接恢复双向自动交易' });
+      }
+      for (const side of ['long', 'short']) {
           const tracked = state[side];
-          if (!(tracked.totalCoinAmount > 0)) return true;
-          const remote = state.futuresPositions.find(pos => pos.positionSide === (side === 'long' ? 'LONG' : 'SHORT'));
-          return remote && remote.entryPrice > 0 && tracked.averagePrice > 0 &&
-              Math.abs(Math.abs(remote.positionAmt) - tracked.totalCoinAmount) < 1e-8 &&
-              Math.abs(remote.entryPrice - tracked.averagePrice) / tracked.averagePrice < 0.001;
-      });
+          if (!(tracked.totalCoinAmount > 0)) continue;
+          const remote = repairPositions.find(pos => pos.positionSide === (side === 'long' ? 'LONG' : 'SHORT'));
+          if (side === 'long' && !remote) {
+              return res.status(409).json({ ok: false, error: '本地多头无法与合约账户对应，可能属于现货；未修改仓位，不能混用市场' });
+          }
+          if (remote && (!(tracked.averagePrice > 0) ||
+              Math.abs(remote.entryPrice - tracked.averagePrice) / tracked.averagePrice >= 0.001)) {
+              return res.status(409).json({ ok: false, error: `${side === 'long' ? '多头' : '空头'}入场均价不匹配（本地 ${tracked.averagePrice}，交易所 ${remote.entryPrice}），需核对是否为同一笔持仓` });
+          }
+      }
+  }
+  const canRepairFuturesMode = repairPositions !== null;
   if (next.tradeMode !== config.tradeMode && !canRepairFuturesMode &&
       (state.long.totalCoinAmount > 0 || state.short.totalCoinAmount > 0 ||
        state.long.pendingOrder || state.short.pendingOrder)) {
@@ -660,14 +706,67 @@ router.post('/config', express.json(), requireAdmin, (req, res) => {
           : '持仓期间不能切换现货和合约模式' });
   }
   const previous = config;
+  const beforeRepair = canRepairFuturesMode ? {
+      long: { ...state.long }, short: { ...state.short }, positions: state.futuresPositions,
+      updatedAt: state.futuresPositionsUpdatedAt, longRunning: state.isLongBotRunning, shortRunning: state.isShortBotRunning
+  } : null;
+  const adoptedSides = [];
+  if (canRepairFuturesMode) {
+      let closedAtr = 0;
+      try {
+          const values = regimeModule.getState()?.indicators?.atr;
+          closedAtr = Number(values?.[values.length - 2]);
+          if (!Number.isFinite(closedAtr) || closedAtr <= 0) closedAtr = 0;
+      } catch (_) {}
+      if (next.tpMode === 'atr_static' && !(closedAtr > 0) && repairPositions.some(remote =>
+          !(state[remote.positionSide === 'LONG' ? 'long' : 'short'].totalCoinAmount > 0))) {
+          return res.status(409).json({ ok: false, error: '合约持仓已核对，但接管所需的已收盘ATR尚未就绪；未修改仓位，请稍后重试' });
+      }
+      for (const side of ['long', 'short']) {
+          const tracked = state[side];
+          const remote = repairPositions.find(pos => pos.positionSide === (side === 'long' ? 'LONG' : 'SHORT'));
+          if (remote) {
+              if (!(tracked.totalCoinAmount > 0)) {
+                  Object.assign(tracked, createPosState(), { activeDcaCount: 1,
+                      entryTime: Date.now(), lastDcaTime: Date.now(), lockedAtr: closedAtr });
+                  adoptedSides.push(side);
+              }
+              tracked.totalCoinAmount = Math.abs(remote.positionAmt);
+              tracked.averagePrice = remote.entryPrice;
+              tracked.totalUsdtAmount = tracked.totalCoinAmount * tracked.averagePrice;
+          } else if (tracked.totalCoinAmount > 0) {
+              // Only a successful authenticated response can confirm the stale short is already closed.
+              tracked.totalCoinAmount = tracked.totalUsdtAmount = tracked.averagePrice = tracked.activeDcaCount = tracked.totalFees = 0;
+              tracked.entryTime = null;
+              tracked.slMoved = false;
+          }
+      }
+      state.futuresPositions = repairPositions;
+      state.futuresPositionsUpdatedAt = Date.now();
+      state.isLongBotRunning = state.isShortBotRunning = false;
+  }
   config = next;
   try {
       saveData();
   } catch (e) {
       config = previous;
+      if (beforeRepair) {
+          Object.assign(state.long, beforeRepair.long);
+          Object.assign(state.short, beforeRepair.short);
+          state.futuresPositions = beforeRepair.positions;
+          state.futuresPositionsUpdatedAt = beforeRepair.updatedAt;
+          state.isLongBotRunning = beforeRepair.longRunning;
+          state.isShortBotRunning = beforeRepair.shortRunning;
+      }
       return res.status(500).json({ ok: false, error: '策略存档失败，未应用新配置，请检查服务器文件权限和磁盘空间' });
   }
-  res.json({ ok: true, config });
+  if (canRepairFuturesMode) {
+      state.logs.unshift(`[${new Date().toLocaleTimeString('zh-CN', {hour12:false})}] 合约模式已恢复，实时持仓已核对；自动开仓保持关闭${adoptedSides.length ? '；未记录持仓已接管，历史TP进度需另行核对' : ''}`);
+  }
+  res.json({ ok: true, config, state, modeRestored: canRepairFuturesMode, adoptedSides });
+  } finally {
+      configSaveBusy = false;
+  }
 });
 
 router.post('/refresh-atr', express.json(), requireAdmin, (req, res) => {
