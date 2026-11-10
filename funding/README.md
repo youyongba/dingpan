@@ -13,7 +13,7 @@
 - OKX：使用公开接口的 `oiUsd`。
 - Hyperliquid：只读 `POST https://api.hyperliquid.xyz/info`，请求体 `{"type":"metaAndAssetCtxs","dex":""}`。按 `universe` 中 BTC 的索引取得对应上下文，不假定 BTC 永远位于第一项。`funding` 是每小时费率，乘以 8 转成等效 8 小时；单边美元持仓为 `openInterest * markPx`，不再除二。
 - Hyperliquid BTC 以 USDC 抵押，其余三个市场使用 USDT，均按美元等值近似，不做稳定币汇率转换。权重使用标记价的持仓名义金额，不是 Hyperliquid 按预言机价格计算的实际资金费付款金额。
-- 所有四家均通过数值和可取得的时间校验才记录样本。任一家失败都不降低覆盖范围、不填零、不新增历史点。Hyperliquid 上下文不提供交易所快照时间，`asOf` 是本次请求观测时间，并标记 `timeSource: "request-observation"`；不能用它证明源数据的原生时间，不参与交易所原生时间戳间的 60 秒差值校验。
+- 所有四家均通过数值和可取得的时间校验才记录样本。任一家失败都不降低覆盖范围、不填零、不新增历史点。每个来源及请求完成时的数据年龄均不得超过 180 秒，交易所原生时间戳间差值也不得超过 180 秒，兼容各公开接口独立更新节奏，不再以 60 秒差值拒绝仍在有效期内的样本。Hyperliquid 上下文不提供交易所快照时间，`asOf` 是本次请求观测时间，并标记 `timeSource: "request-observation"`；不能用它证明源数据的原生时间，不参与交易所原生时间戳间的差值校验。
 - 这是自算版，不包含 CoinGlass 覆盖的其他交易所、币本位、USDC 永续等市场，不承诺数值完全一致。
 - 各家费率实际相同时，加权结果仍可能呈现平台，不人为增加波动。
 
@@ -49,6 +49,8 @@
 | errors | object[] | 数据源失败信息 |
 | storageError | string/null | 持久化失败提示 |
 | sampleIntervalMs | number | `90000` |
+
+采样异常时页面显示 `errors[].message` 的具体原因（包括聚合时间校验），保留上次有效值并标明非实时；后续完整采样通过后自动恢复，不补造暂停期间的历史点。
 
 `GET /api/status` 同时在 `weightedFunding` 字段返回上述结构。所有费率在接口和存档中保留原始小数，不四舍五入。
 

@@ -158,3 +158,13 @@ test('切换1小时窗口重新绘图，来源失败明确提示旧值非实时'
     assert.match(h.elements.get('weightedFundingStatus').textContent, /Bybit 数据异常/);
     assert.match(h.elements.get('weightedFundingStatus').textContent, /非实时/);
 });
+
+test('聚合失败显示具体原因且错误文案作为纯文本渲染', () => {
+    const h = harness();
+    h.renderWeightedFunding({ ...weightedFixture(), fresh: false,
+        errors: [{ exchange: 'aggregate', message: '跨交易所数据时间差过大 <详情>' }] });
+    const status = h.elements.get('weightedFundingStatus').textContent;
+    assert.match(status, /已暂停新增历史点/);
+    assert.match(status, /原因：聚合校验：跨交易所数据时间差过大 <详情>/);
+    assert.match(status, /非实时/);
+});

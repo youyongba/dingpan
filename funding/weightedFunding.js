@@ -104,8 +104,10 @@ function weightedAverage(sources) {
     }
     // Hyperliquid provides no snapshot timestamp; do not compare a request clock to exchange clocks.
     const exchangeTimes = sources.filter(item => item.timeSource !== 'request-observation').map(item => item.asOf);
-    if (Math.max(...exchangeTimes) - Math.min(...exchangeTimes) > 60000) {
-        throw new Error('跨交易所数据时间差过大');
+    // Public endpoints refresh independently; use the same bounded freshness window as row().
+    const spread = Math.max(...exchangeTimes) - Math.min(...exchangeTimes);
+    if (spread > MAX_AGE) {
+        throw new Error(`跨交易所数据时间差过大（${Math.ceil(spread / 1000)}秒，最多${MAX_AGE / 1000}秒）`);
     }
     const totalOpenInterestUsd = sources.reduce((sum, item) => sum + item.openInterestUsd, 0);
     const rate = sources.reduce((sum, item) => sum + item.rate8h * item.openInterestUsd, 0) / totalOpenInterestUsd;

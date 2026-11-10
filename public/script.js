@@ -115,7 +115,10 @@ function renderWeightedFunding(data) {
         statusEl.textContent = '加权数据尚未就绪，请确认后端已更新。';
     } else if (!data.fresh) {
         const failed = (data.errors || []).map(item => item.exchange).join(' / ');
+        const reasons = (data.errors || []).map(item =>
+            `${item.exchange === 'aggregate' ? '聚合校验' : item.exchange}：${item.message || '未知错误'}`).join('；');
         statusEl.textContent = (failed ? `${failed} 数据异常，已暂停新增历史点。` : `等待 ${venueCount} 家交易所的同步采样。`) +
+            (reasons ? `原因：${reasons}。` : '') +
             (validCurrent ? '当前显示为上次有效值，非实时。' : '');
     } else {
         statusEl.textContent = `固定覆盖 ${venueCount} 家 · 单边持仓合计 ${(current.totalOpenInterestUsd / 1e9).toFixed(3)}B USD · 更新 ${new Date(current.observedAt).toLocaleTimeString('zh-CN', { hour12: false })}`;

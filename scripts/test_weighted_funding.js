@@ -207,6 +207,59 @@ test('即使聚合刚更新，源数据超过时效也立即标记为非实时',
     assert.equal(h.service.getState().status, 'stale');
 });
 
+test('不同公开接口更新节奏超过60秒但仍在3分钟内时允许完整四家采样', async () => {
+    const h = harness();
+    h.service.get = async (url, body) => {
+        const data = await h.getJson(url, body);
+        if (url.includes('public/funding-rate?')) data.data[0].ts -= 120000;
+        return data;
+    };
+    const result = await h.service.poll();
+    assert.equal(result.fresh, true);
+    assert.equal(result.current.sources.length, 4);
+    assert.equal(result.history1h[0].samples, 1);
+    assert.equal(result.history8h[0].samples, 1);
+});
+
+test('OKX时间超过3分钟仍拒绝采样，保留旧值历史，恢复后继续采样', async () => {
+    const h = harness();
+    await h.service.poll();
+    const previous = h.service.current;
+    h.advance();
+    h.service.get = async (url, body) => {
+        const data = await h.getJson(url, body);
+        if (url.includes('public/funding-rate?')) data.data[0].ts -= 180001;
+        return data;
+    };
+    const result = await h.service.poll();
+    assert.equal(result.fresh, false);
+    assert.equal(result.errors[0].exchange, 'OKX');
+    assert.match(result.errors[0].message, /过期/);
+    assert.equal(result.current, previous);
+    assert.equal(result.history1h[0].samples, 1);
+    assert.equal(result.history8h[0].samples, 1);
+    h.service.get = h.getJson;
+    h.advance();
+    assert.equal((await h.service.poll()).fresh, true);
+    assert.equal(h.service.history1h[0].samples, 2);
+});
+
+test('跨来源时间差超过3分钟仍触发聚合保护并提供具体时间差', async () => {
+    const h = harness();
+    h.service.get = async (url, body) => {
+        const data = await h.getJson(url, body);
+        if (url.includes('market/tickers')) data.time += 60000;
+        if (url.includes('public/funding-rate?')) data.data[0].ts -= 120001;
+        return data;
+    };
+    const result = await h.service.poll();
+    assert.equal(result.current, null);
+    assert.equal(result.errors[0].exchange, 'aggregate');
+    assert.match(result.errors[0].message, /181秒，最多180秒/);
+    assert.equal(result.history1h.length, 0);
+    assert.equal(result.history8h.length, 0);
+});
+
 test('存档原子写入且重启保留历史，不伪造新的当前样本', async t => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'weighted-funding-test-'));
     t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
